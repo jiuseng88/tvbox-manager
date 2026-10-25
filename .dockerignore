@@ -1,0 +1,15 @@
+.git
+.gitignore
+data/
+.smoke-data/
+.smoke.log
+.smoke-sub.json
+*.md
+Dockerfile
+docker-compose.yml
+web/node_modules
+.vscode
+.idea
+tvbox-manager.exe
+tvbox-manager
+bin/

@@ -1,0 +1,428 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>TVBox 源维护系统</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<div id="app" v-cloak>
+
+  <!-- ===== 登录 ===== -->
+  <div class="login-mask" v-if="needLogin">
+    <div class="login-box">
+      <div class="login-title">📺 TVBox 源维护系统</div>
+      <div class="login-sub">请输入后台访问令牌（首次启动时打印在服务日志中）</div>
+      <input type="password" v-model="tokenInput" placeholder="访问令牌" @keyup.enter="login">
+      <button class="btn primary block" @click="login">进入后台</button>
+    </div>
+  </div>
+
+  <!-- ===== Toast ===== -->
+  <div class="toasts">
+    <div v-for="t in toasts" :key="t.id" class="toast" :class="t.type">{{ t.msg }}</div>
+  </div>
+
+  <div class="layout" v-else>
+    <!-- ===== 侧栏 ===== -->
+    <aside class="side">
+      <div class="logo">📺 源维护</div>
+      <nav>
+        <div class="nav-item" :class="{active: view==='dashboard'}" @click="view='dashboard'">📊 概览</div>
+        <div class="nav-item" :class="{active: view==='sources'}" @click="view='sources'">📋 源列表</div>
+        <div class="nav-item" :class="{active: view==='add'}" @click="view='add'">➕ 添加源</div>
+        <div class="nav-item" :class="{active: view==='settings'}" @click="view='settings'">⚙️ 设置</div>
+      </nav>
+      <div class="side-foot">
+        <button class="btn ghost block" @click="logout">退出登录</button>
+      </div>
+    </aside>
+
+    <main class="main">
+
+      <!-- ===== 概览 ===== -->
+      <section v-if="view==='dashboard'">
+        <h2>概览</h2>
+        <div class="cards">
+          <div class="card"><div class="card-num">{{ stats.total }}</div><div class="card-label">总源数</div></div>
+          <div class="card"><div class="card-num">{{ stats.enabled }}</div><div class="card-label">已启用</div></div>
+          <div class="card ok"><div class="card-num">{{ stats.ok }}</div><div class="card-label">可用</div></div>
+          <div class="card fail clickable" @click="view='sources'; filters.status='fail'; filters.page=1">
+            <div class="card-num">{{ stats.fail }}</div><div class="card-label">失效（点击筛选）</div>
+          </div>
+        </div>
+
+        <div class="panel">
+          <div class="panel-title">探活状态</div>
+          <div class="check-bar">
+            <span>上次检测：{{ stats.lastRunAt || '从未' }}</span>
+            <span>下次检测：{{ stats.nextRunAt || '—' }}</span>
+            <span class="grow"></span>
+            <button class="btn primary" @click="runCheckAll" :disabled="progress.running">立即全量检测</button>
+            <button class="btn" @click="loadStats(); loadProgress()">刷新</button>
+          </div>
+          <div class="progress-wrap" v-if="progress.running">
+            <div class="progress-text">检测中 {{ progress.done }} / {{ progress.total }}　✅ {{ progress.ok }}　❌ {{ progress.fail }}</div>
+            <div class="progress"><div class="progress-bar" :style="{width: (progress.total ? progress.done/progress.total*100 : 0) + '%'}"></div></div>
+          </div>
+        </div>
+
+        <div class="panel">
+          <div class="panel-title">分组分布</div>
+          <div class="bars">
+            <div class="bar-row" v-for="g in groupDist" :key="g.name">
+              <span class="bar-name">{{ g.name }}</span>
+              <div class="bar-track"><div class="bar-fill" :style="{width: (g.n / (groupDist[0]?.n||1) * 100) + '%'}"></div></div>
+              <span class="bar-num">{{ g.n }}</span>
+            </div>
+            <div v-if="!groupDist.length" class="empty">暂无数据，先去「添加源」</div>
+          </div>
+        </div>
+      </section>
+
+      <!-- ===== 源列表 ===== -->
+      <section v-if="view==='sources'">
+        <div class="list-head">
+          <h2>源列表 <span class="muted">（{{ total }} 条）</span></h2>
+          <button class="btn primary" @click="view='add'">➕ 添加源</button>
+        </div>
+        <div class="toolbar">
+          <input v-model="filters.keyword" placeholder="搜索名称 / 地址 / 备注" class="grow">
+          <select v-model="filters.type">
+            <option value="">全部类型</option><option value="single">单仓</option>
+            <option value="multi">多仓</option><option value="unknown">未知</option>
+          </select>
+          <select v-model="filters.status">
+            <option value="">全部状态</option><option value="ok">可用</option>
+            <option value="fail">失效</option><option value="unknown">未检测</option>
+          </select>
+          <select v-model="filters.group">
+            <option value="">全部分组</option>
+            <option v-for="g in groups" :key="g" :value="g">{{ g }}</option>
+          </select>
+          <select v-model="filters.enabled">
+            <option value="">启用+禁用</option><option value="true">仅启用</option><option value="false">仅禁用</option>
+          </select>
+          <select v-model="filters.sort">
+            <option value="">默认排序</option><option value="failFirst">失效置顶</option>
+          </select>
+        </div>
+
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th class="w-check"><input type="checkbox" :checked="list.length && checked.length===list.length"
+                  @change="checked = $event.target.checked ? list.map(s=>s.id) : []"></th>
+                <th>状态</th><th>名称</th><th>类型</th><th class="grow">地址</th>
+                <th>内容摘要</th><th>分组</th><th>最后检测</th><th>延迟</th><th>启用</th><th>操作</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr v-for="s in list" :key="s.id" :class="{disabled: !s.enabled}">
+                <td><input type="checkbox" :value="s.id" v-model="checked"></td>
+                <td>
+                  <span class="dot" :class="s.status" :title="s.checkMsg + '｜' + (s.latencyMs||0) + 'ms'"></span>
+                  <span v-if="s.status==='checking'" class="spinner"></span>
+                </td>
+                <td><a @click="openEdit(s)" class="link">{{ s.name }}</a></td>
+                <td><span class="tag" :class="s.type">{{ {single:'单仓',multi:'多仓',unknown:'未知',file:'文件'}[s.type] || s.type }}</span></td>
+                <td class="url-cell" :title="s.url" @click="copyText(s.url)">{{ s.url }}</td>
+                <td class="muted">{{ summary(s) }}</td>
+                <td><span class="tag group">{{ s.group }}</span></td>
+                <td :title="absTime(s.lastCheckAt)">{{ relTime(s.lastCheckAt) }}</td>
+                <td :class="{slow: s.latencyMs > 3000}">{{ s.status==='ok' ? s.latencyMs + 'ms' : '—' }}</td>
+                <td><switch-box :on="s.enabled" @toggle="toggleSource(s)"></switch-box></td>
+                <td class="ops">
+                  <button class="btn xs" @click="openPreview(s)">预览</button>
+                  <button class="btn xs" @click="checkOne(s)">检测</button>
+                  <button class="btn xs" @click="openEdit(s)">编辑</button>
+                  <button class="btn xs danger" @click="delSource(s)">删除</button>
+                </td>
+              </tr>
+              <tr v-if="!list.length"><td colspan="11" class="empty">没有匹配的源</td></tr>
+            </tbody>
+          </table>
+        </div>
+
+        <div class="pager" v-if="pages() > 1">
+          <button class="btn xs" :disabled="filters.page<=1" @click="filters.page--; loadSources()">上一页</button>
+          <span>{{ filters.page }} / {{ pages() }}</span>
+          <button class="btn xs" :disabled="filters.page>=pages()" @click="filters.page++; loadSources()">下一页</button>
+        </div>
+
+        <!-- 批量操作条 -->
+        <div class="batch-bar" v-if="batchBar">
+          已选 {{ checked.length }} 条
+          <button class="btn xs" @click="batchAction('enable')">批量启用</button>
+          <button class="btn xs" @click="batchAction('disable')">批量禁用</button>
+          <button class="btn xs" @click="batchAction('group')">批量移组</button>
+          <button class="btn xs primary" @click="batchCheck()">批量检测</button>
+          <button class="btn xs danger" @click="batchAction('delete')">批量删除</button>
+          <span class="grow"></span>
+          <button class="btn xs ghost" @click="checked=[]">取消</button>
+        </div>
+      </section>
+
+      <!-- ===== 添加源 ===== -->
+      <section v-if="view==='add'">
+        <h2>添加源</h2>
+        <div class="tabs">
+          <div class="tab" :class="{active: addTab==='single'}" @click="addTab='single'">单个添加</div>
+          <div class="tab" :class="{active: addTab==='paste'}" @click="addTab='paste'">批量粘贴</div>
+          <div class="tab" :class="{active: addTab==='file'}" @click="addTab='file'">文件导入</div>
+        </div>
+
+        <!-- 单个 -->
+        <div class="panel" v-if="addTab==='single'">
+          <div class="form-row">
+            <label>地址 *</label>
+            <div class="row grow">
+              <input v-model="singleForm.url" placeholder="http://example.com/tvbox.json（无协议自动补 http://，支持中文域名）" class="grow">
+              <button class="btn" @click="previewUrl" :disabled="singlePreviewing">{{ singlePreviewing ? '预览中…' : '预览' }}</button>
+            </div>
+          </div>
+          <div class="preview-inline" v-if="singlePreview">
+            <template v-if="!singlePreview.errMsg">
+              <span class="dot" :class="singlePreview.type ? 'ok' : 'fail'"></span>
+              <b>{{ {single:'单仓',multi:'多仓',unknown:'未知'}[singlePreview.type] || '未知' }}</b>
+              <span v-if="singlePreview.httpCode">HTTP {{ singlePreview.httpCode }}</span>
+              <span v-if="singlePreview.latencyMs">{{ singlePreview.latencyMs }}ms</span>
+              <span v-if="singlePreview.detail">
+                {{ singlePreview.detail.sites }} 站点 / {{ singlePreview.detail.lives }} 直播 / {{ singlePreview.detail.parses }} 解析
+                <template v-if="singlePreview.detail.subUrls">｜{{ singlePreview.detail.subUrls.length }} 子仓</template>
+              </span>
+              <span v-else class="muted">{{ singlePreview.errMsg || ' ' }}</span>
+            </template>
+            <span v-else class="err">✕ {{ singlePreview.errMsg }}</span>
+          </div>
+          <div class="form-row"><label>名称</label><input v-model="singleForm.name" placeholder="留空自动取域名"></div>
+          <div class="form-row"><label>分组</label>
+            <input v-model="singleForm.group" placeholder="默认" list="group-list">
+            <datalist id="group-list"><option v-for="g in groups" :key="g" :value="g"></option></datalist>
+          </div>
+          <div class="form-row"><label>备注</label><input v-model="singleForm.remark"></div>
+          <div class="form-row">
+            <label>启用</label>
+            <switch-box :on="singleForm.enabled" @toggle="singleForm.enabled = !singleForm.enabled"></switch-box>
+            <span class="muted">添加后自动探活一次</span>
+          </div>
+          <div class="form-actions"><button class="btn primary" @click="addSingle">添加</button></div>
+        </div>
+
+        <!-- 批量粘贴 -->
+        <div class="panel" v-if="addTab==='paste'">
+          <div class="muted" style="margin-bottom:8px">
+            每行一条，支持「名称,URL」「名称|URL」「纯 URL」混排，# 开头为注释。
+            当前分组：<b>{{ singleForm.group || '默认' }}</b>（在「单个添加」页修改）
+          </div>
+          <textarea v-model="batchText" rows="12" placeholder="肥猫,http://example.com/1.json&#10;饭太硬|http://example.com/2.json&#10;http://example.com/3.json"></textarea>
+          <div class="preview-inline" v-if="batchText.trim()">
+            已识别 <b>{{ batchParsed.count }}</b> 条，其中 <b>{{ batchParsed.dup }}</b> 条疑似重复（已存在的行导入时自动跳过）
+          </div>
+          <div class="form-actions"><button class="btn primary" @click="submitBatch">导入</button></div>
+          <div v-if="batchResult" class="result-box">
+            新增 {{ batchResult.added }} 条，跳过 {{ (batchResult.skipped||[]).length }} 条
+            <div v-for="sk in batchResult.skipped" :key="sk.url" class="muted">✕ {{ sk.url }} — {{ sk.reason }}</div>
+          </div>
+        </div>
+
+        <!-- 文件导入 -->
+        <div class="panel" v-if="addTab==='file'">
+          <label class="dropzone">
+            <input type="file" accept=".json,.txt" @change="handleFile" hidden>
+            📁 点击选择 .json / .txt 文件<br>
+            <span class="muted">.txt 每行一条（名称,URL / 名称|URL / 纯 URL）；.json 支持 {"urls":[…]} 与数组形态</span>
+          </label>
+          <div v-if="fileRows.length">
+            <div class="preview-inline">共 {{ fileRows.length }} 条，已勾选 {{ fileRows.filter(r=>r.checked).length }} 条</div>
+            <div class="table-wrap" style="max-height:320px">
+              <table>
+                <thead><tr><th></th><th>名称</th><th>地址</th><th>重复</th></tr></thead>
+                <tbody>
+                  <tr v-for="(r, i) in fileRows" :key="i" :class="{disabled: r.dup}">
+                    <td><input type="checkbox" v-model="r.checked"></td>
+                    <td>{{ r.name || '（自动取名）' }}</td>
+                    <td class="url-cell">{{ r.url }}</td>
+                    <td><span v-if="r.dup" class="tag fail">已存在</span></td>
+                  </tr>
+                </tbody>
+              </table>
+            </div>
+            <div class="form-actions"><button class="btn primary" @click="submitFileRows">导入勾选项</button></div>
+          </div>
+          <div v-if="fileResult" class="result-box">
+            新增 {{ fileResult.added }} 条，跳过 {{ (fileResult.skipped||[]).length }} 条
+          </div>
+        </div>
+      </section>
+
+      <!-- ===== 设置 ===== -->
+      <section v-if="view==='settings'">
+        <h2>设置</h2>
+
+        <div class="panel" v-if="config">
+          <div class="panel-title">探活</div>
+          <div class="form-grid">
+            <div class="form-row"><label>探活间隔（分钟）</label><input type="number" v-model.number="config.checkIntervalMinutes"></div>
+            <div class="form-row"><label>单请求超时（秒）</label><input type="number" v-model.number="config.checkTimeoutSeconds"></div>
+            <div class="form-row"><label>并发数</label><input type="number" v-model.number="config.checkConcurrency"></div>
+            <div class="form-row"><label>连续失败自动禁用（0=不自动）</label><input type="number" v-model.number="config.autoDisableAfterFails"></div>
+            <div class="form-row"><label>启动时立即检测</label>
+              <switch-box :on="config.startupCheck" @toggle="config.startupCheck = !config.startupCheck"></switch-box>
+            </div>
+            <div class="form-row"><label>递归检测多仓子仓</label>
+              <switch-box :on="config.checkSubUrls" @toggle="config.checkSubUrls = !config.checkSubUrls"></switch-box>
+              <span class="muted">开启后每轮耗时明显增加</span>
+            </div>
+            <div class="form-row"><label>跳过 TLS 证书校验</label>
+              <switch-box :on="config.insecureSkipVerify" @toggle="config.insecureSkipVerify = !config.insecureSkipVerify"></switch-box>
+              <span class="muted">大量源用自签/过期证书，默认跳过才能判断源本身可用性</span>
+            </div>
+            <div class="form-row"><label>探活 User-Agent</label><input v-model="config.userAgent"></div>
+            <div class="form-row"><label>监听端口 <span class="muted">(重启生效)</span></label><input type="number" v-model.number="config.port"></div>
+            <div class="form-row"><label>订阅路径 <span class="muted">(重启生效)</span></label><input v-model="config.subPath"></div>
+          </div>
+          <div class="muted" style="margin:8px 0">
+            ⚠️ 探活 UA 建议 okhttp/4.9.1 —— 大量源站对浏览器 UA 返回 403，模拟客户端 UA 才能拿到真实结果。
+          </div>
+          <div class="form-actions"><button class="btn primary" @click="saveConfig">保存设置</button></div>
+        </div>
+
+        <div class="panel">
+          <div class="panel-title">访问令牌</div>
+          <div class="muted" style="margin-bottom:8px">令牌用于管理后台与 /api/* 的访问；订阅接口不校验令牌。</div>
+          <div class="form-row"><label>当前令牌</label><input :value="config ? config.token : ''" disabled></div>
+          <div class="form-row"><label>旧令牌</label><input type="password" v-model="tokenForm.oldToken"></div>
+          <div class="form-row"><label>新令牌</label><input v-model="tokenForm.newToken" placeholder="至少 6 位"></div>
+          <div class="form-actions"><button class="btn" @click="changeToken">修改令牌</button></div>
+        </div>
+
+        <div class="panel">
+          <div class="panel-title">订阅地址（填入 TVBox / OK影视 / 影视仓等客户端）</div>
+          <div v-for="u in subUrls" :key="u.label" class="sub-row">
+            <div><div class="sub-label">{{ u.label }}</div><code class="sub-url">{{ u.url }}</code></div>
+            <button class="btn xs" @click="copyText(u.url)">复制</button>
+          </div>
+          <div class="muted">订阅接口无鉴权：任何知道地址的人都能拉到列表。公网部署请用反向代理加白名单或仅内网暴露。</div>
+        </div>
+
+        <div class="panel">
+          <div class="panel-title">数据备份</div>
+          <div class="form-actions">
+            <button class="btn" @click="exportBackup">导出备份（sources + config）</button>
+            <button class="btn" @click="importBackup">导入备份</button>
+          </div>
+        </div>
+      </section>
+    </main>
+  </div>
+
+  <!-- ===== 编辑弹窗 ===== -->
+  <div class="modal-mask" v-if="editSrc" @click.self="editSrc=null">
+    <div class="modal">
+      <div class="modal-title">编辑源<button class="close" @click="editSrc=null">✕</button></div>
+      <div class="form-row"><label>名称</label><input v-model="editSrc.name"></div>
+      <div class="form-row"><label>地址</label><input v-model="editSrc.url"></div>
+      <div class="form-row"><label>分组</label><input v-model="editSrc.group" list="group-list"></div>
+      <div class="form-row"><label>排序值</label><input type="number" v-model.number="editSrc.sort"><span class="muted">小的在前</span></div>
+      <div class="form-row"><label>备注</label><input v-model="editSrc.remark"></div>
+      <div class="form-actions">
+        <button class="btn" @click="editSrc=null">取消</button>
+        <button class="btn primary" @click="saveEdit">保存</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- ===== 源预览弹窗 ===== -->
+  <div class="modal-mask" v-if="preview" @click.self="preview=null">
+    <div class="modal wide">
+      <div class="modal-title">源预览：{{ preview.name }}<button class="close" @click="preview=null">✕</button></div>
+
+      <div v-if="preview.loading" class="preview-loading">
+        <span class="spinner big"></span> 正在实时拉取源内容…
+      </div>
+
+      <template v-else-if="preview.data">
+        <div class="pv-block">
+          <div class="pv-status">
+            <span class="dot big" :class="preview.data.type ? 'ok' : 'fail'"></span>
+            <b>{{ preview.data.type ? '可用' : '不可用' }}</b>
+            <span v-if="preview.data.httpCode">HTTP {{ preview.data.httpCode }}</span>
+            <span>{{ preview.data.latencyMs }}ms</span>
+            <span>{{ fmtBytes(preview.data.size) }}</span>
+            <span v-if="preview.data.errMsg" class="err">✕ {{ preview.data.errMsg }}</span>
+          </div>
+          <div class="kv"><span class="k">地址</span><code>{{ preview.data.url }}</code></div>
+          <div class="kv" v-if="preview.data.finalUrl && preview.data.finalUrl !== preview.data.url">
+            <span class="k">实际</span><code>{{ preview.data.finalUrl }}</code>
+            <button class="btn xs" @click="copyText(preview.data.finalUrl)">复制</button>
+          </div>
+          <div class="kv"><span class="k">类型</span>{{ {single:'单仓',multi:'多仓',unknown:'未知'}[preview.data.type] || preview.data.type }}
+            <span class="k" style="margin-left:16px">拉取时间</span>{{ absTime(preview.data.fetchedAt) }}</div>
+        </div>
+
+        <div class="pv-block" v-if="preview.data.detail">
+          <div class="pv-sub">内容统计</div>
+          <div>站点 <b>{{ preview.data.detail.sites }}</b> ｜ 直播 <b>{{ preview.data.detail.lives }}</b> ｜ 解析 <b>{{ preview.data.detail.parses }}</b></div>
+          <div class="kv" v-if="preview.data.detail.spider"><span class="k">Spider</span>
+            <code class="truncate">{{ preview.data.detail.spider }}</code>
+            <button class="btn xs" @click="copyText(preview.data.detail.spider)">复制</button></div>
+          <div class="kv" v-if="preview.data.detail.wallpaper"><span class="k">壁纸</span>
+            <code class="truncate">{{ preview.data.detail.wallpaper }}</code>
+            <button class="btn xs" @click="copyText(preview.data.detail.wallpaper)">复制</button></div>
+        </div>
+
+        <div class="pv-block" v-if="preview.data.detail && preview.data.detail.siteNames && preview.data.detail.siteNames.length">
+          <div class="pv-sub">站点清单（{{ preview.data.detail.siteNames.length }}）</div>
+          <div class="chips">
+            <span class="chip" v-for="n in (siteNamesExpanded ? preview.data.detail.siteNames : preview.data.detail.siteNames.slice(0, 30))" :key="n">{{ n }}</span>
+            <a class="link" v-if="preview.data.detail.siteNames.length > 30" @click="siteNamesExpanded = !siteNamesExpanded">
+              {{ siteNamesExpanded ? '收起' : '+' + (preview.data.detail.siteNames.length - 30) + ' 展开' }}</a>
+          </div>
+        </div>
+
+        <div class="pv-block" v-if="preview.data.detail && preview.data.detail.subUrls && preview.data.detail.subUrls.length">
+          <div class="pv-sub">子仓列表（{{ preview.data.detail.subUrls.length }}）</div>
+          <div class="table-wrap" style="max-height:220px">
+            <table>
+              <thead><tr><th>名称</th><th class="grow">地址</th><th v-if="preview.data.detail.subUrls.some(u=>u.status)">探活</th></tr></thead>
+              <tbody>
+                <tr v-for="u in preview.data.detail.subUrls" :key="u.url">
+                  <td>{{ u.name || '—' }}</td>
+                  <td class="url-cell">{{ u.url }}</td>
+                  <td v-if="preview.data.detail.subUrls.some(x=>x.status)">
+                    <span class="dot" :class="u.status && u.status.startsWith('ok') ? 'ok' : (u.status ? 'fail' : '')"></span>
+                    <span class="muted">{{ u.status }}</span>
+                  </td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+        </div>
+
+        <div class="pv-block">
+          <div class="pv-sub row">
+            原始 JSON（{{ fmtBytes(preview.data.size) }}{{ preview.data.truncated ? '，已截断' : '' }}）
+            <span class="grow"></span>
+            <button class="btn xs" @click="copyText(preview.data.raw)">复制</button>
+            <button class="btn xs" @click="rawExpanded = !rawExpanded">{{ rawExpanded ? '折叠' : '展开' }}</button>
+          </div>
+          <pre class="raw" v-if="rawExpanded">{{ preview.data.raw }}</pre>
+        </div>
+      </template>
+
+      <div v-else class="preview-loading err">
+        ✕ 拉取失败：{{ preview.error }}
+        <button class="btn xs" @click="retryPreview()">重试</button>
+      </div>
+    </div>
+  </div>
+
+</div>
+
+<script src="vendor/vue.global.prod.js"></script>
+<script src="app.js"></script>
+</body>
+</html>
