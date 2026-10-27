@@ -9,6 +9,7 @@ import (
 
 	"tvbox-manager/internal/checker"
 	"tvbox-manager/internal/model"
+	"tvbox-manager/internal/parser"
 	"tvbox-manager/internal/store"
 )
 
@@ -159,11 +160,12 @@ func (s *Scheduler) runAll(trigger string) {
 	defer s.finish()
 
 	sources := s.st.AllSources()
+	flats := s.st.ListFlats(store.FlatFilter{}) // 已排除隐藏项；订阅实际下发的就是这批
 	now := time.Now()
 	s.progMu.Lock()
 	s.prog = model.CheckProgress{
 		Running:   true,
-		Total:     len(sources),
+		Total:     len(sources) + len(flats),
 		Done:      0,
 		OK:        0,
 		Fail:      0,
@@ -173,7 +175,7 @@ func (s *Scheduler) runAll(trigger string) {
 	}
 	s.progMu.Unlock()
 
-	if len(sources) == 0 {
+	if len(sources) == 0 && len(flats) == 0 {
 		end := time.Now()
 		s.progMu.Lock()
 		s.prog.Running = false
@@ -189,6 +191,24 @@ func (s *Scheduler) runAll(trigger string) {
 	var persistMu sync.Mutex
 	persistCount := 0
 
+	// 单仓父源平铺出来的站点源与父源是同一个地址，缓存本轮结果按 URL 复用，
+	// 避免对同一地址重复请求（88 条站点源里大部分都命中父源结果）。
+	var resMu sync.Mutex
+	resByURL := make(map[string]*checker.Result, len(sources))
+
+	// 攒批落盘：每 20 条一次，避免高频 IO
+	persistEvery := func() {
+		persistMu.Lock()
+		persistCount++
+		need := persistCount%20 == 0
+		persistMu.Unlock()
+		if need {
+			if err := s.st.Save(); err != nil {
+				log.Printf("[scheduler] 中途落盘失败: %v", err)
+			}
+		}
+	}
+
 	for i := range sources {
 		src := sources[i]
 		wg.Add(1)
@@ -203,6 +223,11 @@ func (s *Scheduler) runAll(trigger string) {
 			}()
 
 			res, _ := s.Checker().Fetch(ctx, src.URL, false)
+			if u, err := parser.Normalize(src.URL); err == nil && res != nil {
+				resMu.Lock()
+				resByURL[u] = res
+				resMu.Unlock()
+			}
 			_ = s.st.UpdateCheckResult(src.ID, store.CheckResult{
 				Status: res.Status, HTTPCode: res.HTTPCode, LatencyMs: res.LatencyMs,
 				Msg: res.Msg, Type: res.Type, Detail: res.Detail,
@@ -232,19 +257,60 @@ func (s *Scheduler) runAll(trigger string) {
 			}
 			s.progMu.Unlock()
 
-			// 批量落盘：每 20 个一次，避免高频 IO
-			persistMu.Lock()
-			persistCount++
-			need := persistCount%20 == 0
-			persistMu.Unlock()
-			if need {
-				if err := s.st.Save(); err != nil {
-					log.Printf("[scheduler] 中途落盘失败: %v", err)
-				}
-			}
+			persistEvery()
 		}()
 	}
 	wg.Wait()
+
+	// ---- 第二阶段：站点源探活（订阅实际下发的内容，之前完全没被探活过）----
+	if len(flats) > 0 {
+		var fwg sync.WaitGroup
+		for i := range flats {
+			f := flats[i]
+			resMu.Lock()
+			cached, hit := resByURL[f.URL]
+			resMu.Unlock()
+			if hit {
+				// 同地址已在本轮探过，直接复用结果，不重复请求
+				s.saveFlatResult(f.ID, cached, cfgSnap.AutoDisableAfterFails)
+				s.progMu.Lock()
+				s.prog.Done++
+				if cached.Status == model.StatusOK {
+					s.prog.OK++
+				} else {
+					s.prog.Fail++
+				}
+				s.progMu.Unlock()
+				persistEvery()
+				continue
+			}
+			fwg.Add(1)
+			sem <- struct{}{}
+			go func() {
+				defer fwg.Done()
+				defer func() { <-sem }()
+				defer func() {
+					if r := recover(); r != nil {
+						log.Printf("[scheduler] 站点源探活 panic（已隔离）: %v", r)
+					}
+				}()
+				res, _ := s.Checker().Fetch(ctx, f.URL, false)
+				s.saveFlatResult(f.ID, res, cfgSnap.AutoDisableAfterFails)
+
+				s.progMu.Lock()
+				s.prog.Done++
+				if res.Status == model.StatusOK {
+					s.prog.OK++
+				} else {
+					s.prog.Fail++
+				}
+				s.progMu.Unlock()
+
+				persistEvery()
+			}()
+		}
+		fwg.Wait()
+	}
 
 	if err := s.st.Save(); err != nil {
 		log.Printf("[scheduler] 写入数据失败: %v", err)
@@ -253,9 +319,29 @@ func (s *Scheduler) runAll(trigger string) {
 	s.progMu.Lock()
 	s.prog.Running = false
 	s.prog.LastRunAt = &end
+	prog := s.prog
 	s.progMu.Unlock()
-	log.Printf("[scheduler] 探活完成: %d 源, %d 可用, %d 失败 (触发: %s)",
-		s.prog.Total, s.prog.OK, s.prog.Fail, trigger)
+	log.Printf("[scheduler] 探活完成: 父源 %d + 站点源 %d，共 %d 可用 / %d 失败 (触发: %s)",
+		len(sources), len(flats), prog.OK, prog.Fail, trigger)
+}
+
+// saveFlatResult 站点源探活结果回写（内存），并按配置在连续失败后自动禁用
+func (s *Scheduler) saveFlatResult(id string, res *checker.Result, autoDisableFails int) {
+	if res == nil {
+		return
+	}
+	_ = s.st.UpdateFlatCheckResult(id, store.CheckResult{
+		Status: res.Status, HTTPCode: res.HTTPCode, LatencyMs: res.LatencyMs,
+		Msg: res.Msg, Type: res.Type, Detail: res.Detail,
+	}, false)
+	if res.Status == model.StatusFail && autoDisableFails > 0 {
+		s.st.UpdateFlatInMemory(id, func(fp *model.FlatSource) {
+			if fp.FailCount >= autoDisableFails && fp.Enabled {
+				fp.Enabled = false
+				fp.CheckMsg += "；已自动禁用"
+			}
+		})
+	}
 }
 
 // probeSubURLs 多仓子仓探活（并发减半），结果回写 Detail.SubURLs[].Status

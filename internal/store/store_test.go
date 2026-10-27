@@ -278,7 +278,7 @@ func TestMergeAll(t *testing.T) {
 	st := newTestStore(t)
 	_ = st.Add(&model.Source{Name: "A", URL: "http://a/1.json"})
 	added, skipped := st.MergeAll([]model.Source{
-		{Name: "A2", URL: "http://a/1.json"},           // 重复跳过
+		{Name: "A2", URL: "http://a/1.json"},               // 重复跳过
 		{Name: "B", URL: "http://b/2.json", Enabled: true}, // 新增
 	})
 	if added != 1 || skipped != 1 {

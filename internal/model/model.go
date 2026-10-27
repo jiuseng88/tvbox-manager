@@ -4,9 +4,9 @@ import "time"
 
 // 仓库类型
 const (
-	TypeSingle  = "single"  // 单仓：含 sites/lives/parses
-	TypeMulti   = "multi"   // 多仓：含 urls 数组
-	TypeFile    = "file"    // 由本地 JSON 文件导入
+	TypeSingle  = "single" // 单仓：含 sites/lives/parses
+	TypeMulti   = "multi"  // 多仓：含 urls 数组
+	TypeFile    = "file"   // 由本地 JSON 文件导入
 	TypeUnknown = "unknown"
 )
 
@@ -20,14 +20,14 @@ const (
 
 // Source 一条仓库源记录
 type Source struct {
-	ID        string    `json:"id"`
-	Name      string    `json:"name"`
-	URL       string    `json:"url"`
-	Type      string    `json:"type"`   // single / multi / file / unknown
-	Group     string    `json:"group"`  // 分组，默认 "默认"
-	Enabled   bool      `json:"enabled"` // 是否进入订阅输出，默认 true
-	Remark    string    `json:"remark"`
-	Sort      int       `json:"sort"`   // 订阅接口中的排序，小的在前
+	ID      string `json:"id"`
+	Name    string `json:"name"`
+	URL     string `json:"url"`
+	Type    string `json:"type"`    // single / multi / file / unknown
+	Group   string `json:"group"`   // 分组，默认 "默认"
+	Enabled bool   `json:"enabled"` // 是否进入订阅输出，默认 true
+	Remark  string `json:"remark"`
+	Sort    int    `json:"sort"` // 订阅接口中的排序，小的在前
 
 	CreatedAt time.Time `json:"createdAt"`
 	UpdatedAt time.Time `json:"updatedAt"`
@@ -55,10 +55,10 @@ type Detail struct {
 	Parses    int      `json:"parses"`
 	SiteNames []string `json:"siteNames"` // 最多保留 50 个
 	LiveNames []string `json:"liveNames"`
-	Spider    string   `json:"spider"`    // jar 地址
+	Spider    string   `json:"spider"` // jar 地址
 	Wallpaper string   `json:"wallpaper"`
-	SubURLs   []SubURL `json:"subUrls"`   // 多仓时的子仓列表
-	RawSize   int      `json:"rawSize"`   // 原始 JSON 字节数
+	SubURLs   []SubURL `json:"subUrls"` // 多仓时的子仓列表
+	RawSize   int      `json:"rawSize"` // 原始 JSON 字节数
 }
 
 // SubURL 多仓中的子仓条目
@@ -71,16 +71,17 @@ type SubURL struct {
 // FlatSource 平铺站点源：由源列表自动展开生成（多仓拆为子仓、单仓并入自身），
 // 订阅接口的数据源。同一 URL 出现在多个父源时共享同一条，ParentIDs 记录全部来源。
 type FlatSource struct {
-	ID        string    `json:"id"`
-	Name      string    `json:"name"`
-	URL       string    `json:"url"`      // 归一化后全局唯一
-	ParentIDs []string  `json:"parentIds"` // 关联父源 ID
-	Enabled   bool      `json:"enabled"`   // 自身开关；实际生效 = 自身 && 任一父源启用
-	Group     string    `json:"group"`
-	Remark    string    `json:"remark"`
-	Sort      int       `json:"sort"`       // 创建时继承父源排序，可单独改
-	NameAuto  bool      `json:"nameAuto"`  // 名称是否随父源同步（手动改名后置 false）
-	GroupAuto bool      `json:"groupAuto"` // 分组是否随父源同步（手动改组后置 false）
+	ID        string   `json:"id"`
+	Name      string   `json:"name"`
+	URL       string   `json:"url"`              // 归一化后全局唯一
+	ParentIDs []string `json:"parentIds"`        // 关联父源 ID
+	Enabled   bool     `json:"enabled"`          // 自身开关；实际生效 = 自身 && 任一父源启用
+	Hidden    bool     `json:"hidden,omitempty"` // 已删除（隐藏）：不参与列表/订阅，父源再次同步也不复活
+	Group     string   `json:"group"`
+	Remark    string   `json:"remark"`
+	Sort      int      `json:"sort"`      // 创建时继承父源排序，可单独改
+	NameAuto  bool     `json:"nameAuto"`  // 名称是否随父源同步（手动改名后置 false）
+	GroupAuto bool     `json:"groupAuto"` // 分组是否随父源同步（手动改组后置 false）
 
 	CreatedAt time.Time `json:"createdAt"`
 	UpdatedAt time.Time `json:"updatedAt"`
@@ -135,7 +136,7 @@ type CheckProgress struct {
 	Error     string     `json:"error,omitempty"`
 }
 
-// Stats 概览统计
+// Stats 概览统计（Total/Enabled/OK... 为父源口径；Flat* 为订阅实际输出的站点源口径）
 type Stats struct {
 	Total     int    `json:"total"`
 	Enabled   int    `json:"enabled"`
@@ -147,20 +148,26 @@ type Stats struct {
 	Groups    int    `json:"groups"`
 	LastRunAt string `json:"lastRunAt"`
 	NextRunAt string `json:"nextRunAt"`
+
+	FlatTotal   int `json:"flatTotal"`
+	FlatEnabled int `json:"flatEnabled"`
+	FlatOK      int `json:"flatOk"`
+	FlatFail    int `json:"flatFail"`
+	FlatUnknown int `json:"flatUnknown"`
 }
 
 // DefaultConfig 内置默认值
 func DefaultConfig() Config {
 	return Config{
-		Token:                "",
-		Port:                 8080,
-		SubPath:              "/sub",
-		CheckIntervalMinutes: 360,
-		CheckTimeoutSeconds:  15,
-		CheckConcurrency:     10,
-		StartupCheck:         false,
+		Token:                 "",
+		Port:                  8080,
+		SubPath:               "/sub",
+		CheckIntervalMinutes:  360,
+		CheckTimeoutSeconds:   15,
+		CheckConcurrency:      10,
+		StartupCheck:          false,
 		AutoDisableAfterFails: 0,
-		InsecureSkipVerify:   true,
-		CheckSubURLs:         false,
+		InsecureSkipVerify:    true,
+		CheckSubURLs:          false,
 	}
 }

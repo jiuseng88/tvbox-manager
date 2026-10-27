@@ -54,6 +54,22 @@
         </div>
 
         <div class="panel">
+          <div class="panel-title">订阅输出（站点源 / 平铺层）</div>
+          <div class="cards">
+            <div class="card"><div class="card-num">{{ stats.flatTotal }}</div><div class="card-label">站点源总数</div></div>
+            <div class="card"><div class="card-num">{{ stats.flatEnabled }}</div><div class="card-label">实际下发</div></div>
+            <div class="card ok"><div class="card-num">{{ stats.flatOk }}</div><div class="card-label">可用</div></div>
+            <div class="card fail clickable" @click="view='flats'">
+              <div class="card-num">{{ stats.flatFail }}</div><div class="card-label">失效（点击查看）</div>
+            </div>
+          </div>
+          <div class="muted" style="margin-top:8px">
+            「{{ config.subPath || '/sub' }}」实际下发的就是这批条目：多仓已拆成单仓、单仓直接并入；
+            「实际下发」= 自身启用且至少有一个父源启用。上面的卡是父源口径，这里是订阅真实条数。
+          </div>
+        </div>
+
+        <div class="panel">
           <div class="panel-title">探活状态</div>
           <div class="check-bar">
             <span>上次检测：{{ stats.lastRunAt || '从未' }}</span>

@@ -85,7 +85,11 @@
       };
 
       /* ---- 概览 ---- */
-      const stats = ref({ total: 0, enabled: 0, ok: 0, fail: 0, unknown: 0, single: 0, multi: 0, groups: 0 });
+      const stats = ref({
+        total: 0, enabled: 0, ok: 0, fail: 0, unknown: 0, single: 0, multi: 0, groups: 0,
+        // 站点源（订阅实际下发层）口径
+        flatTotal: 0, flatEnabled: 0, flatOk: 0, flatFail: 0, flatUnknown: 0
+      });
       const progress = ref({ running: false, total: 0, done: 0, ok: 0, fail: 0 });
       const groupDist = ref([]);
       let pollTimer = null;
@@ -381,12 +385,15 @@
       }
       async function batchCheckFlats() {
         const ids = [...flatChecked.value];
-        for (const id of ids) {
-          try { await api("POST", "/api/flats/" + id + "/check"); } catch (e) { /* 单条失败继续 */ }
-        }
-        toast(`已发起 ${ids.length} 条检测`, "ok");
-        flatChecked.value = [];
-        setTimeout(loadFlats, 3000);
+        if (!ids.length) { toast("先勾选要检测的站点源", "warn"); return; }
+        try {
+          // 一次请求完成全部检测（后端并发受限 + 攒批落盘），不再逐条打 N 个接口
+          const r = await api("POST", "/api/flats/batch-check", { ids });
+          toast(`已发起 ${r.count} 条检测`, "ok");
+          flatChecked.value = [];
+          flatList.value.forEach(f => { if (ids.includes(f.id)) f.status = "checking"; });
+          setTimeout(loadFlats, 3000);
+        } catch (e) { toast(e.message, "error"); }
       }
       const editFlat = ref(null);
       function openFlatEdit(f) { editFlat.value = { ...f, _id: f.id }; }

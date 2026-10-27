@@ -101,6 +101,15 @@ func dataOf(t *testing.T, body map[string]interface{}) map[string]interface{} {
 	return d
 }
 
+// num 取 JSON 数字字段，缺失时返回 -1（便于失败信息直接看到整个响应）
+func num(m map[string]interface{}, key string) int {
+	v, ok := m[key].(float64)
+	if !ok {
+		return -1
+	}
+	return int(v)
+}
+
 // ---------- 鉴权 ----------
 
 func TestAuth(t *testing.T) {
@@ -385,30 +394,39 @@ func TestCheckRunAndProgress(t *testing.T) {
 	if code != 409 {
 		t.Fatalf("运行中再触发应 409: %d", code)
 	}
-	// 轮询进度直到完成
+	// 轮询进度直到完成。
+	// 注意：total 现在包含「父源 + 站点源」——平铺层才是订阅实际下发的内容，
+	// 所以探活也必须覆盖；同地址的站点源会复用父源本轮结果，不额外发请求。
 	deadline := time.Now().Add(10 * time.Second)
-	done := false
+	var p map[string]interface{}
+	finished := false
 	for time.Now().Before(deadline) {
 		_, body := e.doJSON("GET", "/api/check/status", nil)
-		p := dataOf(t, body)
-		if p["running"] == false && p["done"].(float64) == 2 {
-			done = true
-			if p["ok"].(float64) != 1 {
-				t.Fatalf("ok 计数应 1（slow 返回结构不完整判失败）: %v", p)
-			}
+		p = dataOf(t, body)
+		total, _ := p["total"].(float64)
+		done, _ := p["done"].(float64)
+		if p["running"] == false && total > 0 && done == total {
+			finished = true
 			break
 		}
 		time.Sleep(100 * time.Millisecond)
 	}
-	if !done {
-		t.Fatal("探活未在限时内完成")
+	if !finished {
+		t.Fatalf("探活未在限时内完成，最后进度: %v", p)
+	}
+	// 2 父源 + 2 站点源（与父源同地址）→ 共 4 条；mock 可用、slow 判失败 → 各 2 条
+	if p["total"].(float64) != 4 || p["ok"].(float64) != 2 || p["fail"].(float64) != 2 {
+		t.Fatalf("进度计数错误（父源+站点源共 4 条）: %v", p)
 	}
 
-	// 结果已回写
+	// 结果已回写：父源统计不变，站点源口径单独上报
 	_, body = e.doJSON("GET", "/api/stats", nil)
 	st := dataOf(t, body)
 	if st["total"].(float64) != 2 || st["ok"].(float64) != 1 {
 		t.Fatalf("统计错误: %v", st)
+	}
+	if num(st, "flatTotal") != 2 || num(st, "flatOk") != 1 || num(st, "flatFail") != 1 {
+		t.Fatalf("站点源统计错误（应已探活）: %v", st)
 	}
 }
 

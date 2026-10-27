@@ -33,52 +33,63 @@ func cloneFlat(f model.FlatSource) model.FlatSource {
 	return c
 }
 
-// effectiveEnabledLocked 自身启用 && 任一父源启用
-func (s *Store) effectiveEnabledLocked(f model.FlatSource) bool {
-	if !f.Enabled || len(f.ParentIDs) == 0 {
+// effectiveEnabled 自身启用 && 未隐藏 && 任一父源启用
+func effectiveEnabled(f model.FlatSource, idx map[string]model.Source) bool {
+	if !f.Enabled || f.Hidden || len(f.ParentIDs) == 0 {
 		return false
 	}
 	for _, pid := range f.ParentIDs {
-		for i := range s.data.Sources {
-			if s.data.Sources[i].ID == pid && s.data.Sources[i].Enabled {
-				return true
-			}
+		if p, ok := idx[pid]; ok && p.Enabled {
+			return true
 		}
 	}
 	return false
 }
 
-// parentNamesLocked 父源名称列表（父源已删除的引用忽略）
-func (s *Store) parentNamesLocked(f model.FlatSource) []string {
+// parentNames 父源名称列表（父源已删除的引用忽略）
+func parentNames(f model.FlatSource, idx map[string]model.Source) []string {
 	names := make([]string, 0, len(f.ParentIDs))
 	for _, pid := range f.ParentIDs {
-		for i := range s.data.Sources {
-			if s.data.Sources[i].ID == pid {
-				names = append(names, s.data.Sources[i].Name)
-				break
-			}
+		if p, ok := idx[pid]; ok {
+			names = append(names, p.Name)
 		}
 	}
 	return names
 }
 
-// computeFlatLocked 回填运行时字段（有效启用、父源名称）
-func (s *Store) computeFlatLocked(f *model.FlatSource) {
-	f.EffectiveEnabled = s.effectiveEnabledLocked(*f)
-	f.ParentNames = s.parentNamesLocked(*f)
+// srcIndexLocked 父源 ID → 父源 索引；避免每条站点源都线性扫一遍 sources
+func (s *Store) srcIndexLocked() map[string]model.Source {
+	idx := make(map[string]model.Source, len(s.data.Sources))
+	for i := range s.data.Sources {
+		idx[s.data.Sources[i].ID] = s.data.Sources[i]
+	}
+	return idx
 }
 
-// ListFlats 过滤 + 排序后返回副本
-func (s *Store) ListFlats(f FlatFilter) []model.FlatSource {
-	s.mu.RLock()
+// computeFlatLocked 回填运行时字段（有效启用、父源名称）
+func (s *Store) computeFlatLocked(f *model.FlatSource, idx map[string]model.Source) {
+	f.EffectiveEnabled = effectiveEnabled(*f, idx)
+	f.ParentNames = parentNames(*f, idx)
+}
+
+// flatsViewLocked 克隆站点源并回填运行时字段，跳过已隐藏项
+func (s *Store) flatsViewLocked() ([]model.FlatSource, map[string]model.Source) {
+	idx := s.srcIndexLocked()
 	out := make([]model.FlatSource, 0, len(s.data.Flats))
 	for i := range s.data.Flats {
+		if s.data.Flats[i].Hidden {
+			continue
+		}
 		fc := cloneFlat(s.data.Flats[i])
-		s.computeFlatLocked(&fc)
+		fc.EffectiveEnabled = effectiveEnabled(fc, idx)
+		fc.ParentNames = parentNames(fc, idx)
 		out = append(out, fc)
 	}
-	s.mu.RUnlock()
+	return out, idx
+}
 
+// applyFlatsFilter 就地过滤
+func applyFlatsFilter(out []model.FlatSource, f FlatFilter) []model.FlatSource {
 	if f.Keyword != "" {
 		kw := strings.ToLower(f.Keyword)
 		out = filterFlats(out, func(x model.FlatSource) bool {
@@ -98,28 +109,33 @@ func (s *Store) ListFlats(f FlatFilter) []model.FlatSource {
 			return (f.Enabled == "true") == x.EffectiveEnabled
 		})
 	}
+	return out
+}
 
+func sortFlats(out []model.FlatSource, f FlatFilter) {
 	if f.SortBy != "" {
 		// 表头排序优先
 		sortByHeader(out, func(a, b model.FlatSource) int { return cmpFlat(a, b, f.SortBy) }, f.SortDir == "desc", flatFallback)
-	} else {
-		sort.SliceStable(out, func(i, j int) bool {
-			if f.Sort == "failFirst" {
-				fi, fj := statusRank(out[i].Status), statusRank(out[j].Status)
-				if fi != fj {
-					return fi < fj
-				}
-			}
-			if out[i].Sort != out[j].Sort {
-				return out[i].Sort < out[j].Sort
-			}
-			if out[i].Name != out[j].Name {
-				return out[i].Name < out[j].Name
-			}
-			return out[i].URL < out[j].URL // 兜底定序：保证跨请求顺序稳定，翻页不跳动
-		})
+		return
 	}
+	sort.SliceStable(out, func(i, j int) bool {
+		if f.Sort == "failFirst" {
+			fi, fj := statusRank(out[i].Status), statusRank(out[j].Status)
+			if fi != fj {
+				return fi < fj
+			}
+		}
+		if out[i].Sort != out[j].Sort {
+			return out[i].Sort < out[j].Sort
+		}
+		if out[i].Name != out[j].Name {
+			return out[i].Name < out[j].Name
+		}
+		return out[i].URL < out[j].URL // 兜底定序：保证跨请求顺序稳定，翻页不跳动
+	})
+}
 
+func pageFlats(out []model.FlatSource, f FlatFilter) []model.FlatSource {
 	if f.Page > 0 && f.Size > 0 {
 		start := (f.Page - 1) * f.Size
 		if start >= len(out) {
@@ -132,6 +148,25 @@ func (s *Store) ListFlats(f FlatFilter) []model.FlatSource {
 		out = out[start:end]
 	}
 	return out
+}
+
+// ListFlats 过滤 + 排序后返回副本
+func (s *Store) ListFlats(f FlatFilter) []model.FlatSource {
+	out, total := s.ListFlatsPage(f)
+	_ = total
+	return out
+}
+
+// ListFlatsPage 一次快照同时得到当前页与总数，避免列表/计数各跑一遍全量
+func (s *Store) ListFlatsPage(f FlatFilter) ([]model.FlatSource, int) {
+	s.mu.RLock()
+	out, _ := s.flatsViewLocked()
+	s.mu.RUnlock()
+
+	out = applyFlatsFilter(out, f)
+	total := len(out)
+	sortFlats(out, f)
+	return pageFlats(out, f), total
 }
 
 func filterFlats(in []model.FlatSource, keep func(model.FlatSource) bool) []model.FlatSource {
@@ -150,14 +185,14 @@ func (s *Store) CountFlats(f FlatFilter) int {
 	return len(s.ListFlats(f))
 }
 
-// GetFlat 单条副本
+// GetFlat 单条副本（含已隐藏项，供内部按 ID 操作）
 func (s *Store) GetFlat(id string) (model.FlatSource, bool) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	for i := range s.data.Flats {
 		if s.data.Flats[i].ID == id {
 			fc := cloneFlat(s.data.Flats[i])
-			s.computeFlatLocked(&fc)
+			s.computeFlatLocked(&fc, s.srcIndexLocked())
 			return fc, true
 		}
 	}
@@ -206,7 +241,7 @@ func (s *Store) UpdateFlat(id string, fn func(*model.FlatSource)) error {
 			updated := cloneFlat(s.data.Flats[i])
 			fn(&updated)
 			updated.UpdatedAt = time.Now()
-			s.computeFlatLocked(&updated)
+			s.computeFlatLocked(&updated, s.srcIndexLocked())
 			s.data.Flats[i] = updated
 			return s.flush()
 		}
@@ -218,11 +253,12 @@ func (s *Store) UpdateFlat(id string, fn func(*model.FlatSource)) error {
 func (s *Store) UpdateFlatInMemory(id string, fn func(*model.FlatSource)) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	idx := s.srcIndexLocked()
 	for i := range s.data.Flats {
 		if s.data.Flats[i].ID == id {
 			updated := cloneFlat(s.data.Flats[i])
 			fn(&updated)
-			s.computeFlatLocked(&updated)
+			s.computeFlatLocked(&updated, idx)
 			s.data.Flats[i] = updated
 			return
 		}
@@ -252,29 +288,40 @@ func (s *Store) UpdateFlatCheckResult(id string, r CheckResult, persist bool) er
 	return nil
 }
 
-// DeleteFlats 删除站点源，返回实际删除数
-func (s *Store) DeleteFlats(ids []string) int {
+// DeleteFlats 删除站点源并立即落盘。
+//
+// 删除是「隐藏 + 禁用」而非物理删除：站点源由父源同步生成，若物理删除，
+// 下次父源同步会按同一 URL 重新生成，用户删掉的条目就会复活且 ID 变化。
+// 置 Hidden 后同步逻辑会跳过它，列表/计数/订阅也一律不再输出。
+func (s *Store) DeleteFlats(ids []string) (int, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	return s.deleteFlatsLocked(ids)
+	n := s.deleteFlatsLocked(ids)
+	if n == 0 {
+		return 0, nil
+	}
+	return n, s.flush()
 }
 
+// deleteFlatsLocked 就地置隐藏标记，返回本次由可见变为隐藏的条数。
+// 调用方需持有写锁并负责落盘。
 func (s *Store) deleteFlatsLocked(ids []string) int {
 	want := make(map[string]bool, len(ids))
 	for _, id := range ids {
 		want[id] = true
 	}
-	kept := s.data.Flats[:0]
 	n := 0
-	for _, x := range s.data.Flats {
-		if want[x.ID] {
-			n++
+	now := time.Now()
+	for i := range s.data.Flats {
+		f := &s.data.Flats[i]
+		if !want[f.ID] || f.Hidden {
 			continue
 		}
-		kept = append(kept, x)
-	}
-	if n > 0 {
-		s.data.Flats = kept
+		f.Hidden = true
+		f.Enabled = false
+		f.EffectiveEnabled = false
+		f.UpdatedAt = now
+		n++
 	}
 	return n
 }
@@ -292,7 +339,8 @@ func (s *Store) BatchFlats(ids []string, action, group string) (int, error) {
 		}
 		return n, nil
 	case "delete":
-		return s.DeleteFlats(ids), nil
+		n, err := s.DeleteFlats(ids)
+		return n, err
 	case "group":
 		if group == "" {
 			return 0, fmt.Errorf("改组需要 group 参数")
@@ -336,36 +384,44 @@ func removeID(ids []string, id string) []string {
 
 // upsertFlatLocked 按归一化 URL 创建/更新站点源。已存在时补父引用；
 // forceName=true（单仓父源）时名称随父源同步，否则首次出现的名称优先（不覆盖）；
-// GroupAuto 时同步父源分组。
-func (s *Store) upsertFlatLocked(parent model.Source, rawURL, name string, forceName bool) {
+// GroupAuto 时同步父源分组。返回是否产生了实际变化（用于决定要不要落盘）。
+//
+// 已隐藏（用户删除过）的 URL 直接跳过：父源再次同步也不复活，
+// 同时不改动它的任何字段，保证用户意图不被覆盖。
+func (s *Store) upsertFlatLocked(parent model.Source, rawURL, name string, forceName bool) bool {
 	norm, err := parser.Normalize(rawURL)
 	if err != nil {
-		return
+		return false
 	}
 	group := parent.Group
 	if group == "" {
 		group = "默认"
 	}
 	for i := range s.data.Flats {
-		if s.data.Flats[i].URL != norm {
+		f := &s.data.Flats[i]
+		if f.URL != norm {
 			continue
 		}
-		f := &s.data.Flats[i]
+		if f.Hidden {
+			return false
+		}
+		changed := false
 		if !containsID(f.ParentIDs, parent.ID) {
 			f.ParentIDs = append(f.ParentIDs, parent.ID)
-			f.UpdatedAt = time.Now()
+			changed = true
 		}
-		if name != "" && (f.Name == "" || (forceName && f.NameAuto)) {
-			if f.Name != name {
-				f.Name = name
-			}
-			f.UpdatedAt = time.Now()
+		if name != "" && f.Name != name && (f.Name == "" || (forceName && f.NameAuto)) {
+			f.Name = name
+			changed = true
 		}
 		if f.GroupAuto && f.Group != group {
 			f.Group = group
+			changed = true
+		}
+		if changed {
 			f.UpdatedAt = time.Now()
 		}
-		return
+		return changed
 	}
 	now := time.Now()
 	if name == "" {
@@ -385,15 +441,17 @@ func (s *Store) upsertFlatLocked(parent model.Source, rawURL, name string, force
 		CreatedAt: now,
 		UpdatedAt: now,
 	})
+	return true
 }
 
-// syncFlatsForSourceLocked 父源变化后重建其关联站点源：
+// syncFlatsForSourceLocked 父源变化后对齐其关联站点源：
 //   - 单仓/未知：自身地址生成一条站点源；
 //   - 多仓：Detail.SubURLs 全部展开；
-//   - 期望集合中已消失的旧关联（多仓内容变化、父源改地址）→ 摘除父引用，无父则删除。
+//   - 期望集合中已消失的旧关联（多仓内容变化、父源改地址）→ 摘除父引用，无父则删。
 //
-// 调用方需持有写锁。
-func (s *Store) syncFlatsForSourceLocked(src model.Source) {
+// 返回是否发生实际变化。调用方需持有写锁。
+func (s *Store) syncFlatsForSourceLocked(src model.Source) bool {
+	changed := false
 	expect := map[string]bool{}
 	if src.Type == model.TypeMulti && src.Detail != nil {
 		for _, su := range src.Detail.SubURLs {
@@ -406,57 +464,103 @@ func (s *Store) syncFlatsForSourceLocked(src model.Source) {
 			if name == "" {
 				name = src.Name
 			}
-			s.upsertFlatLocked(src, norm, name, false) // 多仓子仓：首次名称优先
+			if s.upsertFlatLocked(src, norm, name, false) { // 多仓子仓：首次名称优先
+				changed = true
+			}
 		}
 	} else {
 		norm, err := parser.Normalize(src.URL)
 		if err != nil {
-			return
+			return changed
 		}
-			expect[norm] = true
-			s.upsertFlatLocked(src, norm, src.Name, true) // 单仓父源：名称/分组始终随父源同步
+		expect[norm] = true
+		if s.upsertFlatLocked(src, norm, src.Name, true) { // 单仓父源：名称/分组始终随父源同步
+			changed = true
+		}
 	}
 
+	if s.pruneFlatsLocked(src.ID, func(f model.FlatSource) bool {
+		return containsID(f.ParentIDs, src.ID) && !expect[f.URL]
+	}) {
+		changed = true
+	}
+	return changed
+}
+
+// pruneFlatsLocked 摘除命中 drop 的站点源上的 parentID 引用；
+// 无父引用且未隐藏的物理删除。隐藏项即使没有父引用也保留为墓碑，
+// 避免父源再次同步时复活被删除的条目。返回是否发生实际变化。
+func (s *Store) pruneFlatsLocked(parentID string, drop func(model.FlatSource) bool) bool {
 	kept := s.data.Flats[:0]
+	changed := false
+	now := time.Now()
 	for _, f := range s.data.Flats {
-		if containsID(f.ParentIDs, src.ID) && !expect[f.URL] {
-			f.ParentIDs = removeID(f.ParentIDs, src.ID)
-			f.UpdatedAt = time.Now()
-			if len(f.ParentIDs) == 0 {
-				continue // 不再被任何父源引用，删除
+		if drop(f) {
+			changed = true
+			f.ParentIDs = removeID(f.ParentIDs, parentID)
+			f.UpdatedAt = now
+			if len(f.ParentIDs) == 0 && !f.Hidden {
+				continue // 不再被任何父源引用 → 物理删除
 			}
 		}
 		kept = append(kept, f)
 	}
-	s.data.Flats = kept
-}
-
-// removeSourceFlatRefsLocked 父源删除后摘除引用
-func (s *Store) removeSourceFlatRefsLocked(sourceID string) {
-	kept := s.data.Flats[:0]
-	for _, f := range s.data.Flats {
-		if containsID(f.ParentIDs, sourceID) {
-			f.ParentIDs = removeID(f.ParentIDs, sourceID)
-			if len(f.ParentIDs) == 0 {
-				continue
-			}
-		}
-		kept = append(kept, f)
+	if changed {
+		s.data.Flats = kept
 	}
-	s.data.Flats = kept
+	return changed
 }
 
-// ResyncAllFlats 全量重建站点源（启动 / replace 导入后调用）
+// removeSourceFlatRefsLocked 父源删除后摘除引用，返回是否发生变化
+func (s *Store) removeSourceFlatRefsLocked(sourceID string) bool {
+	return s.pruneFlatsLocked(sourceID, func(f model.FlatSource) bool {
+		return containsID(f.ParentIDs, sourceID)
+	})
+}
+
+// ResyncAllFlats 与全部父源对账（启动 / replace 导入后调用）
 func (s *Store) ResyncAllFlats() {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.resyncAllFlatsLocked()
 }
 
-func (s *Store) resyncAllFlatsLocked() {
-	s.data.Flats = nil
+// resyncAllFlatsLocked 对账式重建站点源：以现有 Flats 为底，按父源期望集合
+// 补齐新增、摘除孤儿，保留已有条目的 ID / 启用状态 / 名称 / 备注 / 探活结果。
+// 只在内容真的变化时落盘，避免每次启动都重写 data.json 和刷掉用户修改。
+func (s *Store) resyncAllFlatsLocked() bool {
+	changed := false
 	for i := range s.data.Sources {
-		s.syncFlatsForSourceLocked(s.data.Sources[i])
+		if s.syncFlatsForSourceLocked(s.data.Sources[i]) {
+			changed = true
+		}
 	}
-	_ = s.flush()
+	// 兜底清理：引用的父源已全部消失的条目（replace 导入、手工改数据后会出现）
+	idx := s.srcIndexLocked()
+	dropped := false
+	kept := make([]model.FlatSource, 0, len(s.data.Flats))
+	for _, f := range s.data.Flats {
+		if !f.Hidden && !hasAliveParent(f, idx) {
+			dropped = true
+			continue
+		}
+		kept = append(kept, f)
+	}
+	if dropped {
+		s.data.Flats = kept
+		changed = true
+	}
+	if changed {
+		_ = s.flush()
+	}
+	return changed
+}
+
+func hasAliveParent(f model.FlatSource, idx map[string]model.Source) bool {
+	for _, pid := range f.ParentIDs {
+		if _, ok := idx[pid]; ok {
+			return true
+		}
+	}
+	return false
 }

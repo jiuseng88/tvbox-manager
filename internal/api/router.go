@@ -22,6 +22,9 @@ type API struct {
 	reqN atomic.Int64
 }
 
+// maxPageSize 列表接口单页上限（sources 与 flats 统一，避免口径不一致）
+const maxPageSize = 500
+
 // New webFS 必须是「以 web 目录为根」的文件系统（prod: embed 子目录，dev: os.DirFS）。
 func New(st *store.Store, sch *scheduler.Scheduler, version string, webFS fs.FS) *API {
 	return &API{st: st, sch: sch, ver: version, web: webFS}
@@ -60,6 +63,7 @@ func (a *API) Router() http.Handler {
 	apiMux.HandleFunc("POST /api/flats/{id}/toggle", a.handleFlatToggle)
 	apiMux.HandleFunc("POST /api/flats/{id}/check", a.handleFlatCheck)
 	apiMux.HandleFunc("POST /api/flats/batch-action", a.handleFlatBatchAction)
+	apiMux.HandleFunc("POST /api/flats/batch-check", a.handleFlatCheckBatch)
 
 	// 预览与探活
 	apiMux.HandleFunc("GET /api/preview", a.handlePreviewURL)

@@ -125,10 +125,10 @@ func TestNormalize(t *testing.T) {
 	cases := []struct {
 		in, want string
 	}{
-		{"example.com/1.json", "http://example.com/1.json"},                 // 补协议
-		{"  HTTP://Example.COM:8080/a.json  ", "http://example.com:8080/a.json"}, // 大小写
+		{"example.com/1.json", "http://example.com/1.json"},                          // 补协议
+		{"  HTTP://Example.COM:8080/a.json  ", "http://example.com:8080/a.json"},     // 大小写
 		{"http://example.com/Path/Keeps.Case", "http://example.com/Path/Keeps.Case"}, // path 大小写保留
-		{"肥猫.live/1.json", "http://xn--xn--/1.json"},                        // IDN→punycode（占位断言见下方真实校验）
+		{"肥猫.live/1.json", "http://xn--xn--/1.json"},                                 // IDN→punycode（占位断言见下方真实校验）
 	}
 	for i, c := range cases {
 		got, err := Normalize(c.in)

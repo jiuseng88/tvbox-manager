@@ -3,8 +3,10 @@ package api
 import (
 	"context"
 	"fmt"
+	"log"
 	"net/http"
 	"strings"
+	"sync"
 
 	"tvbox-manager/internal/model"
 	"tvbox-manager/internal/store"
@@ -28,14 +30,13 @@ func (a *API) handleFlatList(w http.ResponseWriter, r *http.Request) {
 	if f.Size <= 0 {
 		f.Size = 50
 	}
-	if f.Size > 2000 {
-		f.Size = 2000
+	if f.Size > maxPageSize {
+		f.Size = maxPageSize
 	}
 	if f.Page <= 0 {
 		f.Page = 1
 	}
-	total := a.st.CountFlats(f)
-	list := a.st.ListFlats(f)
+	list, total := a.st.ListFlatsPage(f) // 一次快照拿到本页 + 总数，避免全量算两遍
 	if list == nil {
 		list = []model.FlatSource{}
 	}
@@ -97,7 +98,12 @@ func (a *API) handleFlatUpdate(w http.ResponseWriter, r *http.Request) {
 
 func (a *API) handleFlatDelete(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
-	if n := a.st.DeleteFlats([]string{id}); n == 0 {
+	n, err := a.st.DeleteFlats([]string{id})
+	if err != nil {
+		serverError(w, err)
+		return
+	}
+	if n == 0 {
 		notFound(w, "站点源不存在")
 		return
 	}
@@ -153,4 +159,110 @@ func (a *API) handleFlatBatchAction(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	ok(w, map[string]interface{}{"affected": n})
+}
+
+// checkBatchReq 站点源批量探活请求：传 ids 或 all=true（当前过滤结果）
+type checkBatchReq struct {
+	IDs     []string `json:"ids"`
+	All     bool     `json:"all"`
+	Keyword string   `json:"keyword"`
+	Status  string   `json:"status"`
+	Group   string   `json:"group"`
+	Enabled string   `json:"enabled"`
+}
+
+// handleFlatCheckBatch 站点源批量探活（异步）。
+// 之前前端「批量检测」是逐条打 /check，N 条 = N 个请求 + N 次全量落盘，
+// 这里一次请求搞定：并发受限、内存回写、攒批落盘。
+func (a *API) handleFlatCheckBatch(w http.ResponseWriter, r *http.Request) {
+	var req checkBatchReq
+	if !decodeJSON(w, r, &req) {
+		return
+	}
+
+	var targets []model.FlatSource
+	if req.All {
+		targets = a.st.ListFlats(store.FlatFilter{
+			Keyword: req.Keyword, Status: req.Status, Group: req.Group, Enabled: req.Enabled,
+		})
+	} else {
+		if len(req.IDs) == 0 {
+			badRequest(w, "ids 不能为空（或用 all=true 检测全部）")
+			return
+		}
+		if len(req.IDs) > 2000 {
+			badRequest(w, "单次最多 2000 条")
+			return
+		}
+		seen := make(map[string]bool, len(req.IDs))
+		for _, id := range req.IDs {
+			if seen[id] {
+				continue
+			}
+			seen[id] = true
+			f, found := a.st.GetFlat(id)
+			if !found || f.Hidden {
+				continue
+			}
+			targets = append(targets, f)
+		}
+	}
+	if len(targets) == 0 {
+		badRequest(w, "没有可检测的站点源")
+		return
+	}
+
+	for _, f := range targets {
+		a.st.UpdateFlatInMemory(f.ID, func(fp *model.FlatSource) { fp.Status = model.StatusChecking })
+	}
+	go a.runFlatCheckBatch(targets)
+	ok(w, map[string]interface{}{"count": len(targets), "status": model.StatusChecking})
+}
+
+func (a *API) runFlatCheckBatch(targets []model.FlatSource) {
+	cfg := a.st.Config()
+	conc := cfg.CheckConcurrency
+	if conc <= 0 {
+		conc = 5
+	}
+	ck := a.sch.Checker()
+	sem := make(chan struct{}, conc)
+	var wg sync.WaitGroup
+	var mu sync.Mutex
+	done := 0
+
+	for _, t := range targets {
+		t := t
+		wg.Add(1)
+		sem <- struct{}{}
+		go func() {
+			defer wg.Done()
+			defer func() { <-sem }()
+			defer func() {
+				if rec := recover(); rec != nil {
+					log.Printf("[api] 站点源批量探活 panic（已隔离）: %v", rec)
+				}
+			}()
+			res, _ := ck.Fetch(context.Background(), t.URL, false)
+			_ = a.st.UpdateFlatCheckResult(t.ID, store.CheckResult{
+				Status: res.Status, HTTPCode: res.HTTPCode, LatencyMs: res.LatencyMs,
+				Msg: res.Msg, Type: res.Type, Detail: res.Detail,
+			}, false)
+
+			mu.Lock()
+			done++
+			save := done%20 == 0
+			mu.Unlock()
+			if save {
+				if err := a.st.Save(); err != nil {
+					log.Printf("[api] 批量探活中途落盘失败: %v", err)
+				}
+			}
+		}()
+	}
+	wg.Wait()
+	if err := a.st.Save(); err != nil {
+		log.Printf("[api] 批量探活落盘失败: %v", err)
+	}
+	log.Printf("[api] 站点源批量探活完成: %d 条", len(targets))
 }

@@ -31,8 +31,8 @@ func (a *API) handleSourceList(w http.ResponseWriter, r *http.Request) {
 	if f.Size <= 0 {
 		f.Size = 50
 	}
-	if f.Size > 500 {
-		f.Size = 500
+	if f.Size > maxPageSize {
+		f.Size = maxPageSize
 	}
 	if f.Page <= 0 {
 		f.Page = 1
@@ -74,11 +74,11 @@ func (a *API) handleSourceAdd(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	src := model.Source{
-		Name:  strings.TrimSpace(req.Name),
-		URL:   norm,
-		Group: strings.TrimSpace(req.Group),
+		Name:   strings.TrimSpace(req.Name),
+		URL:    norm,
+		Group:  strings.TrimSpace(req.Group),
 		Remark: strings.TrimSpace(req.Remark),
-		Type:  model.TypeUnknown,
+		Type:   model.TypeUnknown,
 		Status: model.StatusUnknown,
 	}
 	if src.Name == "" {
@@ -274,6 +274,7 @@ func jsonLooksLike(s string) bool {
 	t := strings.TrimLeft(s, " \t\r\n\ufeff")
 	return strings.HasPrefix(t, "{") || strings.HasPrefix(t, "[")
 }
+
 // importFromJSON 解析三种 JSON 形态为行数组
 func importFromJSON(text string) ([]string, error) {
 	trimmed := strings.TrimSpace(text)
@@ -342,12 +343,12 @@ func (a *API) handleSourceGet(w http.ResponseWriter, r *http.Request) {
 }
 
 type updateSourceReq struct {
-	Name   *string `json:"name"`
-	URL    *string `json:"url"`
-	Group  *string `json:"group"`
-	Remark *string `json:"remark"`
-	Enabled *bool  `json:"enabled"`
-	Sort   *int    `json:"sort"`
+	Name    *string `json:"name"`
+	URL     *string `json:"url"`
+	Group   *string `json:"group"`
+	Remark  *string `json:"remark"`
+	Enabled *bool   `json:"enabled"`
+	Sort    *int    `json:"sort"`
 }
 
 func (a *API) handleSourceUpdate(w http.ResponseWriter, r *http.Request) {

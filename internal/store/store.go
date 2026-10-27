@@ -66,7 +66,8 @@ func New(dataDir string) (*Store, error) {
 	if err := s.loadData(); err != nil {
 		return nil, err
 	}
-	// 启动时按源列表全量重建站点源（老数据无 flats 字段也能自动生成）
+	// 启动时与源列表对账一次：补齐缺失的站点源、清理孤儿，
+	// 已有条目（含用户的启用状态/改名/备注/探活结果）原样保留。
 	s.resyncAllFlatsLocked()
 	return s, nil
 }
@@ -698,6 +699,22 @@ func (s *Store) Stats(lastRun, nextRun string) model.Stats {
 		groups[g] = true
 	}
 	st.Groups = len(groups)
+
+	// 站点源（订阅实际输出层）口径：概览要能看出真正会下发的条数
+	for _, f := range s.ListFlats(FlatFilter{}) {
+		st.FlatTotal++
+		if f.EffectiveEnabled {
+			st.FlatEnabled++
+		}
+		switch f.Status {
+		case model.StatusOK:
+			st.FlatOK++
+		case model.StatusFail:
+			st.FlatFail++
+		default:
+			st.FlatUnknown++
+		}
+	}
 	return st
 }
 
