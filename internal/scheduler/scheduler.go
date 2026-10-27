@@ -336,7 +336,8 @@ func (s *Scheduler) saveFlatResult(id string, res *checker.Result, autoDisableFa
 	}, false)
 	if res.Status == model.StatusFail && autoDisableFails > 0 {
 		s.st.UpdateFlatInMemory(id, func(fp *model.FlatSource) {
-			if fp.FailCount >= autoDisableFails && fp.Enabled {
+			// 与父源同口径：看「连续失败」而不是累计失败，成功一次就清零
+			if fp.FailStreak >= autoDisableFails && fp.Enabled {
 				fp.Enabled = false
 				fp.CheckMsg += "；已自动禁用"
 			}

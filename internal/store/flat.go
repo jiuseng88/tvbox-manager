@@ -265,7 +265,7 @@ func (s *Store) UpdateFlatInMemory(id string, fn func(*model.FlatSource)) {
 	}
 }
 
-// UpdateFlatCheckResult 站点源探活结果回写
+// UpdateFlatCheckResult 站点源探活结果回写（连续失败/成功次数口径与父源一致）
 func (s *Store) UpdateFlatCheckResult(id string, r CheckResult, persist bool) error {
 	apply := func(fp *model.FlatSource) {
 		now := time.Now()
@@ -276,8 +276,12 @@ func (s *Store) UpdateFlatCheckResult(id string, r CheckResult, persist bool) er
 		fp.CheckMsg = r.Msg
 		fp.CheckCount++
 		if r.Status == model.StatusOK {
+			fp.OKStreak++
+			fp.FailStreak = 0
 			fp.LastOKAt = &now
 		} else {
+			fp.FailStreak++
+			fp.OKStreak = 0
 			fp.FailCount++
 		}
 	}

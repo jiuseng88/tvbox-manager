@@ -94,6 +94,8 @@ type FlatSource struct {
 	CheckMsg    string     `json:"checkMsg"`
 	CheckCount  int        `json:"checkCount"` // 累计检测次数
 	FailCount   int        `json:"failCount"`  // 累计检测不通次数
+	FailStreak  int        `json:"failStreak"` // 连续失败次数（成功即清零，自动禁用看这个）
+	OKStreak    int        `json:"okStreak"`   // 连续成功次数
 	LastOKAt    *time.Time `json:"lastOkAt,omitempty"`
 
 	// —— 运行时计算字段（每次列表查询重算，不作为持久化依据）——

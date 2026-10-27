@@ -187,3 +187,32 @@ func TestResyncDropsOrphanFlats(t *testing.T) {
 		t.Errorf("残留了旧父源的站点源: %s", flats[0].URL)
 	}
 }
+
+// 站点源探活计数：连续失败次数成功即清零（自动禁用看的是连续，不是累计）
+func TestFlatCheckStreakReset(t *testing.T) {
+	st := newTestStore(t)
+	src := model.Source{Name: "源", URL: "http://s.example/1.json", Enabled: true}
+	if err := st.Add(&src); err != nil {
+		t.Fatal(err)
+	}
+	f := st.ListFlats(FlatFilter{})[0]
+
+	for i := 0; i < 2; i++ {
+		_ = st.UpdateFlatCheckResult(f.ID, CheckResult{Status: model.StatusFail}, false)
+	}
+	_ = st.UpdateFlatCheckResult(f.ID, CheckResult{Status: model.StatusOK, HTTPCode: 200}, false)
+	got, _ := st.GetFlat(f.ID)
+	if got.FailStreak != 0 || got.OKStreak != 1 {
+		t.Errorf("成功后连续失败应清零: failStreak=%d okStreak=%d", got.FailStreak, got.OKStreak)
+	}
+	if got.FailCount != 2 || got.CheckCount != 3 {
+		t.Errorf("累计计数不应被清零: failCount=%d checkCount=%d", got.FailCount, got.CheckCount)
+	}
+
+	// 再失败一次：streak 从 1 开始，而不是接着累计的 2
+	_ = st.UpdateFlatCheckResult(f.ID, CheckResult{Status: model.StatusFail}, false)
+	got, _ = st.GetFlat(f.ID)
+	if got.FailStreak != 1 {
+		t.Errorf("连续失败应从 1 重新计: %d", got.FailStreak)
+	}
+}

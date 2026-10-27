@@ -161,7 +161,10 @@
                 <td :title="absTime(s.lastCheckAt)">{{ relTime(s.lastCheckAt) }}</td>
                 <td :class="{slow: s.latencyMs > 3000}">{{ s.status==='ok' ? s.latencyMs + 'ms' : '—' }}</td>
                 <td class="muted">{{ s.checkCount || 0 }}</td>
-                <td :class="{failnum: s.failCount > 0}">{{ s.failCount || 0 }}</td>
+                <td :class="{failnum: s.failStreak > 0}"
+                  :title="'连续失败 ' + (s.failStreak||0) + ' 次 / 累计 ' + (s.failCount||0) + ' 次'">
+                  {{ s.failCount || 0 }}<span v-if="s.failStreak > 1" class="muted">（连{{ s.failStreak }}）</span>
+                </td>
                 <td><switch-box :on="s.enabled" @toggle="toggleSource(s)"></switch-box></td>
                 <td class="ops">
                   <button class="btn xs" @click="openPreview(s)">预览</button>
@@ -263,7 +266,10 @@
                 <td :title="absTime(f.lastCheckAt)">{{ relTime(f.lastCheckAt) }}</td>
                 <td :class="{slow: f.latencyMs > 3000}">{{ f.status==='ok' ? f.latencyMs + 'ms' : '—' }}</td>
                 <td class="muted">{{ f.checkCount || 0 }}</td>
-                <td :class="{failnum: f.failCount > 0}">{{ f.failCount || 0 }}</td>
+                <td :class="{failnum: f.failStreak > 0}"
+                  :title="'连续失败 ' + (f.failStreak||0) + ' 次 / 累计 ' + (f.failCount||0) + ' 次'">
+                  {{ f.failCount || 0 }}<span v-if="f.failStreak > 1" class="muted">（连{{ f.failStreak }}）</span>
+                </td>
                 <td><switch-box :on="f.enabled" @toggle="toggleFlat(f)"></switch-box></td>
                 <td class="ops">
                   <button class="btn xs" @click="openFlatPreview(f)">预览</button>
@@ -313,7 +319,7 @@
             <div class="form-row"><label>探活间隔（分钟）</label><input type="number" v-model.number="config.checkIntervalMinutes"></div>
             <div class="form-row"><label>单请求超时（秒）</label><input type="number" v-model.number="config.checkTimeoutSeconds"></div>
             <div class="form-row"><label>并发数</label><input type="number" v-model.number="config.checkConcurrency"></div>
-            <div class="form-row"><label>连续失败自动禁用（0=不自动）</label><input type="number" v-model.number="config.autoDisableAfterFails"></div>
+            <div class="form-row"><label>连续失败自动禁用（0=不自动）<span class="muted">父源与所有仓源同口径，成功一次即清零</span></label><input type="number" v-model.number="config.autoDisableAfterFails"></div>
             <div class="form-row"><label>启动时立即检测</label>
               <switch-box :on="config.startupCheck" @toggle="config.startupCheck = !config.startupCheck"></switch-box>
             </div>
