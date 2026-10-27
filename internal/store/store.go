@@ -35,6 +35,8 @@ type Filter struct {
 	Page    int
 	Size    int
 	Sort    string // 默认 sort+name；"failFirst" 失效置顶
+	SortBy  string // 表头排序键（优先于 Sort）：status/name/type/url/group/latency/checks/fails/time/enabled/sort
+	SortDir string // 表头排序方向：asc / desc
 }
 
 // CheckResult 单源探活结果回写
@@ -64,6 +66,8 @@ func New(dataDir string) (*Store, error) {
 	if err := s.loadData(); err != nil {
 		return nil, err
 	}
+	// 启动时按源列表全量重建站点源（老数据无 flats 字段也能自动生成）
+	s.resyncAllFlatsLocked()
 	return s, nil
 }
 
@@ -71,18 +75,39 @@ func New(dataDir string) (*Store, error) {
 
 func (s *Store) loadConfig() error {
 	cfg := model.DefaultConfig()
-	if b, err := os.ReadFile(s.cfgFile); err == nil {
-		if err := json.Unmarshal(b, &cfg); err != nil {
-			// 配置损坏不阻塞启动：备份后用默认值
+	var present map[string]bool // config.json 中已有的键，用于判断环境变量是否还需要提供初值
+
+	if b, err := os.ReadFile(s.cfgFile); err != nil {
+		if !os.IsNotExist(err) {
+			return err
+		}
+		// 首次启动：下面由环境变量填充初值
+	} else {
+		var raw map[string]json.RawMessage
+		fromFile := model.DefaultConfig()
+		e := json.Unmarshal(b, &raw)
+		if e == nil {
+			e = json.Unmarshal(b, &fromFile)
+		}
+		if e != nil {
+			// 配置损坏不阻塞启动：备份后用默认值 + 环境变量重建
 			bak := s.cfgFile + ".corrupt." + time.Now().Format("20060102150405")
 			_ = os.Rename(s.cfgFile, bak)
-			fmt.Printf("[store] config.json 解析失败，已备份到 %s，使用默认配置: %v\n", bak, err)
-			cfg = model.DefaultConfig()
+			fmt.Printf("[store] config.json 解析失败，已备份到 %s，用默认值重建: %v\n", bak, e)
+		} else {
+			cfg = fromFile
+			present = make(map[string]bool, len(raw))
+			for k := range raw {
+				present[k] = true
+			}
 		}
-	} else if !os.IsNotExist(err) {
-		return err
 	}
-	applyEnv(&cfg)
+
+	// 环境变量只在「配置文件里没有该项」时生效（首次启动的初始值）；
+	// 之后一律以 config.json（后台「设置」页）为准，可在容器里改完配置再重启。
+	applyEnv(&cfg, present)
+	sanitizeConfig(&cfg)
+
 	firstRun := false
 	if cfg.Token == "" {
 		cfg.Token = randToken(16)
@@ -117,73 +142,147 @@ func (s *Store) Config() model.Config {
 	return *s.cfg
 }
 
-// UpdateConfig 修改配置并落盘（Token 为空表示不修改）
+// UpdateConfig 修改配置并落盘（Token 为空表示不修改）。
+// 这里刻意不再套用环境变量：配置落盘后即以此为准，后台改的端口/令牌/订阅路径不会被覆盖。
 func (s *Store) UpdateConfig(cfg model.Config) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if cfg.Token == "" || cfg.Token == "**" {
 		cfg.Token = s.cfg.Token
 	}
-	applyEnv(&cfg) // 环境变量始终最高优先级
+	sanitizeConfig(&cfg)
 	s.cfg = &cfg
 	return s.saveConfigLocked()
 }
 
-// UpdateToken 单独修改令牌
-func (s *Store) UpdateToken(newToken string) error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	s.cfg.Token = newToken
-	return s.saveConfigLocked()
-}
+// applyEnv 用环境变量填充配置，仅在 config.json 尚未包含该键时生效（即「首次启动的初始值」）。
+// present 为配置文件里已有的键；设置 ENV_OVERRIDE=1/true 可强制让环境变量覆盖配置文件。
+func applyEnv(cfg *model.Config, present map[string]bool) {
+	type binding struct {
+		env string
+		key string // 对应的 config.json 字段名
+		val string
+		set func(*model.Config, string)
+	}
+	var bindings []binding
 
-// 环境变量 > config.json > 内置默认值
-func applyEnv(cfg *model.Config) {
-	set := func(env string, fn func(string)) {
-		if v, ok := os.LookupEnv(env); ok && strings.TrimSpace(v) != "" {
-			fn(strings.TrimSpace(v))
+	add := func(env, key string, set func(*model.Config, string)) {
+		v, ok := os.LookupEnv(env)
+		if !ok {
+			return
+		}
+		if v = strings.TrimSpace(v); v != "" {
+			bindings = append(bindings, binding{env: env, key: key, val: v, set: set})
 		}
 	}
-	seti := func(env string, fn func(int)) {
-		set(env, func(v string) {
+	addi := func(env, key string, set func(*model.Config, int)) {
+		add(env, key, func(c *model.Config, v string) {
 			if n, err := strconv.Atoi(v); err == nil {
-				fn(n)
+				set(c, n)
 			}
 		})
 	}
-	setb := func(env string, fn func(bool)) {
-		set(env, func(v string) {
-			fn(strings.EqualFold(v, "true") || v == "1" || strings.EqualFold(v, "yes"))
-		})
+	addb := func(env, key string, set func(*model.Config, bool)) {
+		add(env, key, func(c *model.Config, v string) { set(c, envBoolValue(v)) })
 	}
-	set("TOKEN", func(v string) { cfg.Token = v })
-	seti("PORT", func(v int) { cfg.Port = v })
-	set("SUB_PATH", func(v string) {
-		if !strings.HasPrefix(v, "/") {
-			v = "/" + v
-		}
-		cfg.SubPath = v
-	})
-	seti("CHECK_INTERVAL", func(v int) {
-		if v > 0 {
-			cfg.CheckIntervalMinutes = v
+
+	add("TOKEN", "token", func(c *model.Config, v string) { c.Token = v })
+	addi("PORT", "port", func(c *model.Config, n int) { c.Port = n })
+	add("SUB_PATH", "subPath", func(c *model.Config, v string) { c.SubPath = v })
+	addi("CHECK_INTERVAL", "checkIntervalMinutes", func(c *model.Config, n int) {
+		if n > 0 {
+			c.CheckIntervalMinutes = n
 		}
 	})
-	seti("CHECK_TIMEOUT", func(v int) {
-		if v > 0 {
-			cfg.CheckTimeoutSeconds = v
+	addi("CHECK_TIMEOUT", "checkTimeoutSeconds", func(c *model.Config, n int) {
+		if n > 0 {
+			c.CheckTimeoutSeconds = n
 		}
 	})
-	seti("CHECK_CONCURRENCY", func(v int) {
-		if v > 0 {
-			cfg.CheckConcurrency = v
+	addi("CHECK_CONCURRENCY", "checkConcurrency", func(c *model.Config, n int) {
+		if n > 0 {
+			c.CheckConcurrency = n
 		}
 	})
-	setb("STARTUP_CHECK", func(v bool) { cfg.StartupCheck = v })
-	seti("AUTO_DISABLE_FAILS", func(v int) { cfg.AutoDisableAfterFails = v })
-	setb("INSECURE_TLS", func(v bool) { cfg.InsecureSkipVerify = v })
-	set("USER_AGENT", func(v string) { cfg.UserAgent = v })
-	setb("CHECK_SUB_URLS", func(v bool) { cfg.CheckSubURLs = v })
+	addb("STARTUP_CHECK", "startupCheck", func(c *model.Config, b bool) { c.StartupCheck = b })
+	addi("AUTO_DISABLE_FAILS", "autoDisableAfterFails", func(c *model.Config, n int) { c.AutoDisableAfterFails = n })
+	addb("INSECURE_TLS", "insecureSkipVerify", func(c *model.Config, b bool) { c.InsecureSkipVerify = b })
+	addb("CHECK_SUB_URLS", "checkSubUrls", func(c *model.Config, b bool) { c.CheckSubURLs = b })
+
+	if len(bindings) == 0 {
+		return
+	}
+
+	force := envBool("ENV_OVERRIDE")
+	origJSON, _ := json.Marshal(*cfg)
+	probe := *cfg // 探针：环境变量全量生效后的结果
+
+	var ignored []binding
+	for _, b := range bindings {
+		b.set(&probe, b.val)
+		if !force && present[b.key] {
+			ignored = append(ignored, b) // 配置文件已有该键 → 以配置文件为准
+			continue
+		}
+		b.set(cfg, b.val)
+	}
+	if len(ignored) == 0 {
+		return
+	}
+	probeJSON, _ := json.Marshal(probe)
+	if string(probeJSON) == string(origJSON) {
+		return // 环境变量的值与配置文件一致，不必提示
+	}
+
+	// 逐字段比对，只列出「取值确实会被改写」的环境变量，避免同值也报警（如 Dockerfile 里的 PORT=8080）
+	origM, probeM := map[string]json.RawMessage{}, map[string]json.RawMessage{}
+	_ = json.Unmarshal(origJSON, &origM)
+	_ = json.Unmarshal(probeJSON, &probeM)
+	names := make([]string, 0, len(ignored))
+	for _, b := range ignored {
+		if string(origM[b.key]) != string(probeM[b.key]) {
+			names = append(names, b.env)
+		}
+	}
+	if len(names) == 0 {
+		return
+	}
+	fmt.Printf("[store] 环境变量 %s 已设置，但 config.json 中已有对应配置，本次以配置文件为准（如需强制覆盖：ENV_OVERRIDE=1）\n",
+		strings.Join(names, ", "))
+}
+
+// sanitizeConfig 兜底修正手改配置文件产生的非法值：
+// 0/越界端口、空订阅路径、订阅路径带尾斜杠（会与路由模式冲突）、非法探活参数等。
+func sanitizeConfig(cfg *model.Config) {
+	if cfg.Port <= 0 || cfg.Port > 65535 {
+		cfg.Port = 8080
+	}
+	sub := strings.TrimRight(strings.TrimSpace(cfg.SubPath), "/")
+	if sub == "" {
+		sub = "/sub"
+	}
+	if !strings.HasPrefix(sub, "/") {
+		sub = "/" + sub
+	}
+	cfg.SubPath = sub
+	if cfg.CheckIntervalMinutes <= 0 {
+		cfg.CheckIntervalMinutes = 360
+	}
+	if cfg.CheckTimeoutSeconds <= 0 || cfg.CheckTimeoutSeconds > 120 {
+		cfg.CheckTimeoutSeconds = 15
+	}
+	if cfg.CheckConcurrency <= 0 || cfg.CheckConcurrency > 100 {
+		cfg.CheckConcurrency = 10
+	}
+}
+
+func envBool(name string) bool {
+	return envBoolValue(os.Getenv(name))
+}
+
+func envBoolValue(v string) bool {
+	v = strings.TrimSpace(v)
+	return strings.EqualFold(v, "true") || v == "1" || strings.EqualFold(v, "yes")
 }
 
 func randToken(n int) string {
@@ -291,18 +390,26 @@ func (s *Store) List(f Filter) []model.Source {
 		})
 	}
 
-	sort.SliceStable(out, func(i, j int) bool {
-		if f.Sort == "failFirst" {
-			fi, fj := statusRank(out[i].Status), statusRank(out[j].Status)
-			if fi != fj {
-				return fi < fj
+	if f.SortBy != "" {
+		// 表头排序优先
+		sortByHeader(out, func(a, b model.Source) int { return cmpSource(a, b, f.SortBy) }, f.SortDir == "desc", sourceFallback)
+	} else {
+		sort.SliceStable(out, func(i, j int) bool {
+			if f.Sort == "failFirst" {
+				fi, fj := statusRank(out[i].Status), statusRank(out[j].Status)
+				if fi != fj {
+					return fi < fj
+				}
 			}
-		}
-		if out[i].Sort != out[j].Sort {
-			return out[i].Sort < out[j].Sort
-		}
-		return out[i].Name < out[j].Name
-	})
+			if out[i].Sort != out[j].Sort {
+				return out[i].Sort < out[j].Sort
+			}
+			if out[i].Name != out[j].Name {
+				return out[i].Name < out[j].Name
+			}
+			return out[i].URL < out[j].URL // 兜底定序：同名同排序值时保证跨请求顺序稳定，翻页不跳动
+		})
+	}
 
 	// 分页
 	if f.Page > 0 && f.Size > 0 {
@@ -387,6 +494,7 @@ func (s *Store) Add(src *model.Source) error {
 		src.Status = model.StatusUnknown
 	}
 	s.data.Sources = append(s.data.Sources, *src)
+	s.syncFlatsForSourceLocked(*src) // 同步生成站点源
 	return s.flush()
 }
 
@@ -400,6 +508,7 @@ func (s *Store) Update(id string, fn func(*model.Source)) error {
 			fn(&updated)
 			updated.UpdatedAt = time.Now()
 			s.data.Sources[i] = updated
+			s.syncFlatsForSourceLocked(updated) // 名称/分组/地址/内容变化同步到站点源
 			return s.flush()
 		}
 	}
@@ -439,6 +548,9 @@ func (s *Store) Delete(ids []string) int {
 	}
 	if n > 0 {
 		s.data.Sources = kept
+		for _, id := range ids {
+			s.removeSourceFlatRefsLocked(id) // 摘除站点源上的父引用，无父则删
+		}
 		if err := s.flush(); err != nil {
 			fmt.Printf("[store] 删除后落盘失败: %v\n", err)
 		}
@@ -456,15 +568,31 @@ func (s *Store) AllSources() []model.Source {
 	return s.List(Filter{})
 }
 
-// UpdateCheckResult 探活结果回写；persist=true 立即落盘，false 攒批由调用方统一 Save
+// UpdateCheckResult 探活结果回写；persist=true 立即落盘，false 攒批由调用方统一 Save。
+// 多仓探活成功后同步展开子仓到站点源。
 func (s *Store) UpdateCheckResult(id string, r CheckResult, persist bool) error {
-	apply := func(sp *model.Source) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	updated := s.updateCheckResultLocked(id, r)
+	if updated && persist {
+		return s.flush()
+	}
+	return nil
+}
+
+func (s *Store) updateCheckResultLocked(id string, r CheckResult) bool {
+	for i := range s.data.Sources {
+		if s.data.Sources[i].ID != id {
+			continue
+		}
+		sp := clone(s.data.Sources[i])
 		now := time.Now()
 		sp.LastCheckAt = &now
 		sp.Status = r.Status
 		sp.HTTPCode = r.HTTPCode
 		sp.LatencyMs = r.LatencyMs
 		sp.CheckMsg = r.Msg
+		sp.CheckCount++ // 累计检测次数
 		if r.Type != "" && r.Status == model.StatusOK {
 			sp.Type = r.Type
 		}
@@ -478,13 +606,13 @@ func (s *Store) UpdateCheckResult(id string, r CheckResult, persist bool) error 
 		} else {
 			sp.FailStreak++
 			sp.OKStreak = 0
+			sp.FailCount++ // 累计检测不通次数
 		}
+		s.data.Sources[i] = sp
+		s.syncFlatsForSourceLocked(sp) // 多仓子仓列表变化同步到站点源
+		return true
 	}
-	if persist {
-		return s.Update(id, apply)
-	}
-	s.UpdateInMemory(id, apply)
-	return nil
+	return false
 }
 
 // Groups 所有分组名（去重排序）
@@ -586,6 +714,7 @@ func (s *Store) ReplaceAll(sources []model.Source) error {
 		}
 	}
 	s.data.Sources = sources
+	s.resyncAllFlatsLocked() // 全量重建站点源
 	return s.flush()
 }
 

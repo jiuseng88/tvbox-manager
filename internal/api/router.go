@@ -17,12 +17,20 @@ type API struct {
 	st   *store.Store
 	sch  *scheduler.Scheduler
 	ver  string
-	web  fs.FS
+	web  fs.FS // 以 web 目录为根
+	dev  bool  // 开发模式：禁缓存、前端从磁盘读
 	reqN atomic.Int64
 }
 
+// New webFS 必须是「以 web 目录为根」的文件系统（prod: embed 子目录，dev: os.DirFS）。
 func New(st *store.Store, sch *scheduler.Scheduler, version string, webFS fs.FS) *API {
 	return &API{st: st, sch: sch, ver: version, web: webFS}
+}
+
+// DevMode 开发模式：前端资源不走缓存，便于改完刷新浏览器立即看到效果。
+func (a *API) DevMode(on bool) *API {
+	a.dev = on
+	return a
 }
 
 // Router 组装全部路由（含静态资源）
@@ -44,6 +52,15 @@ func (a *API) Router() http.Handler {
 	apiMux.HandleFunc("POST /api/sources/{id}/check", a.handleCheckOne)
 	apiMux.HandleFunc("GET /api/groups", a.handleGroups)
 
+	// 站点源（平铺层，订阅接口的数据来源）
+	apiMux.HandleFunc("GET /api/flats", a.handleFlatList)
+	apiMux.HandleFunc("GET /api/flats/groups", a.handleFlatGroups)
+	apiMux.HandleFunc("PUT /api/flats/{id}", a.handleFlatUpdate)
+	apiMux.HandleFunc("DELETE /api/flats/{id}", a.handleFlatDelete)
+	apiMux.HandleFunc("POST /api/flats/{id}/toggle", a.handleFlatToggle)
+	apiMux.HandleFunc("POST /api/flats/{id}/check", a.handleFlatCheck)
+	apiMux.HandleFunc("POST /api/flats/batch-action", a.handleFlatBatchAction)
+
 	// 预览与探活
 	apiMux.HandleFunc("GET /api/preview", a.handlePreviewURL)
 	apiMux.HandleFunc("POST /api/check/run", a.handleCheckRun)
@@ -53,7 +70,6 @@ func (a *API) Router() http.Handler {
 	// 配置与备份
 	apiMux.HandleFunc("GET /api/config", a.handleConfigGet)
 	apiMux.HandleFunc("PUT /api/config", a.handleConfigPut)
-	apiMux.HandleFunc("POST /api/config/token", a.handleTokenChange)
 	apiMux.HandleFunc("GET /api/export", a.handleExport)
 	apiMux.HandleFunc("POST /api/import/config", a.handleImport)
 
@@ -112,12 +128,10 @@ func (a *API) auth(next http.Handler) http.Handler {
 
 // ---- 统一信封 ----
 
-// spaHandler 静态资源 + SPA 回退（无后缀路径找不到时回 index.html）
+// spaHandler 静态资源 + SPA 回退（无后缀路径找不到时回 index.html）。
+// a.web 必须是「以 web 目录为根」的 FS：生产为 embed 子目录，开发模式为 os.DirFS("./web")。
 func (a *API) spaHandler() http.Handler {
-	sub, err := fs.Sub(a.web, "web")
-	if err != nil {
-		panic(err)
-	}
+	sub := a.web
 	fileServer := http.FileServer(http.FS(sub))
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		p := strings.TrimPrefix(r.URL.Path, "/")
@@ -130,6 +144,16 @@ func (a *API) spaHandler() http.Handler {
 				return
 			}
 			r.URL.Path = "/" // SPA 路由回退
+		}
+		// 缓存策略：开发模式彻底禁缓存（改完刷新即生效）；生产用 no-cache 强制协商，
+		// 避免升级后浏览器仍用旧的 HTML/JS/CSS
+		switch {
+		case a.dev:
+			w.Header().Set("Cache-Control", "no-store, must-revalidate")
+			w.Header().Set("Pragma", "no-cache")
+		case strings.HasSuffix(p, ".html") || strings.HasSuffix(p, ".js") || strings.HasSuffix(p, ".css"):
+			w.Header().Set("Cache-Control", "no-cache, must-revalidate")
+			w.Header().Set("Pragma", "no-cache")
 		}
 		fileServer.ServeHTTP(w, r)
 	})

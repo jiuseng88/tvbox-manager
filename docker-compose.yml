@@ -5,19 +5,31 @@ services:
     container_name: tvbox-manager
     restart: unless-stopped
     ports:
+      # 左边是宿主机端口，需与下面的 PORT 保持一致；改了 PORT 记得同步改这里
       - "8080:8080"
     environment:
       TZ: Asia/Shanghai
+
+      # —— 以下三项为「首次启动的初始值」——
+      # 只在 data/config.json 里还没有该项时生效，落盘后以配置文件为准：
+      #   端口 / 订阅路径 → 后台「设置」页改；令牌 → 改 data/config.json 的 token 字段
+      # 想让环境变量强制覆盖，取消最后一行注释。
       TOKEN: 请改成你自己的令牌
+      PORT: "8080"
+      SUB_PATH: /sub
+
+      # —— 探活相关，同样只在首次启动写入配置 ——
       CHECK_INTERVAL: "360"
       CHECK_CONCURRENCY: "10"
       INSECURE_TLS: "true"
-      USER_AGENT: okhttp/4.9.1
       STARTUP_CHECK: "false"
+
+      # ENV_OVERRIDE: "1"   # 打开后环境变量重新变为最高优先级
     volumes:
       - ./data:/data
     healthcheck:
-      test: ["CMD", "wget", "-qO-", "http://127.0.0.1:8080/healthz"]
+      # 用 CMD-SHELL 让容器内的 PORT 生效，改端口后健康检查不会误报
+      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:${PORT:-8080}/healthz || exit 1"]
       interval: 30s
       timeout: 5s
       retries: 3

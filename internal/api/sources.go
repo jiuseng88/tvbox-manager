@@ -23,6 +23,8 @@ func (a *API) handleSourceList(w http.ResponseWriter, r *http.Request) {
 		Group:   q.Get("group"),
 		Enabled: q.Get("enabled"),
 		Sort:    q.Get("sort"),
+		SortBy:  q.Get("sort_by"),
+		SortDir: q.Get("sort_dir"),
 	}
 	fmt.Sscanf(q.Get("page"), "%d", &f.Page)
 	fmt.Sscanf(q.Get("size"), "%d", &f.Size)

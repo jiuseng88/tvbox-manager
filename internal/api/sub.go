@@ -15,27 +15,30 @@ func setSubHeaders(w http.ResponseWriter, contentType string) {
 	w.Header().Set("Cache-Control", "no-store")
 }
 
-// handleSub 多仓订阅：仅输出 enabled=true，按 sort、name 排序。
+// subItem 订阅输出条目
+type subItem struct {
+	URL  string `json:"url"`
+	Name string `json:"name"`
+	Type *int   `json:"type,omitempty"`
+}
+
+// handleSub 多仓订阅：数据来自「站点源」平铺层（多仓子仓 + 单仓自身，
+// 由源列表自动同步生成），仅输出有效启用的条目（按 sort、name 排序）。
 // ?name=xxx 名称加前缀；?format=fan 输出饭太硬风格（type:0）。
 func (a *API) handleSub(w http.ResponseWriter, r *http.Request) {
 	prefix := r.URL.Query().Get("name")
 	fan := r.URL.Query().Get("format") == "fan"
 
-	type item struct {
-		URL  string `json:"url"`
-		Name string `json:"name"`
-		Type *int   `json:"type,omitempty"`
-	}
-	urls := make([]item, 0, 16)
-	for _, s := range a.st.EnabledSources() {
-		name := s.Name
-		if name == "" {
-			name = parser.HostOf(s.URL)
+	flats := a.st.EnabledFlats()
+	urls := make([]subItem, 0, len(flats))
+	for _, f := range flats {
+		it := subItem{URL: f.URL, Name: f.Name}
+		if it.Name == "" {
+			it.Name = parser.HostOf(f.URL)
 		}
 		if prefix != "" {
-			name = prefix + "-" + name
+			it.Name = prefix + "-" + it.Name
 		}
-		it := item{URL: s.URL, Name: name}
 		if fan {
 			zero := 0
 			it.Type = &zero
@@ -48,16 +51,17 @@ func (a *API) handleSub(w http.ResponseWriter, r *http.Request) {
 
 // handleSubTxt 纯文本每行一个 URL（兼容部分老客户端）
 func (a *API) handleSubTxt(w http.ResponseWriter, r *http.Request) {
+	flats := a.st.EnabledFlats()
 	var sb strings.Builder
-	for _, s := range a.st.EnabledSources() {
-		sb.WriteString(s.URL)
+	for _, f := range flats {
+		sb.WriteString(f.URL)
 		sb.WriteString("\n")
 	}
 	setSubHeaders(w, "text/plain; charset=utf-8")
 	_, _ = w.Write([]byte(sb.String()))
 }
 
-// handleSubAll 全量输出（含禁用，需 Token，排障用）
+// handleSubAll 全量输出（含禁用，需 Token，排障用）——输出父源原始列表
 func (a *API) handleSubAll(w http.ResponseWriter, r *http.Request) {
 	type item struct {
 		URL     string `json:"url"`

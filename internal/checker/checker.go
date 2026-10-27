@@ -19,11 +19,13 @@ import (
 
 const maxBody = 10 << 20 // 10MB
 
+// defaultUA 探活固定 UA：大量源站对浏览器 UA 返回 403，必须模拟 TVBox 客户端，不开放配置
+const defaultUA = "okhttp/4.9.1"
+
 // Checker 单源探活与实时预览共用引擎
 type Checker struct {
 	client  *http.Client
 	timeout time.Duration
-	ua      string
 }
 
 func New(cfg *model.Config) *Checker {
@@ -53,7 +55,6 @@ func New(cfg *model.Config) *Checker {
 			},
 		},
 		timeout: timeout,
-		ua:      cfg.UserAgent,
 	}
 }
 
@@ -94,7 +95,7 @@ func (c *Checker) Fetch(ctx context.Context, rawURL string, guardPrivate bool) (
 	if err != nil {
 		return failResult(0, 0, "构造请求失败: "+err.Error()), nil
 	}
-	req.Header.Set("User-Agent", c.ua)
+	req.Header.Set("User-Agent", defaultUA)
 	req.Header.Set("Accept", "*/*")
 	req.Header.Set("Connection", "close")
 

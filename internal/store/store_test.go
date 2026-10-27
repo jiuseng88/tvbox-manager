@@ -137,22 +137,81 @@ func TestCorruptDataBackup(t *testing.T) {
 	}
 }
 
-func TestConfigEnvOverride(t *testing.T) {
+// 环境变量只在首次启动（config.json 尚无该项时）提供初始值，
+// 落盘后一律以配置文件为准；ENV_OVERRIDE=1 可强制覆盖。
+func TestConfigEnvBootstrapThenFileWins(t *testing.T) {
 	t.Setenv("TOKEN", "env-token-123")
-	t.Setenv("CHECK_INTERVAL", "60")
-	st := newTestStore(t)
+	t.Setenv("PORT", "9090")
+	t.Setenv("SUB_PATH", "/envsub")
+	dir := t.TempDir()
+
+	// 首次启动：环境变量作为初始值
+	st, err := New(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
 	cfg := st.Config()
-	if cfg.Token != "env-token-123" {
-		t.Fatalf("TOKEN 环境变量应覆盖: %s", cfg.Token)
+	if cfg.Token != "env-token-123" || cfg.Port != 9090 || cfg.SubPath != "/envsub" {
+		t.Fatalf("首次启动应使用环境变量初值: %+v", cfg)
 	}
-	if cfg.CheckIntervalMinutes != 60 {
-		t.Fatalf("CHECK_INTERVAL 应覆盖: %d", cfg.CheckIntervalMinutes)
+	if _, err := os.Stat(filepath.Join(dir, "config.json")); err != nil {
+		t.Fatal("首次启动应生成 config.json")
 	}
-	// PUT 修改也会被 env 压回
+
+	// 后台「设置」页修改：不应再被环境变量压回
+	cfg.Port = 8081
+	cfg.SubPath = "/mysub"
 	cfg.CheckIntervalMinutes = 999
-	_ = st.UpdateConfig(cfg)
-	if st.Config().CheckIntervalMinutes != 60 {
-		t.Fatal("环境变量应保持最高优先级")
+	if err := st.UpdateConfig(cfg); err != nil {
+		t.Fatal(err)
+	}
+	got := st.Config()
+	if got.Port != 8081 || got.SubPath != "/mysub" || got.CheckIntervalMinutes != 999 {
+		t.Fatalf("后台修改应生效，不被环境变量覆盖: %+v", got)
+	}
+	// 令牌同样可以在后台改（现在统一走 UpdateConfig）
+	cfg.Token = "web-token-9"
+	if err := st.UpdateConfig(cfg); err != nil {
+		t.Fatal(err)
+	}
+
+	// 重启：仍以配置文件为准（端口/订阅路径/令牌都不回到环境变量值）
+	st2, err := New(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	c2 := st2.Config()
+	if c2.Port != 8081 || c2.SubPath != "/mysub" || c2.Token != "web-token-9" {
+		t.Fatalf("重启后应以配置文件为准: %+v", c2)
+	}
+
+	// ENV_OVERRIDE=1：强制环境变量覆盖配置文件
+	t.Setenv("ENV_OVERRIDE", "1")
+	st3, err := New(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	c3 := st3.Config()
+	if c3.Port != 9090 || c3.SubPath != "/envsub" || c3.Token != "env-token-123" {
+		t.Fatalf("ENV_OVERRIDE=1 应强制覆盖: %+v", c3)
+	}
+}
+
+// 手改 config.json 的非法值应被兜底修正
+func TestConfigSanitize(t *testing.T) {
+	dir := t.TempDir()
+	bad := `{"token":"t","port":0,"subPath":"sub/","checkTimeoutSeconds":0,"checkConcurrency":0,"checkIntervalMinutes":-5}`
+	if err := os.WriteFile(filepath.Join(dir, "config.json"), []byte(bad), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	st, err := New(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	c := st.Config()
+	if c.Port != 8080 || c.SubPath != "/sub" || c.CheckTimeoutSeconds != 15 ||
+		c.CheckConcurrency != 10 || c.CheckIntervalMinutes != 360 {
+		t.Fatalf("非法配置应被修正: %+v", c)
 	}
 }
 

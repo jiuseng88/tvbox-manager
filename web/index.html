@@ -24,14 +24,14 @@
     <div v-for="t in toasts" :key="t.id" class="toast" :class="t.type">{{ t.msg }}</div>
   </div>
 
-  <div class="layout" v-else>
+  <div class="layout" v-if="!needLogin">
     <!-- ===== 侧栏 ===== -->
     <aside class="side">
       <div class="logo">📺 源维护</div>
       <nav>
         <div class="nav-item" :class="{active: view==='dashboard'}" @click="view='dashboard'">📊 概览</div>
         <div class="nav-item" :class="{active: view==='sources'}" @click="view='sources'">📋 源列表</div>
-        <div class="nav-item" :class="{active: view==='add'}" @click="view='add'">➕ 添加源</div>
+        <div class="nav-item" :class="{active: view==='flats'}" @click="view='flats'">🔗 所有仓源</div>
         <div class="nav-item" :class="{active: view==='settings'}" @click="view='settings'">⚙️ 设置</div>
       </nav>
       <div class="side-foot">
@@ -85,7 +85,7 @@
       <section v-if="view==='sources'">
         <div class="list-head">
           <h2>源列表 <span class="muted">（{{ total }} 条）</span></h2>
-          <button class="btn primary" @click="view='add'">➕ 添加源</button>
+          <button class="btn primary" @click="openAddModal">➕ 添加源</button>
         </div>
         <div class="toolbar">
           <input v-model="filters.keyword" placeholder="搜索名称 / 地址 / 备注" class="grow">
@@ -115,8 +115,18 @@
               <tr>
                 <th class="w-check"><input type="checkbox" :checked="list.length && checked.length===list.length"
                   @change="checked = $event.target.checked ? list.map(s=>s.id) : []"></th>
-                <th>状态</th><th>名称</th><th>类型</th><th class="grow">地址</th>
-                <th>内容摘要</th><th>分组</th><th>最后检测</th><th>延迟</th><th>启用</th><th>操作</th>
+                <th class="sortable" @click="toggleSort('status')">状态<i class="arr" v-html="sortArrow('status')"></i></th>
+                <th class="sortable" @click="toggleSort('name')">名称<i class="arr" v-html="sortArrow('name')"></i></th>
+                <th class="sortable" @click="toggleSort('type')">类型<i class="arr" v-html="sortArrow('type')"></i></th>
+                <th class="sortable grow" @click="toggleSort('url')">地址<i class="arr" v-html="sortArrow('url')"></i></th>
+                <th>内容摘要</th>
+                <th class="sortable" @click="toggleSort('group')">分组<i class="arr" v-html="sortArrow('group')"></i></th>
+                <th class="sortable" @click="toggleSort('time')">最后检测<i class="arr" v-html="sortArrow('time')"></i></th>
+                <th class="sortable" @click="toggleSort('latency')">延迟<i class="arr" v-html="sortArrow('latency')"></i></th>
+                <th class="sortable" @click="toggleSort('checks')">检测次数<i class="arr" v-html="sortArrow('checks')"></i></th>
+                <th class="sortable" @click="toggleSort('fails')">不通次数<i class="arr" v-html="sortArrow('fails')"></i></th>
+                <th class="sortable" @click="toggleSort('enabled')">启用<i class="arr" v-html="sortArrow('enabled')"></i></th>
+                <th>操作</th>
               </tr>
             </thead>
             <tbody>
@@ -124,6 +134,7 @@
                 <td><input type="checkbox" :value="s.id" v-model="checked"></td>
                 <td>
                   <span class="dot" :class="s.status" :title="s.checkMsg + '｜' + (s.latencyMs||0) + 'ms'"></span>
+                  <span class="st-text" :class="s.status">{{ {ok:'可用',fail:'不可用',checking:'检测中'}[s.status] || '未检测' }}</span>
                   <span v-if="s.status==='checking'" class="spinner"></span>
                 </td>
                 <td><a @click="openEdit(s)" class="link">{{ s.name }}</a></td>
@@ -133,6 +144,8 @@
                 <td><span class="tag group">{{ s.group }}</span></td>
                 <td :title="absTime(s.lastCheckAt)">{{ relTime(s.lastCheckAt) }}</td>
                 <td :class="{slow: s.latencyMs > 3000}">{{ s.status==='ok' ? s.latencyMs + 'ms' : '—' }}</td>
+                <td class="muted">{{ s.checkCount || 0 }}</td>
+                <td :class="{failnum: s.failCount > 0}">{{ s.failCount || 0 }}</td>
                 <td><switch-box :on="s.enabled" @toggle="toggleSource(s)"></switch-box></td>
                 <td class="ops">
                   <button class="btn xs" @click="openPreview(s)">预览</button>
@@ -141,15 +154,22 @@
                   <button class="btn xs danger" @click="delSource(s)">删除</button>
                 </td>
               </tr>
-              <tr v-if="!list.length"><td colspan="11" class="empty">没有匹配的源</td></tr>
+              <tr v-if="!list.length"><td colspan="13" class="empty">没有匹配的源</td></tr>
             </tbody>
           </table>
         </div>
 
-        <div class="pager" v-if="pages() > 1">
+        <div class="pager" v-if="total > 0">
           <button class="btn xs" :disabled="filters.page<=1" @click="filters.page--; loadSources()">上一页</button>
+          <span class="pager-total">共 {{ total }} 条</span>
           <span>{{ filters.page }} / {{ pages() }}</span>
           <button class="btn xs" :disabled="filters.page>=pages()" @click="filters.page++; loadSources()">下一页</button>
+          <select v-model.number="filters.size" @change="applyFilter()" title="每页条数">
+            <option :value="20">20 条/页</option>
+            <option :value="50">50 条/页</option>
+            <option :value="100">100 条/页</option>
+            <option :value="200">200 条/页</option>
+          </select>
         </div>
 
         <!-- 批量操作条 -->
@@ -165,96 +185,105 @@
         </div>
       </section>
 
-      <!-- ===== 添加源 ===== -->
-      <section v-if="view==='add'">
-        <h2>添加源</h2>
-        <div class="tabs">
-          <div class="tab" :class="{active: addTab==='single'}" @click="addTab='single'">单个添加</div>
-          <div class="tab" :class="{active: addTab==='paste'}" @click="addTab='paste'">批量粘贴</div>
-          <div class="tab" :class="{active: addTab==='file'}" @click="addTab='file'">文件导入</div>
+      <!-- ===== 所有仓源（平铺层，订阅数据源） ===== -->
+      <section v-if="view==='flats'">
+        <div class="list-head">
+          <h2>所有仓源 <span class="muted">（{{ flatsTotal }} 条）</span></h2>
+          <button class="btn" @click="loadFlats(); loadFlatGroups()">刷新</button>
+        </div>
+        <div class="muted" style="margin-bottom:8px">
+          由源列表自动平铺生成：多仓拆为子仓、单仓并入自身；订阅接口输出这里「生效启用」的条目。
+          父源禁用时关联所有仓源同步失效；所有仓源也可单独禁用，不受父源恢复影响。
+        </div>
+        <div class="toolbar">
+          <input v-model="flatFilters.keyword" placeholder="搜索名称 / 地址 / 备注" class="grow">
+          <select v-model="flatFilters.status">
+            <option value="">全部状态</option><option value="ok">可用</option>
+            <option value="fail">失效</option><option value="unknown">未检测</option>
+          </select>
+          <select v-model="flatFilters.group">
+            <option value="">全部分组</option>
+            <option v-for="g in flatGroups" :key="g" :value="g">{{ g }}</option>
+          </select>
+          <select v-model="flatFilters.enabled">
+            <option value="">生效+禁用</option><option value="true">仅生效</option><option value="false">仅禁用</option>
+          </select>
+          <select v-model="flatFilters.sort">
+            <option value="">默认排序</option><option value="failFirst">失效置顶</option>
+          </select>
         </div>
 
-        <!-- 单个 -->
-        <div class="panel" v-if="addTab==='single'">
-          <div class="form-row">
-            <label>地址 *</label>
-            <div class="row grow">
-              <input v-model="singleForm.url" placeholder="http://example.com/tvbox.json（无协议自动补 http://，支持中文域名）" class="grow">
-              <button class="btn" @click="previewUrl" :disabled="singlePreviewing">{{ singlePreviewing ? '预览中…' : '预览' }}</button>
-            </div>
-          </div>
-          <div class="preview-inline" v-if="singlePreview">
-            <template v-if="!singlePreview.errMsg">
-              <span class="dot" :class="singlePreview.type ? 'ok' : 'fail'"></span>
-              <b>{{ {single:'单仓',multi:'多仓',unknown:'未知'}[singlePreview.type] || '未知' }}</b>
-              <span v-if="singlePreview.httpCode">HTTP {{ singlePreview.httpCode }}</span>
-              <span v-if="singlePreview.latencyMs">{{ singlePreview.latencyMs }}ms</span>
-              <span v-if="singlePreview.detail">
-                {{ singlePreview.detail.sites }} 站点 / {{ singlePreview.detail.lives }} 直播 / {{ singlePreview.detail.parses }} 解析
-                <template v-if="singlePreview.detail.subUrls">｜{{ singlePreview.detail.subUrls.length }} 子仓</template>
-              </span>
-              <span v-else class="muted">{{ singlePreview.errMsg || ' ' }}</span>
-            </template>
-            <span v-else class="err">✕ {{ singlePreview.errMsg }}</span>
-          </div>
-          <div class="form-row"><label>名称</label><input v-model="singleForm.name" placeholder="留空自动取域名"></div>
-          <div class="form-row"><label>分组</label>
-            <input v-model="singleForm.group" placeholder="默认" list="group-list">
-            <datalist id="group-list"><option v-for="g in groups" :key="g" :value="g"></option></datalist>
-          </div>
-          <div class="form-row"><label>备注</label><input v-model="singleForm.remark"></div>
-          <div class="form-row">
-            <label>启用</label>
-            <switch-box :on="singleForm.enabled" @toggle="singleForm.enabled = !singleForm.enabled"></switch-box>
-            <span class="muted">添加后自动探活一次</span>
-          </div>
-          <div class="form-actions"><button class="btn primary" @click="addSingle">添加</button></div>
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th class="w-check"><input type="checkbox" :checked="flatList.length && flatChecked.length===flatList.length"
+                  @change="flatChecked = $event.target.checked ? flatList.map(f=>f.id) : []"></th>
+                <th class="sortable" @click="toggleFlatSort('status')">状态<i class="arr" v-html="flatSortArrow('status')"></i></th>
+                <th class="sortable" @click="toggleFlatSort('name')">名称<i class="arr" v-html="flatSortArrow('name')"></i></th>
+                <th class="sortable grow" @click="toggleFlatSort('url')">地址<i class="arr" v-html="flatSortArrow('url')"></i></th>
+                <th>关联源</th>
+                <th class="sortable" @click="toggleFlatSort('group')">分组<i class="arr" v-html="flatSortArrow('group')"></i></th>
+                <th class="sortable" @click="toggleFlatSort('time')">最后检测<i class="arr" v-html="flatSortArrow('time')"></i></th>
+                <th class="sortable" @click="toggleFlatSort('latency')">延迟<i class="arr" v-html="flatSortArrow('latency')"></i></th>
+                <th class="sortable" @click="toggleFlatSort('checks')">检测次数<i class="arr" v-html="flatSortArrow('checks')"></i></th>
+                <th class="sortable" @click="toggleFlatSort('fails')">不通次数<i class="arr" v-html="flatSortArrow('fails')"></i></th>
+                <th class="sortable" @click="toggleFlatSort('enabled')">启用<i class="arr" v-html="flatSortArrow('enabled')"></i></th>
+                <th>操作</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr v-for="f in flatList" :key="f.id" :class="{disabled: !f.effectiveEnabled}">
+                <td><input type="checkbox" :value="f.id" v-model="flatChecked"></td>
+                <td>
+                  <span class="dot" :class="f.effectiveEnabled ? f.status : ''" :title="f.checkMsg + '｜' + (f.latencyMs||0) + 'ms'"></span>
+                  <span class="st-text" :class="flatStatusClass(f)">{{ flatStatusText(f) }}</span>
+                  <span v-if="f.status==='checking' && f.effectiveEnabled" class="spinner"></span>
+                </td>
+                <td><a @click="openFlatEdit(f)" class="link">{{ f.name }}</a></td>
+                <td class="url-cell" :title="f.url" @click="copyText(f.url)">{{ f.url }}</td>
+                <td><span class="tag group" :title="(f.parentNames||[]).join('、')">{{ (f.parentNames||[]).length ? (f.parentNames.length===1 ? f.parentNames[0] : f.parentNames.length + ' 个源') : '—' }}</span></td>
+                <td><span class="tag group">{{ f.group }}</span></td>
+                <td :title="absTime(f.lastCheckAt)">{{ relTime(f.lastCheckAt) }}</td>
+                <td :class="{slow: f.latencyMs > 3000}">{{ f.status==='ok' ? f.latencyMs + 'ms' : '—' }}</td>
+                <td class="muted">{{ f.checkCount || 0 }}</td>
+                <td :class="{failnum: f.failCount > 0}">{{ f.failCount || 0 }}</td>
+                <td><switch-box :on="f.enabled" @toggle="toggleFlat(f)"></switch-box></td>
+                <td class="ops">
+                  <button class="btn xs" @click="openFlatPreview(f)">预览</button>
+                  <button class="btn xs" @click="checkFlat(f)">检测</button>
+                  <button class="btn xs" @click="openFlatEdit(f)">编辑</button>
+                  <button class="btn xs danger" @click="delFlat(f)">删除</button>
+                </td>
+              </tr>
+              <tr v-if="!flatList.length"><td colspan="12" class="empty">没有匹配的仓源</td></tr>
+            </tbody>
+          </table>
         </div>
 
-        <!-- 批量粘贴 -->
-        <div class="panel" v-if="addTab==='paste'">
-          <div class="muted" style="margin-bottom:8px">
-            每行一条，支持「名称,URL」「名称|URL」「纯 URL」混排，# 开头为注释。
-            当前分组：<b>{{ singleForm.group || '默认' }}</b>（在「单个添加」页修改）
-          </div>
-          <textarea v-model="batchText" rows="12" placeholder="肥猫,http://example.com/1.json&#10;饭太硬|http://example.com/2.json&#10;http://example.com/3.json"></textarea>
-          <div class="preview-inline" v-if="batchText.trim()">
-            已识别 <b>{{ batchParsed.count }}</b> 条，其中 <b>{{ batchParsed.dup }}</b> 条疑似重复（已存在的行导入时自动跳过）
-          </div>
-          <div class="form-actions"><button class="btn primary" @click="submitBatch">导入</button></div>
-          <div v-if="batchResult" class="result-box">
-            新增 {{ batchResult.added }} 条，跳过 {{ (batchResult.skipped||[]).length }} 条
-            <div v-for="sk in batchResult.skipped" :key="sk.url" class="muted">✕ {{ sk.url }} — {{ sk.reason }}</div>
-          </div>
+        <div class="pager" v-if="flatsTotal > 0">
+          <button class="btn xs" :disabled="flatFilters.page<=1" @click="flatFilters.page--; loadFlats()">上一页</button>
+          <span class="pager-total">共 {{ flatsTotal }} 条</span>
+          <span>{{ flatFilters.page }} / {{ flatPages() }}</span>
+          <button class="btn xs" :disabled="flatFilters.page>=flatPages()" @click="flatFilters.page++; loadFlats()">下一页</button>
+          <select v-model.number="flatFilters.size" @change="applyFlatFilter()" title="每页条数">
+            <option :value="20">20 条/页</option>
+            <option :value="50">50 条/页</option>
+            <option :value="100">100 条/页</option>
+            <option :value="200">200 条/页</option>
+          </select>
         </div>
 
-        <!-- 文件导入 -->
-        <div class="panel" v-if="addTab==='file'">
-          <label class="dropzone">
-            <input type="file" accept=".json,.txt" @change="handleFile" hidden>
-            📁 点击选择 .json / .txt 文件<br>
-            <span class="muted">.txt 每行一条（名称,URL / 名称|URL / 纯 URL）；.json 支持 {"urls":[…]} 与数组形态</span>
-          </label>
-          <div v-if="fileRows.length">
-            <div class="preview-inline">共 {{ fileRows.length }} 条，已勾选 {{ fileRows.filter(r=>r.checked).length }} 条</div>
-            <div class="table-wrap" style="max-height:320px">
-              <table>
-                <thead><tr><th></th><th>名称</th><th>地址</th><th>重复</th></tr></thead>
-                <tbody>
-                  <tr v-for="(r, i) in fileRows" :key="i" :class="{disabled: r.dup}">
-                    <td><input type="checkbox" v-model="r.checked"></td>
-                    <td>{{ r.name || '（自动取名）' }}</td>
-                    <td class="url-cell">{{ r.url }}</td>
-                    <td><span v-if="r.dup" class="tag fail">已存在</span></td>
-                  </tr>
-                </tbody>
-              </table>
-            </div>
-            <div class="form-actions"><button class="btn primary" @click="submitFileRows">导入勾选项</button></div>
-          </div>
-          <div v-if="fileResult" class="result-box">
-            新增 {{ fileResult.added }} 条，跳过 {{ (fileResult.skipped||[]).length }} 条
-          </div>
+        <!-- 批量操作条 -->
+        <div class="batch-bar" v-if="flatChecked.length">
+          已选 {{ flatChecked.length }} 条
+          <button class="btn xs" @click="flatBatchAction('enable')">批量启用</button>
+          <button class="btn xs" @click="flatBatchAction('disable')">批量禁用</button>
+          <button class="btn xs" @click="flatBatchAction('group')">批量移组</button>
+          <button class="btn xs primary" @click="batchCheckFlats()">批量检测</button>
+          <button class="btn xs danger" @click="flatBatchAction('delete')">批量删除</button>
+          <span class="grow"></span>
+          <button class="btn xs ghost" @click="flatChecked=[]">取消</button>
         </div>
       </section>
 
@@ -280,12 +309,11 @@
               <switch-box :on="config.insecureSkipVerify" @toggle="config.insecureSkipVerify = !config.insecureSkipVerify"></switch-box>
               <span class="muted">大量源用自签/过期证书，默认跳过才能判断源本身可用性</span>
             </div>
-            <div class="form-row"><label>探活 User-Agent</label><input v-model="config.userAgent"></div>
             <div class="form-row"><label>监听端口 <span class="muted">(重启生效)</span></label><input type="number" v-model.number="config.port"></div>
             <div class="form-row"><label>订阅路径 <span class="muted">(重启生效)</span></label><input v-model="config.subPath"></div>
           </div>
           <div class="muted" style="margin:8px 0">
-            ⚠️ 探活 UA 建议 okhttp/4.9.1 —— 大量源站对浏览器 UA 返回 403，模拟客户端 UA 才能拿到真实结果。
+            ℹ️ 探活固定使用客户端 UA（okhttp/4.9.1）——大量源站对浏览器 UA 返回 403，模拟客户端才能拿到真实结果。
           </div>
           <div class="form-actions"><button class="btn primary" @click="saveConfig">保存设置</button></div>
         </div>
@@ -294,9 +322,7 @@
           <div class="panel-title">访问令牌</div>
           <div class="muted" style="margin-bottom:8px">令牌用于管理后台与 /api/* 的访问；订阅接口不校验令牌。</div>
           <div class="form-row"><label>当前令牌</label><input :value="config ? config.token : ''" disabled></div>
-          <div class="form-row"><label>旧令牌</label><input type="password" v-model="tokenForm.oldToken"></div>
-          <div class="form-row"><label>新令牌</label><input v-model="tokenForm.newToken" placeholder="至少 6 位"></div>
-          <div class="form-actions"><button class="btn" @click="changeToken">修改令牌</button></div>
+          <div class="muted">🔒 令牌不支持在页面修改，仅可通过配置文件 <b>data/config.json</b> 中的 "token" 字段修改后重启服务生效。</div>
         </div>
 
         <div class="panel">
@@ -311,12 +337,125 @@
         <div class="panel">
           <div class="panel-title">数据备份</div>
           <div class="form-actions">
-            <button class="btn" @click="exportBackup">导出备份（sources + config）</button>
+            <button class="btn" @click="openBackupModal">导出备份（sources + config）</button>
             <button class="btn" @click="importBackup">导入备份</button>
           </div>
         </div>
       </section>
     </main>
+  </div>
+
+  <!-- ===== 分组候选（全局，编辑/添加弹窗共用） ===== -->
+  <datalist id="group-list"><option v-for="g in groups" :key="g" :value="g"></option></datalist>
+
+  <!-- ===== 添加源弹窗 ===== -->
+  <div class="modal-mask" v-if="showAdd" @click.self="showAdd=false">
+    <div class="modal wide">
+      <div class="modal-title">添加源<button class="close" @click="showAdd=false">✕</button></div>
+      <div class="tabs">
+        <div class="tab" :class="{active: addTab==='single'}" @click="addTab='single'">单个添加</div>
+        <div class="tab" :class="{active: addTab==='paste'}" @click="addTab='paste'">批量粘贴</div>
+        <div class="tab" :class="{active: addTab==='file'}" @click="addTab='file'">文件导入</div>
+      </div>
+
+      <!-- 单个 -->
+      <div class="panel" v-if="addTab==='single'">
+        <div class="form-row">
+          <label>地址 *</label>
+          <div class="row grow">
+            <input v-model="singleForm.url" placeholder="http://example.com/tvbox.json（无协议自动补 http://，支持中文域名）" class="grow">
+            <button class="btn" @click="previewUrl" :disabled="singlePreviewing">{{ singlePreviewing ? '预览中…' : '预览' }}</button>
+          </div>
+        </div>
+        <div class="preview-inline" v-if="singlePreview">
+          <template v-if="!singlePreview.errMsg">
+            <span class="dot" :class="singlePreview.type ? 'ok' : 'fail'"></span>
+            <b>{{ {single:'单仓',multi:'多仓',unknown:'未知'}[singlePreview.type] || '未知' }}</b>
+            <span v-if="singlePreview.httpCode">HTTP {{ singlePreview.httpCode }}</span>
+            <span v-if="singlePreview.latencyMs">{{ singlePreview.latencyMs }}ms</span>
+            <span v-if="singlePreview.detail">
+              {{ singlePreview.detail.sites }} 站点 / {{ singlePreview.detail.lives }} 直播 / {{ singlePreview.detail.parses }} 解析
+              <template v-if="singlePreview.detail.subUrls">｜{{ singlePreview.detail.subUrls.length }} 子仓</template>
+            </span>
+            <span v-else class="muted">{{ singlePreview.errMsg || ' ' }}</span>
+          </template>
+          <span v-else class="err">✕ {{ singlePreview.errMsg }}</span>
+        </div>
+        <div class="form-row"><label>名称</label><input v-model="singleForm.name" placeholder="留空自动取域名"></div>
+        <div class="form-row"><label>分组</label>
+          <input v-model="singleForm.group" placeholder="默认" list="group-list">
+        </div>
+        <div class="form-row"><label>备注</label><input v-model="singleForm.remark"></div>
+        <div class="form-row">
+          <label>启用</label>
+          <switch-box :on="singleForm.enabled" @toggle="singleForm.enabled = !singleForm.enabled"></switch-box>
+          <span class="muted">添加后自动探活一次</span>
+        </div>
+        <div class="form-actions"><button class="btn primary" @click="addSingle">添加</button></div>
+      </div>
+
+      <!-- 批量粘贴 -->
+      <div class="panel" v-if="addTab==='paste'">
+        <div class="muted" style="margin-bottom:8px">
+          每行一条，# 开头为注释。支持以下写法（可混排）：<br>
+          ① <b>名称 地址</b>（空格分隔）　② <b>名称,URL</b>　③ <b>名称|URL</b>　④ 纯 URL<br>
+          当前分组：<b>{{ singleForm.group || '默认' }}</b>（在「单个添加」页修改）
+        </div>
+        <textarea v-model="batchText" rows="12" placeholder="肥猫 http://example.com/1.json&#10;饭太硬,http://example.com/2.json&#10;俊佬|http://example.com/3.json&#10;http://example.com/4.json"></textarea>
+        <div class="preview-inline" v-if="batchText.trim()">
+          已识别 <b>{{ batchParsed.count }}</b> 条，其中 <b>{{ batchParsed.dup }}</b> 条与现有源重复（导入时自动跳过）
+        </div>
+        <div class="form-actions"><button class="btn primary" @click="submitBatch">导入</button></div>
+        <div v-if="batchResult" class="result-box">
+          新增 {{ batchResult.added }} 条，跳过 {{ (batchResult.skipped||[]).length }} 条
+          <div v-for="sk in batchResult.skipped" :key="sk.url" class="muted">✕ {{ sk.url }} — {{ sk.reason }}</div>
+        </div>
+      </div>
+
+      <!-- 文件导入 -->
+      <div class="panel" v-if="addTab==='file'">
+        <label class="dropzone">
+          <input type="file" accept=".json,.txt" @change="handleFile" hidden>
+          📁 点击选择 .json / .txt 文件<br>
+          <span class="muted">.txt 每行一条（名称 地址 / 名称,URL / 名称|URL / 纯 URL）；.json 支持 {"urls":[…]} 与数组形态</span>
+        </label>
+        <div v-if="fileRows.length">
+          <div class="preview-inline">共 {{ fileRows.length }} 条，已勾选 {{ fileRows.filter(r=>r.checked).length }} 条</div>
+          <div class="table-wrap" style="max-height:320px">
+            <table>
+              <thead><tr><th></th><th>名称</th><th>地址</th><th>重复</th></tr></thead>
+              <tbody>
+                <tr v-for="(r, i) in fileRows" :key="i" :class="{disabled: r.dup}">
+                  <td><input type="checkbox" v-model="r.checked"></td>
+                  <td>{{ r.name || '（自动取名）' }}</td>
+                  <td class="url-cell">{{ r.url }}</td>
+                  <td><span v-if="r.dup" class="tag fail">已存在</span></td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+          <div class="form-actions"><button class="btn primary" @click="submitFileRows">导入勾选项</button></div>
+        </div>
+        <div v-if="fileResult" class="result-box">
+          新增 {{ fileResult.added }} 条，跳过 {{ (fileResult.skipped||[]).length }} 条
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ===== 备份导出弹窗 ===== -->
+  <div class="modal-mask" v-if="backupJson !== null" @click.self="backupJson=null">
+    <div class="modal wide">
+      <div class="modal-title">导出备份<button class="close" @click="backupJson=null">✕</button></div>
+      <div class="muted" style="margin-bottom:8px">
+        内容为 sources + config 全量 JSON（不含令牌）。若「下载文件」被浏览器/预览环境拦截，可直接复制内容另存为 .json 文件。
+      </div>
+      <textarea readonly rows="14" :value="backupJson" style="font-family:monospace;font-size:12px"></textarea>
+      <div class="form-actions">
+        <button class="btn" @click="copyBackup">复制内容</button>
+        <button class="btn primary" @click="downloadBackup">下载文件</button>
+      </div>
+    </div>
   </div>
 
   <!-- ===== 编辑弹窗 ===== -->
@@ -331,6 +470,24 @@
       <div class="form-actions">
         <button class="btn" @click="editSrc=null">取消</button>
         <button class="btn primary" @click="saveEdit">保存</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- ===== 所有仓源编辑弹窗 ===== -->
+  <div class="modal-mask" v-if="editFlat" @click.self="editFlat=null">
+    <div class="modal">
+      <div class="modal-title">编辑仓源<button class="close" @click="editFlat=null">✕</button></div>
+      <div class="form-row"><label>名称</label><input v-model="editFlat.name"></div>
+      <div class="form-row"><label>地址</label><input :value="editFlat.url" disabled></div>
+      <div class="form-row"><label>分组</label><input v-model="editFlat.group" list="flat-group-list">
+        <datalist id="flat-group-list"><option v-for="g in flatGroups" :key="g" :value="g"></option></datalist>
+      </div>
+      <div class="form-row"><label>排序值</label><input type="number" v-model.number="editFlat.sort"><span class="muted">小的在前</span></div>
+      <div class="form-row"><label>备注</label><input v-model="editFlat.remark"></div>
+      <div class="form-actions">
+        <button class="btn" @click="editFlat=null">取消</button>
+        <button class="btn primary" @click="saveFlatEdit">保存</button>
       </div>
     </div>
   </div>
@@ -422,6 +579,30 @@
 
 </div>
 
+<script>
+// 兜底：脚本报错/模板编译失败时不要让 [v-cloak] 把整页隐藏成白屏
+(function () {
+  function reveal(msg) {
+    var el = document.getElementById("app");
+    if (!el || !el.hasAttribute("v-cloak")) return;
+    el.removeAttribute("v-cloak");
+    el.innerHTML =
+      '<div style="margin:60px auto;max-width:560px;padding:20px;border:1px solid #ef4444;' +
+      'border-radius:10px;background:#fff5f5;color:#b91c1c;font-size:14px;line-height:1.7">' +
+      '<b>页面初始化失败</b><br>前端脚本没有正常启动，请按 F12 打开控制台查看详细错误。<br>' +
+      '<span style="color:#7f1d1d;word-break:break-all">' + (msg || "") + "</span></div>";
+  }
+  window.addEventListener("error", function (e) {
+    reveal(e && e.message ? e.message : "未知脚本错误");
+  });
+  window.addEventListener("DOMContentLoaded", function () {
+    // 2 秒后仍未挂载成功，说明有资源没加载上来
+    setTimeout(function () {
+      reveal(typeof window.Vue === "undefined" ? "vendor/vue.global.prod.js 未加载" : "app.js 未正常执行");
+    }, 2000);
+  });
+})();
+</script>
 <script src="vendor/vue.global.prod.js"></script>
 <script src="app.js"></script>
 </body>

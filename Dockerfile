@@ -1,5 +1,6 @@
 # ---------- 构建阶段 ----------
-FROM golang:1.23-alpine AS builder
+# 版本需与 go.mod 的 go 指令一致（go.mod: go 1.27.0），否则 go build 会报「requires go >= 1.27.0」
+FROM golang:1.27-alpine AS builder
 
 WORKDIR /src
 ENV CGO_ENABLED=0 GOOS=linux GOFLAGS=-trimpath
@@ -21,15 +22,18 @@ RUN apk add --no-cache ca-certificates tzdata wget \
 WORKDIR /app
 COPY --from=builder /out/tvbox-manager .
 
+# 这三项只是容器内的默认值，首次启动时写入 config.json；
+# 之后以后台「设置」/ config.json 为准，环境变量不再覆盖（ENV_OVERRIDE=1 可强制覆盖）
 ENV TZ=Asia/Shanghai \
     DATA_DIR=/data \
-    PORT=8080
+    PORT=8080 \
+    SUB_PATH=/sub
 
 USER app
 EXPOSE 8080
 VOLUME ["/data"]
 
 HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
-  CMD wget -qO- http://127.0.0.1:8080/healthz || exit 1
+  CMD wget -qO- "http://127.0.0.1:${PORT:-8080}/healthz" || exit 1
 
 ENTRYPOINT ["./tvbox-manager"]

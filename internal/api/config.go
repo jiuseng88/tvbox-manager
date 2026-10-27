@@ -1,7 +1,6 @@
 package api
 
 import (
-	"crypto/subtle"
 	"net/http"
 	"strings"
 	"time"
@@ -58,32 +57,6 @@ func (a *API) handleConfigPut(w http.ResponseWriter, r *http.Request) {
 	masked := cfg
 	masked.Token = "**"
 	ok(w, masked)
-}
-
-type tokenChangeReq struct {
-	OldToken string `json:"oldToken"`
-	NewToken string `json:"newToken"`
-}
-
-func (a *API) handleTokenChange(w http.ResponseWriter, r *http.Request) {
-	var req tokenChangeReq
-	if !decodeJSON(w, r, &req) {
-		return
-	}
-	cur := a.st.Config().Token
-	if subtle.ConstantTimeCompare([]byte(req.OldToken), []byte(cur)) != 1 {
-		writeErr(w, http.StatusUnauthorized, 401, "旧令牌不正确")
-		return
-	}
-	if len(req.NewToken) < 6 {
-		badRequest(w, "新令牌至少 6 位")
-		return
-	}
-	if err := a.st.UpdateToken(strings.TrimSpace(req.NewToken)); err != nil {
-		serverError(w, err)
-		return
-	}
-	ok(w, map[string]interface{}{"changed": true})
 }
 
 // handleExport 导出完整备份（Token 置空）

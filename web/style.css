@@ -95,12 +95,28 @@ td.slow { color: var(--warn); font-weight: 600; }
 .empty { text-align: center; color: var(--muted); padding: 30px 0 !important; }
 
 .pager { display: flex; gap: 10px; align-items: center; justify-content: center; padding: 12px; color: var(--muted); }
+.pager-total { color: var(--text); font-weight: 600; }
+
+/* 表头排序 */
+th.sortable { cursor: pointer; user-select: none; white-space: nowrap; }
+th.sortable:hover { color: #409eff; }
+th.sortable .arr { font-style: normal; font-size: 9px; margin-left: 2px; color: #409eff; }
 
 /* ---------- 状态点 / 标签 ---------- */
 .dot { display: inline-block; width: 9px; height: 9px; border-radius: 50%; background: #cbd5e1; vertical-align: middle; }
 .dot.ok { background: var(--ok); }
 .dot.fail { background: var(--fail); }
 .dot.big { width: 12px; height: 12px; }
+
+/* 状态文字：可用 / 不可用 / 未检测 */
+.st-text { font-size: 12px; margin-left: 4px; color: var(--muted); vertical-align: middle; }
+.st-text.ok { color: var(--ok); font-weight: 600; }
+.st-text.fail { color: var(--fail); font-weight: 600; }
+.st-text.checking { color: var(--warn); }
+.st-text.off { color: var(--warn); }
+
+/* 累计检测不通次数：大于 0 标红 */
+td.failnum { color: var(--fail); font-weight: 600; }
 
 .spinner {
   display: inline-block; width: 12px; height: 12px; border: 2px solid var(--line);

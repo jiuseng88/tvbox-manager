@@ -13,6 +13,7 @@ import (
 	"testing/fstest"
 	"time"
 
+	"tvbox-manager/internal/model"
 	"tvbox-manager/internal/scheduler"
 	"tvbox-manager/internal/store"
 )
@@ -39,7 +40,8 @@ func newEnv(t *testing.T) *testEnv {
 	cfg.StartupCheck = false
 	sch := scheduler.Start(st, &cfg)
 
-	webFS := fstest.MapFS{"web/index.html": &fstest.MapFile{Data: []byte("<html>ok</html>")}}
+	// webFS 以 web 目录为根（生产为 embed 子目录，开发模式为 os.DirFS）
+	webFS := fstest.MapFS{"index.html": &fstest.MapFile{Data: []byte("<html>ok</html>")}}
 	handler := New(st, sch, "test", webFS).Router()
 
 	mock := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -474,6 +476,180 @@ func TestSubOutputs(t *testing.T) {
 	}
 }
 
+// ---------- 订阅平铺（站点源：多仓展开 + 单仓并入） ----------
+
+func TestSubFlattenMulti(t *testing.T) {
+	e := newEnv(t)
+
+	// 源A：多仓，带子仓缓存（Update 触发同步 → 生成站点源）
+	code, body := e.doJSON("POST", "/api/sources", map[string]interface{}{
+		"name": "聚合A", "url": "http://multi.example/a.json", "autoCheck": false,
+	})
+	if code != 200 {
+		t.Fatalf("添加多仓源失败: %v", body)
+	}
+	idA := dataOf(t, body)["id"].(string)
+	e.st.Update(idA, func(sp *model.Source) {
+		sp.Type = model.TypeMulti
+		sp.Detail = &model.Detail{SubURLs: []model.SubURL{
+			{Name: "甲仓", URL: "http://flat1.example/a.json"},
+			{URL: "http://flat2.example/b.json"},
+		}}
+	})
+
+	// 源B：多仓，flat1 与 A 重复（同 URL 共享同一条站点源，父引用合并）
+	code, body = e.doJSON("POST", "/api/sources", map[string]interface{}{
+		"name": "聚合B", "url": "http://multi.example/other.json", "autoCheck": false,
+	})
+	if code != 200 {
+		t.Fatalf("添加源B失败: %v", body)
+	}
+	idB := dataOf(t, body)["id"].(string)
+	e.st.Update(idB, func(sp *model.Source) {
+		sp.Type = model.TypeMulti
+		sp.Detail = &model.Detail{SubURLs: []model.SubURL{
+			{Name: "缓存子仓", URL: "http://flat1.example/a.json"}, // 重复 → 首次名称优先
+			{URL: "http://flat3.example/c.json"},
+		}}
+	})
+
+	// 源C：单仓，自身并入
+	code, body = e.doJSON("POST", "/api/sources", map[string]interface{}{
+		"name": "单仓C", "url": "http://flat4.example/d.json", "autoCheck": false,
+	})
+	if code != 200 {
+		t.Fatalf("添加单仓源失败: %v", body)
+	}
+
+	_, bodyStr := e.do("GET", "/sub", "", "", "")
+	var sub struct {
+		URLs []struct {
+			URL  string `json:"url"`
+			Name string `json:"name"`
+		} `json:"urls"`
+	}
+	if err := json.Unmarshal([]byte(bodyStr), &sub); err != nil {
+		t.Fatalf("订阅 JSON 解析失败: %v %s", err, bodyStr)
+	}
+
+	// 期望（按名称排序）：单仓C、甲仓（flat1，A 首次命名）、聚合A（flat2 无名兜底父仓名）、聚合B（flat3）
+	want := []struct{ url, name string }{
+		{"http://flat4.example/d.json", "单仓C"},
+		{"http://flat1.example/a.json", "甲仓"},
+		{"http://flat2.example/b.json", "聚合A"},
+		{"http://flat3.example/c.json", "聚合B"},
+	}
+	if len(sub.URLs) != len(want) {
+		t.Fatalf("平铺后应 %d 条，实际 %d 条: %s", len(want), len(sub.URLs), bodyStr)
+	}
+	for i, w := range want {
+		if sub.URLs[i].URL != w.url || sub.URLs[i].Name != w.name {
+			t.Fatalf("第 %d 条应为 %s(%s)，实际 %s(%s): %s", i+1, w.url, w.name, sub.URLs[i].URL, sub.URLs[i].Name, bodyStr)
+		}
+	}
+	// 多仓地址本身不应出现在订阅结果里
+	if strings.Contains(bodyStr, "multi.example") {
+		t.Fatalf("订阅输出不应包含多仓地址本身: %s", bodyStr)
+	}
+
+	// txt 同样来自站点源
+	_, bodyStr = e.do("GET", "/sub/txt", "", "", "")
+	if !strings.Contains(bodyStr, "http://flat1.example/a.json") || strings.Contains(bodyStr, "multi.example") {
+		t.Fatalf("txt 输出应来自站点源: %s", bodyStr)
+	}
+}
+
+// ---------- 站点源联动：父源禁用同步、单独禁用互不干扰 ----------
+
+func TestFlatDisableSync(t *testing.T) {
+	e := newEnv(t)
+
+	// 多仓源 + 两个子仓
+	code, body := e.doJSON("POST", "/api/sources", map[string]interface{}{
+		"name": "聚合A", "url": "http://multi.example/a.json", "autoCheck": false,
+	})
+	if code != 200 {
+		t.Fatalf("添加多仓源失败: %v", body)
+	}
+	idA := dataOf(t, body)["id"].(string)
+	e.st.Update(idA, func(sp *model.Source) {
+		sp.Type = model.TypeMulti
+		sp.Detail = &model.Detail{SubURLs: []model.SubURL{
+			{Name: "甲仓", URL: "http://flat1.example/a.json"},
+			{URL: "http://flat2.example/b.json"},
+		}}
+	})
+
+	subContains := func(needle string) bool {
+		_, s := e.do("GET", "/sub", "", "", "")
+		return strings.Contains(s, needle)
+	}
+	if !subContains("flat1.example") {
+		t.Fatal("初始订阅应含 flat1")
+	}
+
+	// 拿到站点源 id
+	_, fb := e.doJSON("GET", "/api/flats?keyword=flat1", nil)
+	flatList := dataOf(t, fb)["list"].([]interface{})
+	if len(flatList) != 1 {
+		t.Fatalf("应恰好 1 条 flat1 站点源: %v", fb)
+	}
+	flatID := flatList[0].(map[string]interface{})["id"].(string)
+
+	// 父源禁用 → 关联站点源同步失效，订阅不含
+	e.doJSON("POST", "/api/sources/"+idA+"/toggle", nil)
+	if subContains("flat1.example") {
+		t.Fatal("父源禁用后订阅不应含 flat1")
+	}
+	// 父源恢复 → 自动恢复（不覆盖单独状态）
+	e.doJSON("POST", "/api/sources/"+idA+"/toggle", nil)
+	if !subContains("flat1.example") {
+		t.Fatal("父源恢复后订阅应重新含 flat1")
+	}
+
+	// 单独禁用站点源 → 订阅不含；父源切换不影响该单独状态
+	e.doJSON("POST", "/api/flats/"+flatID+"/toggle", nil)
+	if subContains("flat1.example") {
+		t.Fatal("单独禁用后订阅不应含 flat1")
+	}
+	e.doJSON("POST", "/api/sources/"+idA+"/toggle", nil)
+	if subContains("flat1.example") {
+		t.Fatal("父源禁用后不应含 flat1")
+	}
+	e.doJSON("POST", "/api/sources/"+idA+"/toggle", nil)
+	if subContains("flat1.example") {
+		t.Fatal("父源恢复后，单独禁用的 flat1 仍不应输出")
+	}
+	// 恢复单独启用
+	e.doJSON("POST", "/api/flats/"+flatID+"/toggle", nil)
+	if !subContains("flat1.example") {
+		t.Fatal("重新启用后订阅应含 flat1")
+	}
+
+	// 父源删除：flat1 被单仓C 共享 → 保留但父引用只剩单仓C；flat2 无父 → 删除
+	code, body = e.doJSON("POST", "/api/sources", map[string]interface{}{
+		"name": "单仓C", "url": "http://flat1.example/a.json", "autoCheck": false,
+	})
+	if code != 200 {
+		t.Fatal("添加共享子仓的单仓失败")
+	}
+	e.doJSON("DELETE", "/api/sources/"+idA, nil)
+	_, fb = e.doJSON("GET", "/api/flats?keyword=flat1", nil)
+	flatList = dataOf(t, fb)["list"].([]interface{})
+	if len(flatList) != 1 {
+		t.Fatalf("flat1 还有单仓C 父源，应保留: %v", fb)
+	}
+	parents := flatList[0].(map[string]interface{})["parentNames"].([]interface{})
+	if len(parents) != 1 || parents[0].(string) != "单仓C" {
+		t.Fatalf("flat1 父引用应只剩单仓C: %v", parents)
+	}
+	_, fb = e.doJSON("GET", "/api/flats?keyword=flat2", nil)
+	flatList = dataOf(t, fb)["list"].([]interface{})
+	if len(flatList) != 0 {
+		t.Fatalf("flat2 无父引用应已删除: %v", fb)
+	}
+}
+
 // ---------- 配置与备份 ----------
 
 func TestConfigAndBackup(t *testing.T) {
@@ -503,17 +679,9 @@ func TestConfigAndBackup(t *testing.T) {
 		t.Fatal("非法间隔应 400")
 	}
 
-	// 令牌修改
-	if code, _ := e.doJSON("POST", "/api/config/token", map[string]string{"oldToken": "wrong", "newToken": "abc12345"}); code != 401 {
-		t.Fatal("旧令牌错误应 401")
-	}
-	code, _ = e.doJSON("POST", "/api/config/token", map[string]string{"oldToken": e.token, "newToken": "new-token-9"})
-	if code != 200 {
-		t.Fatal("令牌修改失败")
-	}
-	e.token = "new-token-9"
-	if code, _ := e.do("GET", "/api/sources", e.token, "", ""); code != 200 {
-		t.Fatal("新令牌应可用")
+	// 令牌修改接口已移除：只能通过配置文件改令牌
+	if code, _ := e.doJSON("POST", "/api/config/token", map[string]string{"oldToken": e.token, "newToken": "new-token-9"}); code != 404 {
+		t.Fatal("令牌修改接口应已移除（404）")
 	}
 
 	// 导出 → 清空 → 导入 replace

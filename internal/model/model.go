@@ -40,6 +40,8 @@ type Source struct {
 	CheckMsg    string     `json:"checkMsg"` // 失败原因或成功摘要
 	FailStreak  int        `json:"failStreak"`
 	OKStreak    int        `json:"okStreak"`
+	CheckCount  int        `json:"checkCount"` // 累计检测次数
+	FailCount   int        `json:"failCount"`  // 累计检测不通次数
 	LastOKAt    *time.Time `json:"lastOkAt,omitempty"`
 
 	// —— 解析出的结构信息（探活/预览时回填）——
@@ -66,10 +68,43 @@ type SubURL struct {
 	Status string `json:"status,omitempty"` // 子仓单独探活结果（可选功能）
 }
 
+// FlatSource 平铺站点源：由源列表自动展开生成（多仓拆为子仓、单仓并入自身），
+// 订阅接口的数据源。同一 URL 出现在多个父源时共享同一条，ParentIDs 记录全部来源。
+type FlatSource struct {
+	ID        string    `json:"id"`
+	Name      string    `json:"name"`
+	URL       string    `json:"url"`      // 归一化后全局唯一
+	ParentIDs []string  `json:"parentIds"` // 关联父源 ID
+	Enabled   bool      `json:"enabled"`   // 自身开关；实际生效 = 自身 && 任一父源启用
+	Group     string    `json:"group"`
+	Remark    string    `json:"remark"`
+	Sort      int       `json:"sort"`       // 创建时继承父源排序，可单独改
+	NameAuto  bool      `json:"nameAuto"`  // 名称是否随父源同步（手动改名后置 false）
+	GroupAuto bool      `json:"groupAuto"` // 分组是否随父源同步（手动改组后置 false）
+
+	CreatedAt time.Time `json:"createdAt"`
+	UpdatedAt time.Time `json:"updatedAt"`
+
+	// —— 探活结果（可单独检测）——
+	LastCheckAt *time.Time `json:"lastCheckAt,omitempty"`
+	Status      string     `json:"status"` // ok / fail / unknown / checking
+	HTTPCode    int        `json:"httpCode"`
+	LatencyMs   int64      `json:"latencyMs"`
+	CheckMsg    string     `json:"checkMsg"`
+	CheckCount  int        `json:"checkCount"` // 累计检测次数
+	FailCount   int        `json:"failCount"`  // 累计检测不通次数
+	LastOKAt    *time.Time `json:"lastOkAt,omitempty"`
+
+	// —— 运行时计算字段（每次列表查询重算，不作为持久化依据）——
+	EffectiveEnabled bool     `json:"effectiveEnabled"` // 是否生效进入订阅
+	ParentNames      []string `json:"parentNames,omitempty"`
+}
+
 // Data 持久化根对象（data.json）
 type Data struct {
-	Version int      `json:"version"`
-	Sources []Source `json:"sources"`
+	Version int          `json:"version"`
+	Sources []Source     `json:"sources"`
+	Flats   []FlatSource `json:"flats,omitempty"` // 平铺站点源（由 Sources 自动同步生成）
 }
 
 // Config 系统配置（config.json），全部可通过环境变量覆盖初值
@@ -83,7 +118,6 @@ type Config struct {
 	StartupCheck          bool   `json:"startupCheck"`          // 启动后是否立即探活，默认 false
 	AutoDisableAfterFails int    `json:"autoDisableAfterFails"` // 连续失败 N 次自动禁用，0=不自动
 	InsecureSkipVerify    bool   `json:"insecureSkipVerify"`    // 跳过 TLS 校验，默认 true
-	UserAgent             string `json:"userAgent"`             // 探活 UA
 	CheckSubURLs          bool   `json:"checkSubUrls"`          // 是否递归探活多仓子仓
 }
 
@@ -127,7 +161,6 @@ func DefaultConfig() Config {
 		StartupCheck:         false,
 		AutoDisableAfterFails: 0,
 		InsecureSkipVerify:   true,
-		UserAgent:            "okhttp/4.9.1",
 		CheckSubURLs:         false,
 	}
 }

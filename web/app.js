@@ -55,15 +55,18 @@
     if (n < 1048576) return (n / 1024).toFixed(1) + "KB";
     return (n / 1048576).toFixed(1) + "MB";
   }
-  // 「名称,URL / 名称|URL / 纯URL」行解析（与后端一致）
+  // 「名称 URL / 名称,URL / 名称|URL / 纯URL」行解析（与后端一致）；空格/Tab 分隔时 URL 在后
   function parseLine(line) {
     const s = (line || "").trim();
     if (!s || s.startsWith("#")) return null;
     if (s.startsWith("http://") || s.startsWith("https://")) return { name: "", url: s };
-    for (const sep of ["|", ","]) {
+    for (const sep of ["|", ","] ) {
       const i = s.indexOf(sep);
       if (i > 0) return { name: s.slice(0, i).trim(), url: s.slice(i + 1).trim() };
     }
+    // 「名称 地址」空格/Tab 分隔（地址不含空格，取第一个空白切分）
+    const m = s.match(/^(\S+)[\s\t]+(\S+)$/);
+    if (m) return { name: m[1], url: m[2] };
     return { name: "", url: s };
   }
 
@@ -108,6 +111,7 @@
         pollTimer = setInterval(() => {
           if (progress.value.running || view.value === "dashboard") loadProgress();
           if (progress.value.running && view.value === "sources") loadSources();
+          if (progress.value.running && view.value === "flats") loadFlats();
         }, 2000);
       }
       function stopPolling() { if (pollTimer) clearInterval(pollTimer); }
@@ -122,20 +126,29 @@
       /* ---- 源列表 ---- */
       const list = ref([]);
       const total = ref(0);
-      const filters = reactive({ keyword: "", type: "", status: "", group: "", enabled: "", page: 1, size: 50, sort: "" });
+      const filters = reactive({ keyword: "", type: "", status: "", group: "", enabled: "", page: 1, size: 50, sort: "", sort_by: "", sort_dir: "" });
       const groups = ref([]);
       const checked = ref([]);
       let searchDebounce = null;
+      let sourceReqSeq = 0; // 请求序号：翻页/轮询并发时只采纳最新响应，防止旧响应覆盖新页内容
 
       async function loadSources() {
+        const seq = ++sourceReqSeq;
         const q = new URLSearchParams();
         Object.keys(filters).forEach(k => { if (filters[k] !== "" && filters[k] != null) q.set(k, filters[k]); });
         try {
           const data = await api("GET", "/api/sources?" + q.toString());
+          if (seq !== sourceReqSeq) return; // 已有更新的请求在途，丢弃本次旧响应
           list.value = data.list || [];
           total.value = data.total || 0;
           checked.value = checked.value.filter(id => list.value.some(s => s.id === id));
-        } catch (e) { toast(e.message, "error"); }
+          // 数据变少导致当前页越界时，自动回到最后一页重载
+          const maxPage = Math.max(1, Math.ceil(total.value / filters.size));
+          if (!list.value.length && filters.page > maxPage) {
+            filters.page = maxPage;
+            loadSources();
+          }
+        } catch (e) { if (seq === sourceReqSeq) toast(e.message, "error"); }
       }
       async function loadGroups() {
         try { groups.value = await api("GET", "/api/groups"); } catch (e) { /* 忽略 */ }
@@ -146,6 +159,17 @@
         searchDebounce = setTimeout(applyFilter, 300);
       });
       watch(() => [filters.type, filters.status, filters.group, filters.enabled, filters.sort], applyFilter);
+      // 选了下拉排序（失效置顶）时清掉表头排序，避免两者叠加
+      watch(() => filters.sort, (v) => { if (v) { filters.sort_by = ""; filters.sort_dir = ""; } });
+      // ---- 表头排序：点击升序 -> 再点降序 -> 三点恢复默认 ----
+      function sortArrow(key) { return filters.sort_by === key ? (filters.sort_dir === "asc" ? "▲" : "▼") : ""; }
+      function toggleSort(key) {
+        if (filters.sort_by === key) {
+          if (filters.sort_dir === "asc") { filters.sort_dir = "desc"; }
+          else { filters.sort_by = ""; filters.sort_dir = ""; }
+        } else { filters.sort_by = key; filters.sort_dir = "asc"; }
+        applyFilter();
+      }
 
       function summary(s) {
         if (!s.detail) return "—";
@@ -183,9 +207,19 @@
           if (!group) return;
         }
         if (action === "delete" && !confirm(`确认删除选中的 ${checked.value.length} 个源？`)) return;
+        const ids = [...checked.value];
+        const idSet = new Set(ids);
         try {
-          const r = await api("POST", "/api/sources/batch-action", { ids: checked.value, action, group });
-          toast(`批量${action} 完成：${r.affected} 条`, "ok");
+          const r = await api("POST", "/api/sources/batch-action", { ids, action, group });
+          const label = { enable: "启用", disable: "禁用", group: "移组", delete: "删除" }[action] || action;
+          toast(`批量${label}完成：${r.affected} 条`, "ok");
+          // 先本地同步刷新开关状态（不等接口回查，避免视觉延迟）
+          if (action === "enable" || action === "disable") {
+            const want = action === "enable";
+            list.value = list.value.map(s => idSet.has(s.id) ? { ...s, enabled: want } : s);
+          } else if (action === "group") {
+            list.value = list.value.map(s => idSet.has(s.id) ? { ...s, group } : s);
+          }
           checked.value = [];
           loadSources(); loadGroups(); loadStats();
         } catch (e) { toast(e.message, "error"); }
@@ -219,6 +253,8 @@
       function retryPreview() {
         if (preview.value && preview.value.id) {
           openPreview({ id: preview.value.id, name: preview.value.name });
+        } else if (preview.value && preview.value.url) {
+          openFlatPreview({ name: preview.value.name, url: preview.value.url });
         }
       }
       async function batchCheck() {
@@ -243,8 +279,151 @@
           });
       }
 
-      /* ---- 添加源 ---- */
+      /* ---- 站点源（平铺层，订阅数据源） ---- */
+      const flatList = ref([]);
+      const flatsTotal = ref(0);
+      const flatFilters = reactive({ keyword: "", status: "", group: "", enabled: "", page: 1, size: 50, sort: "", sort_by: "", sort_dir: "" });
+      const flatGroups = ref([]);
+      const flatChecked = ref([]);
+      let flatSearchDebounce = null;
+      let flatReqSeq = 0; // 请求序号：同 loadSources，防止旧响应覆盖新页内容
+
+      async function loadFlats() {
+        const seq = ++flatReqSeq;
+        const q = new URLSearchParams();
+        Object.keys(flatFilters).forEach(k => { if (flatFilters[k] !== "" && flatFilters[k] != null) q.set(k, flatFilters[k]); });
+        try {
+          const data = await api("GET", "/api/flats?" + q.toString());
+          if (seq !== flatReqSeq) return; // 已有更新的请求在途，丢弃本次旧响应
+          flatList.value = data.list || [];
+          flatsTotal.value = data.total || 0;
+          flatChecked.value = flatChecked.value.filter(id => flatList.value.some(f => f.id === id));
+          // 数据变少导致当前页越界时，自动回到最后一页重载
+          const maxPage = Math.max(1, Math.ceil(flatsTotal.value / flatFilters.size));
+          if (!flatList.value.length && flatFilters.page > maxPage) {
+            flatFilters.page = maxPage;
+            loadFlats();
+          }
+        } catch (e) { if (seq === flatReqSeq) toast(e.message, "error"); }
+      }
+      async function loadFlatGroups() {
+        try { flatGroups.value = await api("GET", "/api/flats/groups"); } catch (e) { /* 忽略 */ }
+      }
+      function applyFlatFilter() { flatFilters.page = 1; loadFlats(); }
+      watch(() => flatFilters.keyword, () => {
+        clearTimeout(flatSearchDebounce);
+        flatSearchDebounce = setTimeout(applyFlatFilter, 300);
+      });
+      watch(() => [flatFilters.status, flatFilters.group, flatFilters.enabled, flatFilters.sort], applyFlatFilter);
+      // 选了下拉排序（失效置顶）时清掉表头排序，避免两者叠加
+      watch(() => flatFilters.sort, (v) => { if (v) { flatFilters.sort_by = ""; flatFilters.sort_dir = ""; } });
+      // ---- 表头排序：点击升序 -> 再点降序 -> 三点恢复默认 ----
+      function flatSortArrow(key) { return flatFilters.sort_by === key ? (flatFilters.sort_dir === "asc" ? "▲" : "▼") : ""; }
+      function toggleFlatSort(key) {
+        if (flatFilters.sort_by === key) {
+          if (flatFilters.sort_dir === "asc") { flatFilters.sort_dir = "desc"; }
+          else { flatFilters.sort_by = ""; flatFilters.sort_dir = ""; }
+        } else { flatFilters.sort_by = key; flatFilters.sort_dir = "asc"; }
+        applyFlatFilter();
+      }
+      function flatPages() { return Math.max(1, Math.ceil(flatsTotal.value / flatFilters.size)); }
+
+      function flatStatusText(f) {
+        if (!f.effectiveEnabled) return f.enabled ? "父源禁用" : "已禁用";
+        return { ok: "可用", fail: "不可用", checking: "检测中" }[f.status] || "未检测";
+      }
+      function flatStatusClass(f) {
+        if (!f.effectiveEnabled) return "off";
+        return f.status || "";
+      }
+      async function toggleFlat(f) {
+        try { await api("POST", "/api/flats/" + f.id + "/toggle"); f.enabled = !f.enabled; }
+        catch (e) { toast(e.message, "error"); }
+      }
+      async function checkFlat(f) {
+        try {
+          await api("POST", "/api/flats/" + f.id + "/check");
+          f.status = "checking";
+          toast("正在检测 " + f.name, "info");
+          setTimeout(loadFlats, 2500);
+        } catch (e) { toast(e.message, "error"); }
+      }
+      function delFlat(f) {
+        if (!confirm(`确认删除站点源「${f.name}」？\n注意：若其父源下次检测仍包含该地址，会重新生成。`)) return;
+        api("DELETE", "/api/flats/" + f.id).then(() => {
+          toast("已删除", "ok"); loadFlats(); loadFlatGroups();
+        }).catch(e => toast(e.message, "error"));
+      }
+      const flatBatchBar = computed(() => flatChecked.value.length > 0);
+      async function flatBatchAction(action) {
+        let group = "";
+        if (action === "group") {
+          group = prompt("移入分组名称：", "新分组");
+          if (!group) return;
+        }
+        if (action === "delete" && !confirm(`确认删除选中的 ${flatChecked.value.length} 个站点源？`)) return;
+        const ids = [...flatChecked.value];
+        const idSet = new Set(ids);
+        try {
+          const r = await api("POST", "/api/flats/batch-action", { ids, action, group });
+          const label = { enable: "启用", disable: "禁用", group: "移组", delete: "删除" }[action] || action;
+          toast(`批量${label}完成：${r.affected} 条`, "ok");
+          // 先本地同步刷新开关状态（不等接口回查，避免视觉延迟）
+          if (action === "enable" || action === "disable") {
+            const want = action === "enable";
+            flatList.value = flatList.value.map(f => idSet.has(f.id) ? { ...f, enabled: want, effectiveEnabled: want && (f.parentNames || []).length > 0 } : f);
+          } else if (action === "group") {
+            flatList.value = flatList.value.map(f => idSet.has(f.id) ? { ...f, group } : f);
+          }
+          flatChecked.value = [];
+          loadFlats(); loadFlatGroups();
+        } catch (e) { toast(e.message, "error"); }
+      }
+      async function batchCheckFlats() {
+        const ids = [...flatChecked.value];
+        for (const id of ids) {
+          try { await api("POST", "/api/flats/" + id + "/check"); } catch (e) { /* 单条失败继续 */ }
+        }
+        toast(`已发起 ${ids.length} 条检测`, "ok");
+        flatChecked.value = [];
+        setTimeout(loadFlats, 3000);
+      }
+      const editFlat = ref(null);
+      function openFlatEdit(f) { editFlat.value = { ...f, _id: f.id }; }
+      async function saveFlatEdit() {
+        const f = editFlat.value;
+        try {
+          await api("PUT", "/api/flats/" + f._id, {
+            name: f.name, group: f.group, remark: f.remark, sort: Number(f.sort) || 0,
+          });
+          toast("已保存", "ok"); editFlat.value = null; loadFlats(); loadFlatGroups();
+        } catch (err) { toast(err.message, "error"); }
+      }
+      function openFlatPreview(f) {
+        preview.value = { loading: true, name: f.name, id: "", url: f.url, data: null, error: "" };
+        api("GET", "/api/preview?url=" + encodeURIComponent(f.url)).then(data => {
+          preview.value.data = data; preview.value.loading = false;
+        }).catch(e => {
+          preview.value.loading = false; preview.value.error = e.message;
+        });
+      }
+
+      /* ---- 添加源（弹窗） ---- */
+      const showAdd = ref(false);
       const addTab = ref("single");
+      // 全量源 URL 集合：去重预检用（列表是分页的，不能用当前页判断重复）
+      const knownUrls = ref(new Set());
+      async function loadKnownUrls() {
+        try {
+          const all = await api("GET", "/api/sources?size=500");
+          knownUrls.value = new Set((all.list || []).map(s => s.url));
+        } catch (e) { /* 静默 */ }
+      }
+      function openAddModal() {
+        addTab.value = "single";
+        loadGroups(); loadKnownUrls();
+        showAdd.value = true;
+      }
       const singleForm = reactive({ name: "", url: "", group: "", remark: "", enabled: true });
       const singlePreview = ref(null);
       const singlePreviewing = ref(false);
@@ -264,7 +443,8 @@
           toast("已添加，正在后台探活", "ok");
           singleForm.name = ""; singleForm.url = ""; singleForm.remark = "";
           singlePreview.value = null;
-          loadGroups();
+          showAdd.value = false;
+          loadSources(); loadGroups(); loadKnownUrls();
         } catch (e) { toast(e.message, "error"); }
       }
 
@@ -272,9 +452,8 @@
       const batchResult = ref(null);
       const batchParsed = computed(() => {
         const lines = batchText.value.split(/\r?\n/).map(parseLine).filter(Boolean);
-        const known = new Set(list.value.map(s => s.url));
         let dup = 0;
-        lines.forEach(l => { if (known.has(l.url)) dup++; });
+        lines.forEach(l => { if (knownUrls.value.has(l.url)) dup++; });
         return { count: lines.length, dup };
       });
       async function submitBatch() {
@@ -287,7 +466,7 @@
           });
           toast(`已添加 ${batchResult.value.added} 条`, "ok");
           batchText.value = "";
-          loadGroups();
+          loadSources(); loadGroups(); loadKnownUrls();
         } catch (e) { toast(e.message, "error"); }
       }
 
@@ -302,7 +481,7 @@
         rd.onload = () => {
           const text = String(rd.result || "");
           const rows = [];
-          const known = new Set(list.value.map(s => s.url));
+          const known = knownUrls.value;
           const addRow = (name, url) => rows.push({ name: name || "", url, dup: known.has(url), checked: !known.has(url) });
           if (/\.json$/i.test(f.name)) {
             try {
@@ -335,19 +514,18 @@
           });
           toast(`已导入 ${fileResult.value.added} 条`, "ok");
           fileRows.value = [];
-          loadGroups();
+          loadSources(); loadGroups(); loadKnownUrls();
         } catch (e) { toast(e.message, "error"); }
       }
 
       /* ---- 设置 ---- */
       const config = ref(null);
-      const tokenForm = reactive({ oldToken: "", newToken: "" });
       const subUrls = computed(() => {
         if (!config.value) return [];
         const base = location.origin;
         const p = config.value.subPath || "/sub";
         return [
-          { label: "订阅地址（多仓 JSON）", url: base + p },
+          { label: "订阅地址（所有仓源列表）", url: base + p },
           { label: "饭太硬风格", url: base + p + "?format=fan" },
           { label: "纯文本", url: base + p + "/txt" },
           { label: "带前缀示例", url: base + p + "?name=客厅" },
@@ -368,28 +546,37 @@
             startupCheck: !!c.startupCheck,
             autoDisableAfterFails: Number(c.autoDisableAfterFails) || 0,
             insecureSkipVerify: !!c.insecureSkipVerify,
-            userAgent: c.userAgent, checkSubUrls: !!c.checkSubUrls,
+            checkSubUrls: !!c.checkSubUrls,
           });
           toast("配置已保存（探活设置立即生效）", "ok");
         } catch (e) { toast(e.message, "error"); }
       }
-      async function changeToken() {
+      /* ---- 备份导出（弹窗展示，避免预览环境拦截下载） ---- */
+      const backupJson = ref(null);
+      async function openBackupModal() {
         try {
-          await api("POST", "/api/config/token", { ...tokenForm });
-          store.token = tokenForm.newToken;
-          tokenForm.oldToken = tokenForm.newToken = "";
-          toast("令牌已修改", "ok");
+          const data = await api("GET", "/api/export");
+          backupJson.value = JSON.stringify(data, null, 2);
         } catch (e) { toast(e.message, "error"); }
       }
-      function exportBackup() {
-        api("GET", "/api/export").then(data => {
-          const blob = new Blob([JSON.stringify(data, null, 2)], { type: "application/json" });
-          const a = document.createElement("a");
-          a.href = URL.createObjectURL(blob);
-          a.download = "tvbox-manager-backup-" + new Date().toISOString().slice(0, 10) + ".json";
-          a.click(); URL.revokeObjectURL(a.href);
-          toast("备份已导出", "ok");
-        }).catch(e => toast(e.message, "error"));
+      async function copyBackup() {
+        try { await navigator.clipboard.writeText(backupJson.value || ""); toast("已复制到剪贴板", "ok"); }
+        catch (e) {
+          // 剪贴板 API 不可用时降级：选中文本提示手动复制
+          const ta = document.querySelector(".modal textarea");
+          if (ta) { ta.focus(); ta.select(); toast("已全选，请按 Ctrl+C 复制", "info"); }
+          else toast("复制失败", "error");
+        }
+      }
+      function downloadBackup() {
+        const blob = new Blob([backupJson.value || ""], { type: "application/json" });
+        const a = document.createElement("a");
+        a.href = URL.createObjectURL(blob);
+        a.download = "tvbox-manager-backup-" + new Date().toISOString().slice(0, 10) + ".json";
+        document.body.appendChild(a);
+        a.click(); a.remove();
+        setTimeout(() => URL.revokeObjectURL(a.href), 3000);
+        toast("已发起下载（若无响应请直接复制内容）", "ok");
       }
       function importBackup() {
         const inp = document.createElement("input");
@@ -428,13 +615,14 @@
       function boot(force) {
         if (!store.token) { needLogin.value = true; return; }
         needLogin.value = false;
-        loadStats(); loadSources(); loadGroups(); loadConfig();
+        loadStats(); loadSources(); loadGroups(); loadConfig(); loadFlats(); loadFlatGroups();
         startPolling();
       }
       onMounted(boot);
       watch(view, (v) => {
         if (v === "dashboard") { loadStats(); loadProgress(); }
         if (v === "sources") { loadSources(); loadGroups(); }
+        if (v === "flats") { loadFlats(); loadFlatGroups(); }
         if (v === "settings") loadConfig();
       });
       // api() 的 401 门控指向本组件
@@ -442,13 +630,21 @@
       return {
         view, needLogin, tokenInput, toasts, toast, relTime, absTime, fmtBytes, copyText,
         stats, progress, groupDist, runCheckAll, loadStats,
-        list, total, filters, groups, checked, summary, pages, toggleSource, checkOne, delSource,
+        list, total, filters, groups, checked, summary, pages, loadSources, loadGroups, applyFilter,
+        sortArrow, toggleSort,
+        toggleSource, checkOne, delSource,
+        flatList, flatsTotal, flatFilters, flatGroups, flatChecked, flatPages, loadFlats, loadFlatGroups, applyFlatFilter,
+        flatSortArrow, toggleFlatSort,
+        flatStatusText, flatStatusClass, toggleFlat, checkFlat, delFlat, flatBatchAction, batchCheckFlats,
+        editFlat, openFlatEdit, saveFlatEdit, openFlatPreview,
         batchBar, batchAction, editSrc, openEdit, saveEdit,
         preview, openPreview, retryPreview, siteNamesExpanded, rawExpanded, batchCheck,
         addTab, singleForm, singlePreview, singlePreviewing, previewUrl, addSingle,
         batchText, batchResult, batchParsed, submitBatch,
+        showAdd, openAddModal, knownUrls,
         fileRows, fileResult, handleFile, submitFileRows,
-        config, tokenForm, subUrls, loadConfig, saveConfig, changeToken, exportBackup, importBackup,
+        config, subUrls, loadConfig, saveConfig,
+        backupJson, openBackupModal, copyBackup, downloadBackup, importBackup,
         login, logout,
       };
     },
