@@ -109,18 +109,10 @@ func (s *Store) loadConfig() error {
 	applyEnv(&cfg, present)
 	sanitizeConfig(&cfg)
 
-	firstRun := false
-	if cfg.Token == "" {
-		cfg.Token = randToken(16)
-		firstRun = true
-	}
+	// 令牌为空 = 无鉴权模式：不自动生成，后台 /api/* 不校验，
+	// 前端会在登录页与设置页提示尽快设置（是否设置由用户决定）。
+	// 首次启动可用环境变量 TOKEN 提供初值；之后以 config.json 为准。
 	s.cfg = &cfg
-	if firstRun {
-		fmt.Printf("[store] ================= 警告 =================\n")
-		fmt.Printf("[store] 已随机生成后台访问令牌: %s\n", cfg.Token)
-		fmt.Printf("[store] 请立即登录后台在「设置」中修改，或用环境变量 TOKEN 指定\n")
-		fmt.Printf("[store] =======================================\n")
-	}
 	return s.saveConfigLocked()
 }
 
@@ -284,14 +276,6 @@ func envBool(name string) bool {
 func envBoolValue(v string) bool {
 	v = strings.TrimSpace(v)
 	return strings.EqualFold(v, "true") || v == "1" || strings.EqualFold(v, "yes")
-}
-
-func randToken(n int) string {
-	b := make([]byte, n)
-	if _, err := rand.Read(b); err != nil {
-		return fmt.Sprintf("t%d", time.Now().UnixNano())
-	}
-	return hex.EncodeToString(b)[:n]
 }
 
 // ---------- 数据 ----------

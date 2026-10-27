@@ -13,9 +13,10 @@
   <div class="login-mask" v-if="needLogin">
     <div class="login-box">
       <div class="login-title">📺 TVBox 源维护系统</div>
-      <div class="login-sub">请输入后台访问令牌（首次启动时打印在服务日志中）</div>
-      <input type="password" v-model="tokenInput" placeholder="访问令牌" @keyup.enter="login">
+      <div class="login-sub">{{ authRequired ? '请输入后台访问令牌（首次启动时打印在服务日志中）' : '未设置访问令牌（无鉴权模式），可直接进入' }}</div>
+      <input type="password" v-model="tokenInput" :placeholder="authRequired ? '访问令牌' : '无需令牌，直接点进入'" @keyup.enter="login">
       <button class="btn primary block" @click="login">进入后台</button>
+      <div class="muted" v-if="!authRequired" style="margin-top:8px">⚠️ 建议进入后在「设置 → 访问令牌」中设置一个令牌，改不改由你决定。</div>
     </div>
   </div>
 
@@ -345,14 +346,17 @@
         <div class="panel">
           <div class="panel-title">访问令牌</div>
           <div class="muted" style="margin-bottom:8px">令牌用于管理后台与 /api/* 的访问；订阅接口不校验令牌。当前令牌不回显，只显示占位符。</div>
+          <div class="form-row" v-if="!authRequired" style="border-left:3px solid #e67e22;padding-left:8px">
+            <span class="muted">⚠️ 当前<b>未设置访问令牌</b>，后台处于无鉴权模式，任何知道地址的人都能修改配置。是否设置由你决定，内网也建议设一个。</span>
+          </div>
           <div class="form-row"><label>当前令牌</label><input value="••••••••（已隐藏）" disabled></div>
-          <div class="form-row"><label>新令牌 <span class="muted">（6-64 位，保存后立即生效，无需重启；其他已登录的浏览器会需要重新登录）</span></label>
+          <div class="form-row"><label>{{ authRequired ? '新令牌' : '设置令牌' }} <span class="muted">（6-64 位，保存后立即生效，无需重启；其他已登录的浏览器会需要重新登录）</span></label>
             <div style="display:flex;gap:8px">
-              <input type="password" v-model="newToken" placeholder="留空表示不修改" class="grow" @keyup.enter="changeToken">
-              <button class="btn" @click="changeToken">修改令牌</button>
+              <input type="password" v-model="newToken" placeholder="6-64 位" class="grow" @keyup.enter="changeToken">
+              <button class="btn" :class="{ primary: !authRequired }" @click="changeToken">{{ authRequired ? '修改令牌' : '设置令牌' }}</button>
             </div>
           </div>
-          <div class="muted">也可以改 <b>data/config.json</b> 的 "token" 字段后重启服务，效果相同。</div>
+          <div class="muted">也可以改 <b>data/config.json</b> 的 "token" 字段后重启服务（设为空串即回到无鉴权模式），效果相同。</div>
         </div>
 
         <div class="panel">

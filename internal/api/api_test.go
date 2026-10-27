@@ -38,6 +38,10 @@ func newEnv(t *testing.T) *testEnv {
 	cfg := st.Config()
 	cfg.CheckIntervalMinutes = 360
 	cfg.StartupCheck = false
+	cfg.Token = "test-token" // 显式设置令牌；无令牌（无鉴权模式）单独在 TestNoAuthWhenTokenEmpty 覆盖
+	if err := st.UpdateConfig(cfg); err != nil {
+		t.Fatal(err)
+	}
 	sch := scheduler.Start(st, &cfg)
 
 	// webFS 以 web 目录为根（生产为 embed 子目录，开发模式为 os.DirFS）
@@ -838,6 +842,68 @@ func TestConfigTokenChange(t *testing.T) {
 	cfg["token"] = strings.Repeat("x", 65)
 	if code, _ := e.doJSON("PUT", "/api/config", cfg); code != 400 {
 		t.Fatalf("过长令牌应 400，实际 %d", code)
+	}
+}
+
+// 未设置令牌 = 无鉴权模式：/api/* 全放行，healthz 报告 tokenRequired=false；
+// 通过设置接口配置令牌后，下一个请求立即恢复校验。
+func TestNoAuthWhenTokenEmpty(t *testing.T) {
+	dir := t.TempDir()
+	st, err := store.New(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if st.Config().Token != "" {
+		t.Fatalf("未配置时不应有令牌，实际 %q", st.Config().Token)
+	}
+	cfg := st.Config()
+	cfg.StartupCheck = false
+	sch := scheduler.Start(st, &cfg)
+	defer sch.Shutdown()
+	webFS := fstest.MapFS{"index.html": &fstest.MapFile{Data: []byte("<html>ok</html>")}}
+	handler := New(st, sch, "test", webFS).Router()
+
+	do := func(method, path, token string) int {
+		req := httptest.NewRequest(method, path, nil)
+		if token != "" {
+			req.Header.Set("X-Token", token)
+		}
+		rec := httptest.NewRecorder()
+		handler.ServeHTTP(rec, req)
+		return rec.Code
+	}
+
+	// 无鉴权模式：不带令牌直接放行
+	if code := do("GET", "/api/stats", ""); code != 200 {
+		t.Fatalf("无鉴权模式应放行 /api/stats，实际 %d", code)
+	}
+
+	// healthz 报告 tokenRequired=false
+	req := httptest.NewRequest("GET", "/healthz", nil)
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	var h map[string]interface{}
+	_ = json.Unmarshal(rec.Body.Bytes(), &h)
+	if h["tokenRequired"] != false {
+		t.Fatalf("tokenRequired 应为 false: %v", h)
+	}
+
+	// 无鉴权模式下通过设置接口配置令牌（空 / "**" 保持不变，带新值即设置）
+	body := `{"port":8080,"subPath":"/sub","checkIntervalMinutes":360,"checkTimeoutSeconds":15,"checkConcurrency":10,"token":"brand-new-token"}`
+	req = httptest.NewRequest("PUT", "/api/config", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	rec = httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	if rec.Code != 200 {
+		t.Fatalf("设置令牌失败: %d %s", rec.Code, rec.Body.String())
+	}
+
+	// 设置后立即恢复校验：无 token 401，新 token 200
+	if code := do("GET", "/api/stats", ""); code != 401 {
+		t.Fatalf("设置令牌后无 token 应 401，实际 %d", code)
+	}
+	if code := do("GET", "/api/stats", "brand-new-token"); code != 200 {
+		t.Fatalf("新令牌应 200，实际 %d", code)
 	}
 }
 

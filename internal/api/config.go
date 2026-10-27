@@ -142,5 +142,10 @@ func (a *API) handleImport(w http.ResponseWriter, r *http.Request) {
 
 func (a *API) handleHealthz(w http.ResponseWriter, r *http.Request) {
 	total := a.st.Count(store.Filter{})
-	writeJSON(w, http.StatusOK, map[string]interface{}{"status": "up", "sources": total})
+	// tokenRequired 给登录页用：false = 未设置令牌（无鉴权模式），前端提示可直接登录并尽快设置
+	writeJSON(w, http.StatusOK, map[string]interface{}{
+		"status":        "up",
+		"sources":       total,
+		"tokenRequired": a.st.Config().Token != "",
+	})
 }

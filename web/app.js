@@ -584,6 +584,7 @@
             token: t, // 空 / "**" 后端都会保持原令牌，这里一定带新值
           });
           store.token = t; // 当前会话直接切到新令牌，不用重新登录
+          authRequired.value = true; // 已设置令牌，鉴权随即开启
           newToken.value = "";
           toast("令牌已修改，立即生效", "ok");
         } catch (e) { toast(e.message, "error"); }
@@ -638,7 +639,9 @@
 
       /* ---- 登录 ---- */
       function login() {
-        store.token = tokenInput.value.trim();
+        const t = tokenInput.value.trim();
+        if (authRequired.value && !t) { toast("请输入访问令牌（首次启动时打印在服务日志中）", "warn"); return; }
+        store.token = t; // 无鉴权模式下允许为空
         needLogin.value = false;
         boot(true);
       }
@@ -649,8 +652,17 @@
       }
 
       /* ---- 生命周期 ---- */
-      function boot(force) {
-        if (!store.token) { needLogin.value = true; return; }
+      // authRequired：后台是否设置了令牌。false = 无鉴权模式（/api/* 不校验），前端提示尽快设置。
+      const authRequired = ref(true);
+      async function checkAuthMode() {
+        try {
+          const h = await fetch("/healthz").then(r => r.json());
+          authRequired.value = !!h.tokenRequired;
+        } catch (e) { authRequired.value = true; } // 探测失败按需要鉴权处理，宁可多要一次令牌
+      }
+      async function boot(force) {
+        await checkAuthMode();
+        if (authRequired.value && !store.token) { needLogin.value = true; return; }
         needLogin.value = false;
         loadStats(); loadSources(); loadGroups(); loadConfig(); loadFlats(); loadFlatGroups();
         startPolling();
@@ -680,7 +692,7 @@
         batchText, batchResult, batchParsed, submitBatch,
         showAdd, openAddModal, knownUrls,
         fileRows, fileResult, handleFile, submitFileRows,
-        config, subUrls, loadConfig, saveConfig, newToken, changeToken,
+        config, subUrls, loadConfig, saveConfig, newToken, changeToken, authRequired,
         backupJson, openBackupModal, copyBackup, downloadBackup, importBackup,
         login, logout,
       };

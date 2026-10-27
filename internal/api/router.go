@@ -120,8 +120,15 @@ func tokenFromRequest(r *http.Request) string {
 func (a *API) auth(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		token := a.st.Config().Token
+		// 未设置令牌 = 无鉴权模式（首次部署/内网临时开放）：
+		// /api/* 全部放行，前端会在登录页与设置页提示尽快设置令牌。
+		// 设置令牌后下一个请求立即恢复校验，无需重启。
+		if token == "" {
+			next.ServeHTTP(w, r)
+			return
+		}
 		got := tokenFromRequest(r)
-		if token == "" || len(got) == 0 ||
+		if len(got) == 0 ||
 			subtle.ConstantTimeCompare([]byte(got), []byte(token)) != 1 {
 			writeErr(w, http.StatusUnauthorized, 401, "unauthorized")
 			return

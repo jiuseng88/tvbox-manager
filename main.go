@@ -22,7 +22,7 @@ import (
 //go:embed all:web
 var webFS embed.FS
 
-const version = "1.1.0"
+const version = "1.2.0"
 
 func main() {
 	// 开发模式：-web ./web 或 WEB_DIR=./web，前端从磁盘读取，改完刷新浏览器即可，无需重新编译
@@ -75,10 +75,17 @@ func main() {
 	fmt.Printf("  tvbox-manager v%s 已启动\n", version)
 	fmt.Printf("  管理后台:  http://127.0.0.1:%d/\n", cfg.Port)
 	fmt.Printf("  订阅地址:  http://127.0.0.1:%d%s   ← 填入 TVBox 客户端\n", cfg.Port, cfg.SubPath)
-	fmt.Printf("  访问令牌:  %s   ← 登录后台用\n", cfg.Token)
+	if cfg.Token == "" {
+		fmt.Printf("  访问令牌:  （未设置）\n")
+		fmt.Printf("  ⚠️  当前后台无鉴权（/api/* 不校验令牌），登录后请在「设置 → 访问令牌」中设置\n")
+	} else {
+		fmt.Printf("  访问令牌:  %s   ← 登录后台用\n", cfg.Token)
+	}
 	fmt.Printf("  数据目录:  %s\n", dataDir)
 	fmt.Printf("  前端来源:  %s\n", webFrom)
-	fmt.Printf("  （令牌来自 %s，可在后台「设置」中修改；公网部署请注意保护）\n", cfgFile)
+	if cfg.Token != "" {
+		fmt.Printf("  （令牌来自 %s，可在后台「设置」中修改；公网部署请注意保护）\n", cfgFile)
+	}
 	if webDir != "" {
 		fmt.Printf("  开发模式:  已开启，改 web/ 下文件后刷新浏览器生效（无需重新编译）\n")
 	}
