@@ -28,13 +28,18 @@ services:
 
       # ENV_OVERRIDE: "1"   # 打开后环境变量重新变为最高优先级
     volumes:
-      # 绑定挂载前请先建目录并改属主，否则容器内以 app 用户（uid=100 gid=101）写不进去：
-      #   mkdir -p ./data && chown -R 100:101 ./data
-      # 或用命名卷替掉这行：tvbox-data:/data（并在文件末尾加 volumes: { tvbox-data: {} }）
-      - ./data:/data
+      # 命名卷：首次挂载自动继承镜像内 /data 的属主（app 用户，uid=100），
+      # 不存在 bind 挂载的属主/SELinux 问题。数据落在
+      # /var/lib/docker/volumes/<项目名>_tvbox-data/_data
+      # 想改回明文目录挂载用：- ./data:/data
+      # （需先 mkdir -p ./data && chown -R 100:101 ./data，CentOS 还可能要加 :z）
+      - tvbox-data:/data
     healthcheck:
       # 用 CMD-SHELL 让容器内的 PORT 生效，改端口后健康检查不会误报
       test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:${PORT:-8080}/healthz || exit 1"]
       interval: 30s
       timeout: 5s
       retries: 3
+
+volumes:
+  tvbox-data: {}
