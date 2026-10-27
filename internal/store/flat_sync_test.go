@@ -14,7 +14,7 @@ func TestFlatsSurviveRestart(t *testing.T) {
 	if err != nil {
 		t.Fatalf("New 失败: %v", err)
 	}
-	src := model.Source{Name: "单仓源", URL: "http://a.example/1.json", Enabled: true}
+	src := model.Source{Name: "单仓源", URL: "http://a.example/1.json", Type: model.TypeSingle, Enabled: true}
 	if err := st.Add(&src); err != nil {
 		t.Fatal(err)
 	}
@@ -66,7 +66,7 @@ func TestDeleteFlatHiddenAndPersisted(t *testing.T) {
 	if err != nil {
 		t.Fatalf("New 失败: %v", err)
 	}
-	src := model.Source{Name: "单仓源", URL: "http://b.example/1.json", Enabled: true}
+	src := model.Source{Name: "单仓源", URL: "http://b.example/1.json", Type: model.TypeSingle, Enabled: true}
 	if err := st.Add(&src); err != nil {
 		t.Fatal(err)
 	}
@@ -134,7 +134,7 @@ func TestFlatsFromMultiSource(t *testing.T) {
 	}
 
 	// 同地址的单仓父源并入同一条站点源（多父引用）
-	single := model.Source{Name: "单仓", URL: "http://m.example/1.json", Enabled: true}
+	single := model.Source{Name: "单仓", URL: "http://m.example/1.json", Type: model.TypeSingle, Enabled: true}
 	if err := st.Add(&single); err != nil {
 		t.Fatal(err)
 	}
@@ -168,7 +168,7 @@ func TestFlatsFromMultiSource(t *testing.T) {
 // 故障注入回归：父源被删光后，对账要清掉孤儿站点源（replace 导入场景）。
 func TestResyncDropsOrphanFlats(t *testing.T) {
 	st := newTestStore(t)
-	src := model.Source{Name: "源", URL: "http://o.example/1.json", Enabled: true}
+	src := model.Source{Name: "源", URL: "http://o.example/1.json", Type: model.TypeSingle, Enabled: true}
 	if err := st.Add(&src); err != nil {
 		t.Fatal(err)
 	}
@@ -176,7 +176,7 @@ func TestResyncDropsOrphanFlats(t *testing.T) {
 		t.Fatalf("应生成 1 条，实际 %d", n)
 	}
 	// 模拟 replace 导入：整批换掉父源
-	if err := st.ReplaceAll([]model.Source{{Name: "新源", URL: "http://n.example/1.json", Enabled: true}}); err != nil {
+	if err := st.ReplaceAll([]model.Source{{Name: "新源", URL: "http://n.example/1.json", Type: model.TypeSingle, Enabled: true}}); err != nil {
 		t.Fatal(err)
 	}
 	flats := st.ListFlats(FlatFilter{})
@@ -191,7 +191,7 @@ func TestResyncDropsOrphanFlats(t *testing.T) {
 // 站点源探活计数：连续失败次数成功即清零（自动禁用看的是连续，不是累计）
 func TestFlatCheckStreakReset(t *testing.T) {
 	st := newTestStore(t)
-	src := model.Source{Name: "源", URL: "http://s.example/1.json", Enabled: true}
+	src := model.Source{Name: "源", URL: "http://s.example/1.json", Type: model.TypeSingle, Enabled: true}
 	if err := st.Add(&src); err != nil {
 		t.Fatal(err)
 	}
@@ -217,11 +217,92 @@ func TestFlatCheckStreakReset(t *testing.T) {
 	}
 }
 
+// 未定型（Type=unknown）的源不进订阅：此时分不清单仓/多仓，
+// 把多仓地址当单仓发出去，客户端会拿到一条解析不了的东西。
+// 探活确认类型后，站点源应立即生成。
+func TestUnknownSourceNotPublishedUntilTyped(t *testing.T) {
+	st := newTestStore(t)
+	src := model.Source{Name: "未探活", URL: "http://u.example/all.json", Enabled: true}
+	if err := st.Add(&src); err != nil {
+		t.Fatal(err)
+	}
+	if n := len(st.ListFlats(FlatFilter{})); n != 0 {
+		t.Fatalf("未定型源不应生成站点源，实际 %d", n)
+	}
+	if n := len(st.EnabledFlats()); n != 0 {
+		t.Fatalf("未定型源不应进订阅输出，实际 %d", n)
+	}
+
+	// 探活确认为多仓 → 按子仓平铺
+	if err := st.UpdateCheckResult(src.ID, CheckResult{
+		Status: model.StatusOK, HTTPCode: 200, Type: model.TypeMulti,
+		Detail: &model.Detail{SubURLs: []model.SubURL{
+			{Name: "子一", URL: "http://u.example/1.json"},
+			{Name: "子二", URL: "http://u.example/2.json"},
+		}},
+	}, false); err != nil {
+		t.Fatal(err)
+	}
+	if n := len(st.ListFlats(FlatFilter{})); n != 2 {
+		t.Fatalf("定型为多仓后应平铺 2 条，实际 %d", n)
+	}
+
+	// 再变成单仓：老的 2 条要清掉，只留自身地址
+	if err := st.UpdateCheckResult(src.ID, CheckResult{
+		Status: model.StatusOK, HTTPCode: 200, Type: model.TypeSingle,
+	}, false); err != nil {
+		t.Fatal(err)
+	}
+	flats := st.ListFlats(FlatFilter{})
+	if len(flats) != 1 {
+		t.Fatalf("改成单仓后应只剩 1 条，实际 %d", len(flats))
+	}
+	if flats[0].URL != "http://u.example/all.json" {
+		t.Errorf("单仓站点源地址错误: %s", flats[0].URL)
+	}
+}
+
+// 上次进程中途退出留下的「检测中」要归位，否则概览永远显示在检测。
+func TestPersistedCheckingResetOnLoad(t *testing.T) {
+	dir := t.TempDir()
+	st, err := New(dir)
+	if err != nil {
+		t.Fatalf("New 失败: %v", err)
+	}
+	src := model.Source{Name: "甲", URL: "http://c.example/1.json", Type: model.TypeSingle, Enabled: true}
+	if err := st.Add(&src); err != nil {
+		t.Fatal(err)
+	}
+	id := st.ListFlats(FlatFilter{})[0].ID
+
+	// 模拟「探活到一半进程没了」：checking 已被中途落盘带进 data.json
+	if err := st.Update(src.ID, func(sp *model.Source) { sp.Status = model.StatusChecking }); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.UpdateFlat(id, func(fp *model.FlatSource) { fp.Status = model.StatusChecking }); err != nil {
+		t.Fatal(err)
+	}
+
+	st2, err := New(dir)
+	if err != nil {
+		t.Fatalf("重启 New 失败: %v", err)
+	}
+	if s, _ := st2.Get(src.ID); s.Status != model.StatusUnknown {
+		t.Errorf("父源残留 checking 未归位: %s", s.Status)
+	}
+	if f, _ := st2.GetFlat(id); f.Status != model.StatusUnknown {
+		t.Errorf("站点源残留 checking 未归位: %s", f.Status)
+	}
+	if st2.Stats("", "").Checking != 0 || st2.Stats("", "").FlatChecking != 0 {
+		t.Error("概览不应残留检测中计数")
+	}
+}
+
 // 已删除（隐藏）的条目不应把分组留在下拉里
 func TestFlatGroupsSkipHidden(t *testing.T) {
 	st := newTestStore(t)
-	a := model.Source{Name: "甲", URL: "http://ga.example/1.json", Group: "甲组", Enabled: true}
-	b := model.Source{Name: "乙", URL: "http://gb.example/1.json", Group: "乙组", Enabled: true}
+	a := model.Source{Name: "甲", URL: "http://ga.example/1.json", Type: model.TypeSingle, Group: "甲组", Enabled: true}
+	b := model.Source{Name: "乙", URL: "http://gb.example/1.json", Type: model.TypeSingle, Group: "乙组", Enabled: true}
 	if err := st.Add(&a); err != nil {
 		t.Fatal(err)
 	}

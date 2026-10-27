@@ -1,12 +1,16 @@
 package api
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
+	"log"
 	"net/http"
 	"strings"
+	"sync"
 
+	"tvbox-manager/internal/checker"
 	"tvbox-manager/internal/model"
 	"tvbox-manager/internal/parser"
 	"tvbox-manager/internal/store"
@@ -111,6 +115,7 @@ type batchAddReq struct {
 	URLs        []string `json:"urls"`
 	Group       string   `json:"group"`
 	Enabled     *bool    `json:"enabled"`
+	AutoCheck   *bool    `json:"autoCheck"`   // 默认 true：新增的源立即探活一次，类型定型后才会进订阅
 	OnDuplicate string   `json:"onDuplicate"` // skip(默认) / update
 }
 
@@ -146,7 +151,8 @@ func (a *API) batchAdd(w http.ResponseWriter, req batchAddReq) {
 	}
 	var skipped []skippedItem
 	var ids []string
-	added := 0
+	var added []model.Source // 新入库的源：用于异步探活（确定类型后才会生成站点源）
+	addedCount := 0
 	updated := 0
 
 	for _, raw := range req.URLs {
@@ -184,7 +190,8 @@ func (a *API) batchAdd(w http.ResponseWriter, req batchAddReq) {
 			skipped = append(skipped, skippedItem{URL: norm, Reason: err.Error()})
 			continue
 		}
-		added++
+		addedCount++
+		added = append(added, src)
 		ids = append(ids, src.ID)
 	}
 	if skipped == nil {
@@ -193,9 +200,83 @@ func (a *API) batchAdd(w http.ResponseWriter, req batchAddReq) {
 	if ids == nil {
 		ids = []string{}
 	}
+
+	// 批量/文件导入以前完全不探活：源会长时间停在「未知类型」，多仓地址被当成单仓下发。
+	// 这里补上（默认开，可用 autoCheck:false 关掉），类型定型后站点源立刻生成。
+	autoCheck := true
+	if req.AutoCheck != nil {
+		autoCheck = *req.AutoCheck
+	}
+	if autoCheck && len(added) > 0 {
+		go a.asyncCheckSources(added)
+	}
+
 	ok(w, map[string]interface{}{
-		"added": added, "updated": updated, "skipped": skipped, "ids": ids,
+		"added": addedCount, "updated": updated, "skipped": skipped, "ids": ids,
 	})
+}
+
+// asyncCheckSources 批量探活（并发受限 + 攒批落盘）。
+// 结果回写后 Store 会自动按类型生成/替换站点源。
+func (a *API) asyncCheckSources(srcs []model.Source) {
+	cfg := a.st.Config()
+	conc := cfg.CheckConcurrency
+	if conc <= 0 {
+		conc = 5
+	}
+	ck := a.sch.Checker()
+	sem := make(chan struct{}, conc)
+	var wg sync.WaitGroup
+	var mu sync.Mutex
+	done := 0
+
+	for _, s := range srcs {
+		s := s
+		a.st.UpdateInMemory(s.ID, func(sp *model.Source) { sp.Status = model.StatusChecking })
+		wg.Add(1)
+		sem <- struct{}{}
+		go func() {
+			defer wg.Done()
+			defer func() { <-sem }()
+			defer func() {
+				rec := recover()
+				if rec == nil {
+					return
+				}
+				log.Printf("[api] 批量探活 panic（已隔离）: %v", rec)
+				// 状态已被置成「检测中」，不给个结果就会永久卡在那个状态
+				func() {
+					defer func() { _ = recover() }()
+					_ = a.st.UpdateCheckResult(s.ID, store.CheckResult{
+						Status: model.StatusFail, Msg: "探活异常中断",
+					}, false)
+				}()
+			}()
+			res, _ := ck.Fetch(context.Background(), s.URL, false)
+			if res == nil {
+				res = &checker.Result{Status: model.StatusFail, Msg: "探活无结果"}
+			}
+			_ = a.st.UpdateCheckResult(s.ID, store.CheckResult{
+				Status: res.Status, HTTPCode: res.HTTPCode, LatencyMs: res.LatencyMs,
+				Msg: res.Msg, Type: res.Type, Detail: res.Detail,
+			}, false)
+
+			mu.Lock()
+			done++
+			save := done%20 == 0
+			mu.Unlock()
+			if save {
+				if err := a.st.Save(); err != nil {
+					log.Printf("[api] 批量探活中途落盘失败: %v", err)
+				}
+			}
+		}()
+	}
+	wg.Wait()
+	if err := a.st.Save(); err != nil {
+		log.Printf("[api] 批量探活落盘失败: %v", err)
+	}
+	log.Printf("[api] 批量探活完成: %d 条", len(srcs))
 }
 
 // splitNameURL 兼容「名称,URL」「名称|URL」「纯 URL」三种行格式。
@@ -353,13 +434,24 @@ type updateSourceReq struct {
 
 func (a *API) handleSourceUpdate(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
-	if _, found := a.st.Get(id); !found {
+	cur, found := a.st.Get(id)
+	if !found {
 		notFound(w, "源不存在")
 		return
 	}
 	var req updateSourceReq
 	if !decodeJSON(w, r, &req) {
 		return
+	}
+	// 改地址前先查重：放行的话会出现两条同 URL 的源，站点源会被合成一条、
+	// 删掉其中一条又会把另一条的站点源一起摘掉
+	if req.URL != nil {
+		if norm, err := parser.Normalize(*req.URL); err == nil && norm != cur.URL {
+			if other, exists := a.st.GetByURL(norm); exists && other.ID != id {
+				writeErr(w, http.StatusConflict, 409, "该地址已存在（与另一个源重复）")
+				return
+			}
+		}
 	}
 	err := a.st.Update(id, func(sp *model.Source) {
 		if req.Name != nil {

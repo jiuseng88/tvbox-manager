@@ -49,11 +49,28 @@ func (a *API) handleSub(w http.ResponseWriter, r *http.Request) {
 	_ = json.NewEncoder(w).Encode(map[string]interface{}{"urls": urls})
 }
 
-// handleSubTxt 纯文本每行一个 URL（兼容部分老客户端）
+// handleSubTxt 纯文本，默认每行一个 URL（兼容部分老客户端）。
+// 带 ?name= 时每行输出「名称,URL」（名称带该前缀），否则纯文本里名称无处安放；
+// 不传 name 时输出与以前完全一致，不影响现有客户端。
 func (a *API) handleSubTxt(w http.ResponseWriter, r *http.Request) {
+	q := r.URL.Query()
+	withName := q.Has("name")
+	prefix := q.Get("name")
+
 	flats := a.st.EnabledFlats()
 	var sb strings.Builder
 	for _, f := range flats {
+		if withName {
+			name := f.Name
+			if name == "" {
+				name = parser.HostOf(f.URL)
+			}
+			if prefix != "" {
+				name = prefix + "-" + name
+			}
+			sb.WriteString(name)
+			sb.WriteString(",")
+		}
 		sb.WriteString(f.URL)
 		sb.WriteString("\n")
 	}

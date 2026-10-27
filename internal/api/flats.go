@@ -8,6 +8,7 @@ import (
 	"strings"
 	"sync"
 
+	"tvbox-manager/internal/checker"
 	"tvbox-manager/internal/model"
 	"tvbox-manager/internal/store"
 )
@@ -239,11 +240,23 @@ func (a *API) runFlatCheckBatch(targets []model.FlatSource) {
 			defer wg.Done()
 			defer func() { <-sem }()
 			defer func() {
-				if rec := recover(); rec != nil {
-					log.Printf("[api] 站点源批量探活 panic（已隔离）: %v", rec)
+				rec := recover()
+				if rec == nil {
+					return
 				}
+				log.Printf("[api] 站点源批量探活 panic（已隔离）: %v", rec)
+				// 同异步探活：状态已置「检测中」，panic 后必须补一个终态
+				func() {
+					defer func() { _ = recover() }()
+					_ = a.st.UpdateFlatCheckResult(t.ID, store.CheckResult{
+						Status: model.StatusFail, Msg: "探活异常中断",
+					}, false)
+				}()
 			}()
 			res, _ := ck.Fetch(context.Background(), t.URL, false)
+			if res == nil {
+				res = &checker.Result{Status: model.StatusFail, Msg: "探活无结果"}
+			}
 			_ = a.st.UpdateFlatCheckResult(t.ID, store.CheckResult{
 				Status: res.Status, HTTPCode: res.HTTPCode, LatencyMs: res.LatencyMs,
 				Msg: res.Msg, Type: res.Type, Detail: res.Detail,

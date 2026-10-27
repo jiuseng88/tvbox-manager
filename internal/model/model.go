@@ -138,12 +138,19 @@ type CheckProgress struct {
 	Error     string     `json:"error,omitempty"`
 }
 
+// GroupCount 分组分布（概览用，按源数量降序）
+type GroupCount struct {
+	Name  string `json:"name"`
+	Count int    `json:"count"`
+}
+
 // Stats 概览统计（Total/Enabled/OK... 为父源口径；Flat* 为订阅实际输出的站点源口径）
 type Stats struct {
 	Total     int    `json:"total"`
 	Enabled   int    `json:"enabled"`
 	OK        int    `json:"ok"`
 	Fail      int    `json:"fail"`
+	Checking  int    `json:"checking"` // 检测中（不算进 unknown）
 	Unknown   int    `json:"unknown"`
 	Single    int    `json:"single"`
 	Multi     int    `json:"multi"`
@@ -151,11 +158,15 @@ type Stats struct {
 	LastRunAt string `json:"lastRunAt"`
 	NextRunAt string `json:"nextRunAt"`
 
-	FlatTotal   int `json:"flatTotal"`
-	FlatEnabled int `json:"flatEnabled"`
-	FlatOK      int `json:"flatOk"`
-	FlatFail    int `json:"flatFail"`
-	FlatUnknown int `json:"flatUnknown"`
+	// 分组分布：由后端一次算全，前端不必再拉一份（分页）列表自己数
+	GroupDist []GroupCount `json:"groupDist"`
+
+	FlatTotal    int `json:"flatTotal"`
+	FlatEnabled  int `json:"flatEnabled"`
+	FlatOK       int `json:"flatOk"`
+	FlatFail     int `json:"flatFail"`
+	FlatChecking int `json:"flatChecking"`
+	FlatUnknown  int `json:"flatUnknown"`
 }
 
 // DefaultConfig 内置默认值

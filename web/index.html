@@ -48,6 +48,7 @@
           <div class="card"><div class="card-num">{{ stats.total }}</div><div class="card-label">总源数</div></div>
           <div class="card"><div class="card-num">{{ stats.enabled }}</div><div class="card-label">已启用</div></div>
           <div class="card ok"><div class="card-num">{{ stats.ok }}</div><div class="card-label">可用</div></div>
+          <div class="card" v-if="stats.checking"><div class="card-num">{{ stats.checking }}</div><div class="card-label">检测中</div></div>
           <div class="card fail clickable" @click="view='sources'; filters.status='fail'; filters.page=1">
             <div class="card-num">{{ stats.fail }}</div><div class="card-label">失效（点击筛选）</div>
           </div>
@@ -59,6 +60,7 @@
             <div class="card"><div class="card-num">{{ stats.flatTotal }}</div><div class="card-label">站点源总数</div></div>
             <div class="card"><div class="card-num">{{ stats.flatEnabled }}</div><div class="card-label">实际下发</div></div>
             <div class="card ok"><div class="card-num">{{ stats.flatOk }}</div><div class="card-label">可用</div></div>
+            <div class="card" v-if="stats.flatChecking"><div class="card-num">{{ stats.flatChecking }}</div><div class="card-label">检测中</div></div>
             <div class="card fail clickable" @click="view='flats'">
               <div class="card-num">{{ stats.flatFail }}</div><div class="card-label">失效（点击查看）</div>
             </div>
@@ -89,8 +91,8 @@
           <div class="bars">
             <div class="bar-row" v-for="g in groupDist" :key="g.name">
               <span class="bar-name">{{ g.name }}</span>
-              <div class="bar-track"><div class="bar-fill" :style="{width: (g.n / (groupDist[0]?.n||1) * 100) + '%'}"></div></div>
-              <span class="bar-num">{{ g.n }}</span>
+              <div class="bar-track"><div class="bar-fill" :style="{width: (g.count / (groupDist[0]?.count||1) * 100) + '%'}"></div></div>
+              <span class="bar-num">{{ g.count }}</span>
             </div>
             <div v-if="!groupDist.length" class="empty">暂无数据，先去「添加源」</div>
           </div>

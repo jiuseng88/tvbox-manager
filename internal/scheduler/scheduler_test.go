@@ -21,7 +21,7 @@ func TestAutoDisableAfterConsecutiveFails(t *testing.T) {
 	if err != nil {
 		t.Fatalf("store.New 失败: %v", err)
 	}
-	src := model.Source{Name: "坏源", URL: srv.URL + "/1.json", Enabled: true}
+	src := model.Source{Name: "坏源", URL: srv.URL + "/1.json", Type: model.TypeSingle, Enabled: true}
 	if err := st.Add(&src); err != nil {
 		t.Fatal(err)
 	}
@@ -83,7 +83,7 @@ func TestNoAutoDisableWhenRecovered(t *testing.T) {
 	if err != nil {
 		t.Fatalf("store.New 失败: %v", err)
 	}
-	src := model.Source{Name: "源", URL: srv.URL + "/1.json", Enabled: true}
+	src := model.Source{Name: "源", URL: srv.URL + "/1.json", Type: model.TypeSingle, Enabled: true}
 	if err := st.Add(&src); err != nil {
 		t.Fatal(err)
 	}

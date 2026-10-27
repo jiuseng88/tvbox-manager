@@ -453,15 +453,19 @@ func (s *Store) upsertFlatLocked(parent model.Source, rawURL, name string, force
 }
 
 // syncFlatsForSourceLocked 父源变化后对齐其关联站点源：
-//   - 单仓/未知：自身地址生成一条站点源；
+//   - 单仓：自身地址生成一条站点源；
 //   - 多仓：Detail.SubURLs 全部展开；
+//   - 未知（还没探活成功过）：不生成——此时分不清是多仓还是单仓，
+//     把多仓地址当单仓发出去，客户端拿到那一条会直接报错；
+//     等第一次探活确定类型后（UpdateCheckResult → 本函数）再生成。
 //   - 期望集合中已消失的旧关联（多仓内容变化、父源改地址）→ 摘除父引用，无父则删。
 //
 // 返回是否发生实际变化。调用方需持有写锁。
 func (s *Store) syncFlatsForSourceLocked(src model.Source) bool {
 	changed := false
 	expect := map[string]bool{}
-	if src.Type == model.TypeMulti && src.Detail != nil {
+	switch {
+	case src.Type == model.TypeMulti && src.Detail != nil:
 		for _, su := range src.Detail.SubURLs {
 			norm, err := parser.Normalize(su.URL)
 			if err != nil {
@@ -476,7 +480,9 @@ func (s *Store) syncFlatsForSourceLocked(src model.Source) bool {
 				changed = true
 			}
 		}
-	} else {
+	case src.Type == model.TypeUnknown:
+		// 未确认类型的源不进订阅；expect 为空 → 下面会把它之前可能生成过的自身站点源清掉
+	default:
 		norm, err := parser.Normalize(src.URL)
 		if err != nil {
 			return changed

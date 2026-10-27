@@ -57,16 +57,22 @@ Windows 下用 `tvbox-manager.exe`，环境变量写法 `set DATA_DIR=...` 或 P
 | 功能 | 说明 |
 |---|---|
 | 源管理 | 增删改查、分组、排序、备注、启用/禁用（仅启用的进入订阅） |
-| 批量录入 | 粘贴多行（`名称,URL` / `名称\|URL` / 纯 URL 混排）、.json / .txt 文件导入（前端预览勾选） |
+| 批量录入 | 粘贴多行（`名称,URL` / `名称\|URL` / 纯 URL 混排）、.json / .txt 文件导入（前端预览勾选）；**导入后默认后台批量探活**（并发受限、攒批落盘），可用 `autoCheck:false` 关掉 |
 | 源类型识别 | 单仓（sites/lives/parses）/ 多仓（urls），多仓优先；结构摘要（站点数、直播数、解析数、spider、壁纸、站点名清单、子仓列表） |
 | 实时预览 | 点一下就知道这个地址**现在**能不能用、里面有什么；原始 JSON 可复制/展开 |
 | 探活 | 默认每 6 小时全量（可配），覆盖**父源 + 站点源**两轮（同地址只请求一次，直接复用结果），手动触发（运行中再触发返回 409），进度实时上报；失败原因分类：超时 / 域名无法解析 / 连接被拒绝 / 证书校验失败 / HTTP 状态码 / 响应非 JSON / 仓库结构不完整 |
 | 自动禁用 | 连续失败 N 次自动禁用（默认关，0=不自动；**父源与站点源同口径**，中间成功一次即清零，不看历史累计），被禁用的条目自动退出订阅 |
 | 子仓递归探活 | 多仓的 urls[] 逐个探活（可选，默认关） |
-| 订阅输出 | `/sub`（多仓 JSON，**多仓自动平铺**：多仓源内的单仓全部展开，单仓源直接并入，按 URL 去重，避免多仓套多仓）、`?format=fan`（饭太硬风格）、`/sub/txt`（纯文本，同样平铺）、`?name=前缀`；`/sub/all` 输出父源原始列表（需 Token） |
+| 订阅输出 | `/sub`（多仓 JSON，**多仓自动平铺**：多仓源内的单仓全部展开，单仓源直接并入，按 URL 去重，避免多仓套多仓）、`?format=fan`（饭太硬风格）、`/sub/txt`（纯文本，同样平铺；带 `?name=` 时每行输出 `名称,URL`）、`?name=前缀`；`/sub/all` 输出父源原始列表（需 Token） |
 | 所有仓源 | 订阅实际下发的「平铺层」单独可管：按父源/URL 对账生成，ID 稳定；可改名、改组、备注、排序、启用/禁用、单条或批量探活、删除（删除后父源再同步也不复活）；隐藏的条目不进订阅 |
 | 备份 | 导出/导入（merge 合并 / replace 替换），Token 永不导出 |
 | 安全 | 后台 Token 鉴权（X-Token / Bearer / ?token=，常数时间比较）、`/api/preview?url=` 内网地址黑名单（SSRF 防护）、请求体 10MB / 上传 2MB 限制 |
+
+### 关于「未知类型」源
+
+还没探活成功、或解析失败的源，类型是 `unknown`。此时分不清单仓还是多仓，**不会生成站点源、也不进订阅**——
+把多仓地址当成单仓发给客户端，客户端拿到那一条会直接解析失败。首次探活确认类型后自动生成，无需手工操作；
+新增/批量导入后默认会立刻后台探活一次，所以正常流程里几乎看不到这个中间态。
 
 ### 真实源兼容性（实测社区源得出的数据格式经验）
 
@@ -87,14 +93,14 @@ Windows 下用 `tvbox-manager.exe`，环境变量写法 `set DATA_DIR=...` 或 P
 | 方法 | 路径 | 说明 |
 |---|---|---|
 | GET/POST | `/api/sources` | 列表（keyword/type/status/group/enabled/page/sort 筛选）/ 新增（autoCheck 默认异步探活） |
-| POST | `/api/sources/batch` | 批量新增，`onDuplicate: skip(默认)/update` |
+| POST | `/api/sources/batch` | 批量新增，`onDuplicate: skip(默认)/update`，`autoCheck` 默认 true（导入后立即后台探活） |
 | POST | `/api/sources/import` | 文件导入（multipart 字段 file，.json/.txt ≤2MB） |
-| GET/PUT/DELETE | `/api/sources/{id}` | 详情 / 修改 / 删除 |
+| GET/PUT/DELETE | `/api/sources/{id}` | 详情 / 修改（改地址会重置类型与解析结果，且与已有源地址重复时返回 409） / 删除 |
 | POST | `/api/sources/{id}/toggle` · `/{id}/check` | 切换启用 / 单源探活 |
 | POST | `/api/sources/batch-action` | 批量 enable/disable/delete/group |
 | GET | `/api/sources/{id}/preview` · `/api/preview?url=` | 实时预览（后者有 SSRF 内网黑名单） |
 | POST/GET | `/api/check/run` · `/api/check/status` | 全量探活（父源 + 站点源，运行中 409）· 进度 |
-| GET | `/api/stats` · `/api/groups` | 概览统计（父源口径 + `flat*` 站点源口径）· 分组列表 |
+| GET | `/api/stats` · `/api/groups` | 概览统计（父源口径 + `flat*` 站点源口径；`checking`/`flatChecking` 为检测中、不计入 `unknown`；`groupDist` 为一次算全的分组分布，前端不必再拉全表自己数）· 分组列表 |
 | GET | `/api/flats` | 站点源列表（keyword/status/group/enabled/page/size/sort_by/sort_dir，单页上限 500） |
 | PUT/DELETE | `/api/flats/{id}` | 改名/改组/备注/排序 · 删除（置隐藏，父源再同步不复活） |
 | POST | `/api/flats/{id}/toggle` · `/{id}/check` | 切换启用 / 单条探活 |
@@ -103,7 +109,7 @@ Windows 下用 `tvbox-manager.exe`，环境变量写法 `set DATA_DIR=...` 或 P
 | GET/PUT | `/api/config` | 配置读写（Token 脱敏 `**`，令牌仅支持配置文件修改） |
 | GET/POST | `/api/export` · `/api/import/config` | 备份导出 / 导入 |
 | GET | `/healthz` | 存活探针 |
-| GET | `/sub` | 订阅（免鉴权，多仓自动平铺为单仓）：`?name=前缀`、`?format=fan`、`/sub/txt`；`/sub/all` 输出父源原始列表（需 Token） |
+| GET | `/sub` | 订阅（免鉴权，多仓自动平铺为单仓）：`?name=前缀`、`?format=fan`；`/sub/txt` 纯文本（带 `?name=` 时每行 `名称,URL`，可加前缀 `?name=客厅`）；`/sub/all` 输出父源原始列表（需 Token） |
 
 ## 环境变量（首次启动写入 config.json，之后以配置文件为准）
 

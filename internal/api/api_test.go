@@ -110,6 +110,15 @@ func num(m map[string]interface{}, key string) int {
 	return int(v)
 }
 
+// markType 把源标记为「已探活确认」的类型。
+// 站点源只由已确认类型的源生成（未知类型的源不下发），测试里用它可以跳过真实网络探活。
+func (e *testEnv) markType(id, typ string) {
+	e.t.Helper()
+	if err := e.st.Update(id, func(sp *model.Source) { sp.Type = typ }); err != nil {
+		e.t.Fatalf("标记源类型失败: %v", err)
+	}
+}
+
 // ---------- 鉴权 ----------
 
 func TestAuth(t *testing.T) {
@@ -395,8 +404,8 @@ func TestCheckRunAndProgress(t *testing.T) {
 		t.Fatalf("运行中再触发应 409: %d", code)
 	}
 	// 轮询进度直到完成。
-	// 注意：total 现在包含「父源 + 站点源」——平铺层才是订阅实际下发的内容，
-	// 所以探活也必须覆盖；同地址的站点源会复用父源本轮结果，不额外发请求。
+	// 说明：站点源只由「已确认类型」的源生成，跑之前两个源都是未知类型 → 本轮 total 只有 2 个父源；
+	// mock 探活成功后才会生成它的站点源（下一轮才会被当成站点源独立探活）。
 	deadline := time.Now().Add(10 * time.Second)
 	var p map[string]interface{}
 	finished := false
@@ -414,9 +423,8 @@ func TestCheckRunAndProgress(t *testing.T) {
 	if !finished {
 		t.Fatalf("探活未在限时内完成，最后进度: %v", p)
 	}
-	// 2 父源 + 2 站点源（与父源同地址）→ 共 4 条；mock 可用、slow 判失败 → 各 2 条
-	if p["total"].(float64) != 4 || p["ok"].(float64) != 2 || p["fail"].(float64) != 2 {
-		t.Fatalf("进度计数错误（父源+站点源共 4 条）: %v", p)
+	if p["total"].(float64) != 2 || p["ok"].(float64) != 1 || p["fail"].(float64) != 1 {
+		t.Fatalf("进度计数错误: %v", p)
 	}
 
 	// 结果已回写：父源统计不变，站点源口径单独上报
@@ -425,8 +433,41 @@ func TestCheckRunAndProgress(t *testing.T) {
 	if st["total"].(float64) != 2 || st["ok"].(float64) != 1 {
 		t.Fatalf("统计错误: %v", st)
 	}
-	if num(st, "flatTotal") != 2 || num(st, "flatOk") != 1 || num(st, "flatFail") != 1 {
-		t.Fatalf("站点源统计错误（应已探活）: %v", st)
+	// mock 探活成功 → 生成 1 条站点源（本轮不重复探活，状态还是 unknown）
+	if num(st, "flatTotal") != 1 || num(st, "flatUnknown") != 1 {
+		t.Fatalf("站点源统计错误: %v", st)
+	}
+}
+
+// 未知类型的源不下发：多仓地址一旦被当成单仓站点源发出去，客户端那条就会报错
+func TestUnknownSourceNotPublished(t *testing.T) {
+	e := newEnv(t)
+	_, body := e.doJSON("POST", "/api/sources", map[string]interface{}{
+		"name": "没探活过", "url": "http://unknown.example/a.json", "autoCheck": false,
+	})
+	id := dataOf(t, body)["id"].(string)
+
+	_, fb := e.doJSON("GET", "/api/flats?size=50", nil)
+	if n := len(dataOf(t, fb)["list"].([]interface{})); n != 0 {
+		t.Fatalf("未知类型的源不应生成站点源，实际 %d 条", n)
+	}
+	_, s := e.do("GET", "/sub", "", "", "")
+	if strings.Contains(s, "unknown.example") {
+		t.Fatalf("未知类型的源不应进订阅: %s", s)
+	}
+
+	// 探活确认是单仓后立即可下发
+	e.markType(id, model.TypeSingle)
+	_, s = e.do("GET", "/sub", "", "", "")
+	if !strings.Contains(s, "unknown.example") {
+		t.Fatalf("确认单仓后应进订阅: %s", s)
+	}
+
+	// 再从单仓改回未知（等价于改地址后待确认）→ 又不下发
+	e.doJSON("PUT", "/api/sources/"+id, map[string]interface{}{"url": "http://unknown2.example/b.json"})
+	_, s = e.do("GET", "/sub", "", "", "")
+	if strings.Contains(s, "unknown") {
+		t.Fatalf("改地址后未确认前不应下发: %s", s)
 	}
 }
 
@@ -434,14 +475,19 @@ func TestCheckRunAndProgress(t *testing.T) {
 
 func TestSubOutputs(t *testing.T) {
 	e := newEnv(t)
-	e.doJSON("POST", "/api/sources", map[string]interface{}{"name": "甲", "url": "http://s1.example/1.json", "autoCheck": false, "sort": 2})
-	e.doJSON("POST", "/api/sources", map[string]interface{}{"name": "乙", "url": "http://s2.example/2.json", "autoCheck": false, "sort": 1})
+	// 站点源只由「已确认类型」的源生成，这里用 markType 模拟探活成功回写
+	_, b1 := e.doJSON("POST", "/api/sources", map[string]interface{}{"name": "甲", "url": "http://s1.example/1.json", "autoCheck": false, "sort": 2})
+	e.markType(dataOf(t, b1)["id"].(string), model.TypeSingle)
+	_, b2 := e.doJSON("POST", "/api/sources", map[string]interface{}{"name": "乙", "url": "http://s2.example/2.json", "autoCheck": false, "sort": 1})
+	e.markType(dataOf(t, b2)["id"].(string), model.TypeSingle)
 	// 丙：禁用
 	code, body := e.doJSON("POST", "/api/sources", map[string]interface{}{"name": "丙", "url": "http://s3.example/3.json", "autoCheck": false})
 	if code != 200 {
 		t.Fatal("添加丙失败")
 	}
-	e.doJSON("POST", "/api/sources/"+dataOf(t, body)["id"].(string)+"/toggle", nil)
+	idC := dataOf(t, body)["id"].(string)
+	e.markType(idC, model.TypeSingle)
+	e.doJSON("POST", "/api/sources/"+idC+"/toggle", nil)
 
 	// 默认：仅启用、按 sort
 	code, bodyStr := e.do("GET", "/sub", "", "", "")
@@ -470,10 +516,23 @@ func TestSubOutputs(t *testing.T) {
 		t.Fatalf("fan 输出应含 type:0: %s", bodyStr)
 	}
 
-	// txt
+	// txt：默认仍是纯 URL 每行一条（老客户端不受影响，不能多出逗号）
 	_, bodyStr = e.do("GET", "/sub/txt", "", "", "")
 	if !strings.Contains(bodyStr, "http://s2.example/2.json") || strings.Contains(bodyStr, "s3.example") {
 		t.Fatalf("txt 输出错误: %s", bodyStr)
+	}
+	if strings.Contains(bodyStr, ",") {
+		t.Fatalf("不带 name 时不应输出名称列: %s", bodyStr)
+	}
+
+	// txt + name：输出「名称,URL」，支持前缀（与 /sub 的 name 语义一致）
+	_, bodyStr = e.do("GET", "/sub/txt?name=客厅", "", "", "")
+	if !strings.Contains(bodyStr, "客厅-乙,http://s2.example/2.json") {
+		t.Fatalf("txt 带 name 前缀输出错误: %s", bodyStr)
+	}
+	_, bodyStr = e.do("GET", "/sub/txt?name=", "", "", "")
+	if !strings.Contains(bodyStr, "乙,http://s2.example/2.json") {
+		t.Fatalf("txt 带空 name 应输出名称但不加前缀: %s", bodyStr)
 	}
 
 	// all：需 token，含禁用
@@ -538,6 +597,7 @@ func TestSubFlattenMulti(t *testing.T) {
 	if code != 200 {
 		t.Fatalf("添加单仓源失败: %v", body)
 	}
+	e.markType(dataOf(t, body)["id"].(string), model.TypeSingle)
 
 	_, bodyStr := e.do("GET", "/sub", "", "", "")
 	var sub struct {
@@ -651,6 +711,7 @@ func TestFlatDisableSync(t *testing.T) {
 	if code != 200 {
 		t.Fatal("添加共享子仓的单仓失败")
 	}
+	e.markType(dataOf(t, body)["id"].(string), model.TypeSingle)
 	e.doJSON("DELETE", "/api/sources/"+idA, nil)
 	_, fb = e.doJSON("GET", "/api/flats?keyword=flat1", nil)
 	flatList = dataOf(t, fb)["list"].([]interface{})
@@ -736,6 +797,50 @@ func TestStaticIndex(t *testing.T) {
 
 // 改父源地址后必须清掉旧的解析结果：否则 Type 还是 multi、Detail 还是老仓库的子仓，
 // 站点源会继续按旧子仓地址生成，新地址反而进不了订阅。
+// 改地址时要和新增一样查重：两条源同 URL 会被合成一条站点源，
+// 之后删掉其中任意一条都会把共享的站点源一起摘掉。
+func TestUpdateSourceDuplicateURL(t *testing.T) {
+	e := newEnv(t)
+	_, b1 := e.doJSON("POST", "/api/sources", map[string]interface{}{
+		"name": "甲", "url": "http://dup.example/a.json", "autoCheck": false,
+	})
+	idA := dataOf(t, b1)["id"].(string)
+	_, b2 := e.doJSON("POST", "/api/sources", map[string]interface{}{
+		"name": "乙", "url": "http://dup.example/b.json", "autoCheck": false,
+	})
+	idB := dataOf(t, b2)["id"].(string)
+
+	// 乙改成甲已占用的地址 → 409
+	code, body := e.doJSON("PUT", "/api/sources/"+idB, map[string]interface{}{"url": "http://dup.example/a.json"})
+	if code != 409 {
+		t.Fatalf("改成已有地址应 409，实际 %d %v", code, body)
+	}
+	// 原地址未被改动
+	if s, _ := e.st.Get(idB); s.URL != "http://dup.example/b.json" {
+		t.Errorf("冲突时不应改动原地址，实际 %s", s.URL)
+	}
+
+	// 归一化后等价也算冲突（大小写 host / 尾斜杠）
+	code, _ = e.doJSON("PUT", "/api/sources/"+idB, map[string]interface{}{"url": "HTTP://DUP.EXAMPLE/a.json"})
+	if code != 409 {
+		t.Errorf("归一化后相同也应 409，实际 %d", code)
+	}
+
+	// 自己改自己（地址没变）应放行
+	code, body = e.doJSON("PUT", "/api/sources/"+idB, map[string]interface{}{
+		"url": "http://dup.example/b.json", "name": "乙改",
+	})
+	if code != 200 {
+		t.Fatalf("地址未变应放行，实际 %d %v", code, body)
+	}
+
+	// 改成没人用的地址应放行
+	code, _ = e.doJSON("PUT", "/api/sources/"+idA, map[string]interface{}{"url": "http://dup.example/c.json"})
+	if code != 200 {
+		t.Errorf("改成空闲地址应 200，实际 %d", code)
+	}
+}
+
 func TestUpdateSourceURLDropsStaleDetail(t *testing.T) {
 	e := newEnv(t)
 	_, body := e.doJSON("POST", "/api/sources", map[string]interface{}{
@@ -768,8 +873,16 @@ func TestUpdateSourceURLDropsStaleDetail(t *testing.T) {
 
 	_, body = e.doJSON("GET", "/api/flats?size=50", nil)
 	list, _ := dataOf(t, body)["list"].([]interface{})
+	if len(list) != 0 {
+		t.Fatalf("改地址后未探活前不应有站点源，实际 %d: %v", len(list), list)
+	}
+
+	// 探活确认新地址是单仓 → 站点源跟着换成新地址（旧子仓不会被带过来）
+	e.markType(id, model.TypeSingle)
+	_, body = e.doJSON("GET", "/api/flats?size=50", nil)
+	list, _ = dataOf(t, body)["list"].([]interface{})
 	if len(list) != 1 {
-		t.Fatalf("改地址后应只有 1 条站点源，实际 %d: %v", len(list), list)
+		t.Fatalf("确认后应只有 1 条站点源，实际 %d: %v", len(list), list)
 	}
 	if url := list[0].(map[string]interface{})["url"]; url != "http://new.example/9.json" {
 		t.Errorf("站点源没跟着换地址，仍是 %v", url)

@@ -319,6 +319,18 @@ func (s *Store) loadData() error {
 	if d.Version == 0 {
 		d.Version = 1
 	}
+	// 「检测中」是只对当前进程有意义的瞬态：上次进程中途退出（崩溃/被 kill）会把
+	// 这个状态永久留在文件里，概览就一直显示「检测中」。加载时统一归位为「未检测」。
+	for i := range d.Sources {
+		if d.Sources[i].Status == model.StatusChecking {
+			d.Sources[i].Status = model.StatusUnknown
+		}
+	}
+	for i := range d.Flats {
+		if d.Flats[i].Status == model.StatusChecking {
+			d.Flats[i].Status = model.StatusUnknown
+		}
+	}
 	s.data = &d
 	return nil
 }
@@ -493,6 +505,9 @@ func (s *Store) Add(src *model.Source) error {
 	}
 	if src.Status == "" {
 		src.Status = model.StatusUnknown
+	}
+	if src.Type == "" {
+		src.Type = model.TypeUnknown // 空类型等价于「还没探活，不知道是单仓还是多仓」
 	}
 	s.data.Sources = append(s.data.Sources, *src)
 	s.syncFlatsForSourceLocked(*src) // 同步生成站点源
@@ -672,7 +687,7 @@ func (s *Store) BatchAction(ids []string, action string, group string) (int, err
 func (s *Store) Stats(lastRun, nextRun string) model.Stats {
 	srcs := s.List(Filter{})
 	st := model.Stats{LastRunAt: lastRun, NextRunAt: nextRun}
-	groups := map[string]bool{}
+	groups := map[string]int{}
 	for _, x := range srcs {
 		st.Total++
 		if x.Enabled {
@@ -683,6 +698,8 @@ func (s *Store) Stats(lastRun, nextRun string) model.Stats {
 			st.OK++
 		case model.StatusFail:
 			st.Fail++
+		case model.StatusChecking:
+			st.Checking++ // 检测中是瞬态，别混进 unknown
 		default:
 			st.Unknown++
 		}
@@ -696,9 +713,20 @@ func (s *Store) Stats(lastRun, nextRun string) model.Stats {
 		if g == "" {
 			g = "默认"
 		}
-		groups[g] = true
+		groups[g]++
 	}
 	st.Groups = len(groups)
+	st.GroupDist = make([]model.GroupCount, 0, len(groups))
+	for name, n := range groups {
+		st.GroupDist = append(st.GroupDist, model.GroupCount{Name: name, Count: n})
+	}
+	// 数量降序、同数量按名称升序，前端可以直接取前 N 个画条形图
+	sort.Slice(st.GroupDist, func(i, j int) bool {
+		if st.GroupDist[i].Count != st.GroupDist[j].Count {
+			return st.GroupDist[i].Count > st.GroupDist[j].Count
+		}
+		return st.GroupDist[i].Name < st.GroupDist[j].Name
+	})
 
 	// 站点源（订阅实际输出层）口径：概览要能看出真正会下发的条数
 	for _, f := range s.ListFlats(FlatFilter{}) {
@@ -711,6 +739,8 @@ func (s *Store) Stats(lastRun, nextRun string) model.Stats {
 			st.FlatOK++
 		case model.StatusFail:
 			st.FlatFail++
+		case model.StatusChecking:
+			st.FlatChecking++
 		default:
 			st.FlatUnknown++
 		}
@@ -728,6 +758,9 @@ func (s *Store) ReplaceAll(sources []model.Source) error {
 		}
 		if sources[i].Status == "" {
 			sources[i].Status = model.StatusUnknown
+		}
+		if sources[i].Type == "" {
+			sources[i].Type = model.TypeUnknown
 		}
 	}
 	s.data.Sources = sources

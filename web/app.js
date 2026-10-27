@@ -86,9 +86,10 @@
 
       /* ---- 概览 ---- */
       const stats = ref({
-        total: 0, enabled: 0, ok: 0, fail: 0, unknown: 0, single: 0, multi: 0, groups: 0,
+        total: 0, enabled: 0, ok: 0, fail: 0, checking: 0, unknown: 0, single: 0, multi: 0, groups: 0,
+        groupDist: [],
         // 站点源（订阅实际下发层）口径
-        flatTotal: 0, flatEnabled: 0, flatOk: 0, flatFail: 0, flatUnknown: 0
+        flatTotal: 0, flatEnabled: 0, flatOk: 0, flatFail: 0, flatChecking: 0, flatUnknown: 0
       });
       const progress = ref({ running: false, total: 0, done: 0, ok: 0, fail: 0 });
       const groupDist = ref([]);
@@ -97,11 +98,8 @@
       async function loadStats() {
         try {
           stats.value = await api("GET", "/api/stats");
-          const all = await api("GET", "/api/sources?size=500");
-          const byGroup = {};
-          (all.list || []).forEach(s => { const g = s.group || "默认"; byGroup[g] = (byGroup[g] || 0) + 1; });
-          groupDist.value = Object.entries(byGroup).map(([name, n]) => ({ name, n }))
-            .sort((a, b) => b.n - a.n).slice(0, 8);
+          // 分组分布由后端一次算全（以前是拉 ?size=500 的列表自己数，超过 500 条就不准）
+          groupDist.value = (stats.value.groupDist || []).slice(0, 8);
         } catch (e) { toast(e.message, "error"); }
       }
       async function loadProgress() {
@@ -476,7 +474,7 @@
             urls: lines.map(l => l.name ? l.name + "," + l.url : l.url),
             group: singleForm.group || "默认",
           });
-          toast(`已添加 ${batchResult.value.added} 条`, "ok");
+          toast(`已添加 ${batchResult.value.added} 条，正在后台探活（确认是单仓/多仓后才进订阅）`, "ok");
           batchText.value = "";
           loadSources(); loadGroups(); loadKnownUrls();
         } catch (e) { toast(e.message, "error"); }
@@ -524,7 +522,7 @@
             urls: sel.map(r => r.name ? r.name + "," + r.url : r.url),
             group: singleForm.group || "默认",
           });
-          toast(`已导入 ${fileResult.value.added} 条`, "ok");
+          toast(`已导入 ${fileResult.value.added} 条，正在后台探活（确认是单仓/多仓后才进订阅）`, "ok");
           fileRows.value = [];
           loadSources(); loadGroups(); loadKnownUrls();
         } catch (e) { toast(e.message, "error"); }
@@ -540,6 +538,7 @@
           { label: "订阅地址（所有仓源列表）", url: base + p },
           { label: "饭太硬风格", url: base + p + "?format=fan" },
           { label: "纯文本", url: base + p + "/txt" },
+          { label: "纯文本（带名称）", url: base + p + "/txt?name=" },
           { label: "带前缀示例", url: base + p + "?name=客厅" },
         ];
       });
