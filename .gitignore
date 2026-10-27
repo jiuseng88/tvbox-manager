@@ -4,10 +4,14 @@ web/node_modules/
 
 # ---- 构建产物与备份 ----
 /tvbox-manager
+/tvbox-manager.exe
 /tvbox-manager.exe~
 /bin/
 *.test
 *.out
+
+# ---- 本地运行时配置（含访问令牌，不入库；克隆后首次启动自动生成）----
+/data/config.json
 
 # ---- 本地调试与临时数据 ----
 .smoke-data/
