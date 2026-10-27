@@ -125,7 +125,7 @@ Windows 下用 `tvbox-manager.exe`，环境变量写法 `set DATA_DIR=...` 或 P
 | POST | `/api/flats/{id}/toggle` · `/{id}/check` | 切换启用 / 单条探活 |
 | POST | `/api/flats/batch-action` · `/api/flats/batch-check` | 批量 enable/disable/delete/group · 批量探活（`{ids:[...]}` 或 `{all:true, keyword?...}`，并发受限 + 攒批落盘） |
 | GET | `/api/flats/groups` | 站点源分组列表 |
-| GET/PUT | `/api/config` | 配置读写（Token 脱敏 `**`，令牌仅支持配置文件修改） |
+| GET/PUT | `/api/config` | 配置读写（Token 脱敏 `**`；令牌可在「设置」页修改，**立即生效**，也可改 `config.json` 后重启） |
 | GET/POST | `/api/export` · `/api/import/config` | 备份导出 / 导入 |
 | GET | `/healthz` | 存活探针 |
 | GET | `/sub` | 订阅（免鉴权，多仓自动平铺为单仓）：`?name=前缀`、`?format=fan`；`/sub/txt` 纯文本（带 `?name=` 时每行 `名称,URL`，可加前缀 `?name=客厅`）；`/sub/all` 输出父源原始列表（需 Token） |
@@ -138,13 +138,13 @@ Windows 下用 `tvbox-manager.exe`，环境变量写法 `set DATA_DIR=...` 或 P
 一旦落盘，后续就以配置文件为准，重启不会被环境变量顶回去：
 
 - **端口 / 订阅路径**：可在后台「设置」页改（写回 `config.json`），改完重启生效
-- **令牌（TOKEN）**：页面不支持修改，直接改 `config.json` 的 `token` 字段后重启即可
+- **令牌（TOKEN）**：可在「设置 → 访问令牌」页修改（6-64 位，**立即生效**，无需重启；改完当前会话自动切到新令牌，其他已登录浏览器需重新登录）；也可以直接改 `config.json` 的 `token` 字段后重启
 
 需要让环境变量重新压过配置文件时，设置 `ENV_OVERRIDE=1`。
 
 | 变量 | 默认 | 说明 |
 |---|---|---|
-| `TOKEN` | 随机生成 | 后台访问令牌（首启打印在启动日志，之后改 `config.json` 的 `token`） |
+| `TOKEN` | 随机生成 | 后台访问令牌（首启打印在启动日志；之后可在「设置」页修改或改 `config.json` 的 `token`） |
 | `PORT` | 8080 | 监听端口（后台改后需重启生效；Docker 记得同步改 `ports` 映射） |
 | `SUB_PATH` | /sub | 订阅路径（后台改后需重启生效） |
 | `DATA_DIR` | /data（Docker）/ ./data | 数据目录（data.json + config.json） |

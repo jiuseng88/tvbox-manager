@@ -48,6 +48,15 @@ func (a *API) handleConfigPut(w http.ResponseWriter, r *http.Request) {
 		badRequest(w, "订阅路径必须以 / 开头")
 		return
 	}
+	// 令牌：空 / "**"（脱敏回显值）表示保持不变；给了新值就做长度校验。
+	// 鉴权中间件每次请求都读最新配置，这里改完下一个请求立即生效，无需重启。
+	req.Token = strings.TrimSpace(req.Token)
+	if t := req.Token; t != "" && t != "**" {
+		if l := len(t); l < 6 || l > 64 {
+			badRequest(w, "令牌长度需在 6-64 位之间")
+			return
+		}
+	}
 	if err := a.st.UpdateConfig(req); err != nil {
 		serverError(w, err)
 		return

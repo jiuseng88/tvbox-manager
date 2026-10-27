@@ -344,9 +344,15 @@
 
         <div class="panel">
           <div class="panel-title">访问令牌</div>
-          <div class="muted" style="margin-bottom:8px">令牌用于管理后台与 /api/* 的访问；订阅接口不校验令牌。</div>
-          <div class="form-row"><label>当前令牌</label><input :value="config ? config.token : ''" disabled></div>
-          <div class="muted">🔒 令牌不支持在页面修改，仅可通过配置文件 <b>data/config.json</b> 中的 "token" 字段修改后重启服务生效。</div>
+          <div class="muted" style="margin-bottom:8px">令牌用于管理后台与 /api/* 的访问；订阅接口不校验令牌。当前令牌不回显，只显示占位符。</div>
+          <div class="form-row"><label>当前令牌</label><input value="••••••••（已隐藏）" disabled></div>
+          <div class="form-row"><label>新令牌 <span class="muted">（6-64 位，保存后立即生效，无需重启；其他已登录的浏览器会需要重新登录）</span></label>
+            <div style="display:flex;gap:8px">
+              <input type="password" v-model="newToken" placeholder="留空表示不修改" class="grow" @keyup.enter="changeToken">
+              <button class="btn" @click="changeToken">修改令牌</button>
+            </div>
+          </div>
+          <div class="muted">也可以改 <b>data/config.json</b> 的 "token" 字段后重启服务，效果相同。</div>
         </div>
 
         <div class="panel">

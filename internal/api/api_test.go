@@ -785,6 +785,62 @@ func TestConfigAndBackup(t *testing.T) {
 	}
 }
 
+// 令牌可通过界面（PUT /api/config 带 token 字段）修改且立即生效：
+// 鉴权中间件每次请求都读最新配置，改完旧令牌立刻失效，无需重启。
+func TestConfigTokenChange(t *testing.T) {
+	e := newEnv(t)
+	old := e.token
+
+	// 修改令牌
+	_, body := e.doJSON("GET", "/api/config", nil)
+	cfg := dataOf(t, body)["config"].(map[string]interface{})
+	cfg["token"] = "brand-new-token"
+	code, body := e.doJSON("PUT", "/api/config", cfg)
+	if code != 200 {
+		t.Fatalf("修改令牌失败: %d %v", code, body)
+	}
+	if e.st.Config().Token != "brand-new-token" {
+		t.Fatalf("令牌未生效: %q", e.st.Config().Token)
+	}
+
+	// 旧令牌立刻 401，新令牌可用
+	if code, _ := e.do("GET", "/api/stats", old, "", ""); code != 401 {
+		t.Fatalf("旧令牌应立即失效，实际 %d", code)
+	}
+	if code, _ := e.do("GET", "/api/stats", "brand-new-token", "", ""); code != 200 {
+		t.Fatalf("新令牌应可用，实际 %d", code)
+	}
+
+	// 脱敏值 "**" 与空串都表示保持不变
+	e.token = "brand-new-token"
+	_, body = e.doJSON("GET", "/api/config", nil)
+	cfg = dataOf(t, body)["config"].(map[string]interface{})
+	cfg["token"] = "**"
+	if code, body := e.doJSON("PUT", "/api/config", cfg); code != 200 {
+		t.Fatalf("脱敏值应放行: %d %v", code, body)
+	}
+	if e.st.Config().Token != "brand-new-token" {
+		t.Fatalf("** 不应改动令牌: %q", e.st.Config().Token)
+	}
+	cfg["token"] = ""
+	if code, body := e.doJSON("PUT", "/api/config", cfg); code != 200 {
+		t.Fatalf("空令牌应放行: %d %v", code, body)
+	}
+	if e.st.Config().Token != "brand-new-token" {
+		t.Fatalf("空值不应改动令牌: %q", e.st.Config().Token)
+	}
+
+	// 长度校验：6-64
+	cfg["token"] = "abc"
+	if code, _ := e.doJSON("PUT", "/api/config", cfg); code != 400 {
+		t.Fatalf("过短令牌应 400，实际 %d", code)
+	}
+	cfg["token"] = strings.Repeat("x", 65)
+	if code, _ := e.doJSON("PUT", "/api/config", cfg); code != 400 {
+		t.Fatalf("过长令牌应 400，实际 %d", code)
+	}
+}
+
 // ---------- 静态页 ----------
 
 func TestStaticIndex(t *testing.T) {

@@ -562,6 +562,32 @@
           toast("配置已保存（探活设置立即生效）", "ok");
         } catch (e) { toast(e.message, "error"); }
       }
+      /* ---- 令牌修改：后端鉴权每次请求都读最新配置，改完立即生效，无需重启 ---- */
+      const newToken = ref("");
+      async function changeToken() {
+        const t = newToken.value.trim();
+        if (!t) { toast("请输入新令牌", "warn"); return; }
+        if (t.length < 6 || t.length > 64) { toast("令牌长度需在 6-64 位之间", "warn"); return; }
+        if (t === store.token) { toast("新令牌与当前令牌相同", "warn"); return; }
+        if (!confirm("修改令牌后，其他已登录的浏览器需要重新登录。确定修改？")) return;
+        try {
+          const c = config.value;
+          await api("PUT", "/api/config", {
+            port: Number(c.port), subPath: c.subPath,
+            checkIntervalMinutes: Number(c.checkIntervalMinutes),
+            checkTimeoutSeconds: Number(c.checkTimeoutSeconds),
+            checkConcurrency: Number(c.checkConcurrency),
+            startupCheck: !!c.startupCheck,
+            autoDisableAfterFails: Number(c.autoDisableAfterFails) || 0,
+            insecureSkipVerify: !!c.insecureSkipVerify,
+            checkSubUrls: !!c.checkSubUrls,
+            token: t, // 空 / "**" 后端都会保持原令牌，这里一定带新值
+          });
+          store.token = t; // 当前会话直接切到新令牌，不用重新登录
+          newToken.value = "";
+          toast("令牌已修改，立即生效", "ok");
+        } catch (e) { toast(e.message, "error"); }
+      }
       /* ---- 备份导出（弹窗展示，避免预览环境拦截下载） ---- */
       const backupJson = ref(null);
       async function openBackupModal() {
@@ -654,7 +680,7 @@
         batchText, batchResult, batchParsed, submitBatch,
         showAdd, openAddModal, knownUrls,
         fileRows, fileResult, handleFile, submitFileRows,
-        config, subUrls, loadConfig, saveConfig,
+        config, subUrls, loadConfig, saveConfig, newToken, changeToken,
         backupJson, openBackupModal, copyBackup, downloadBackup, importBackup,
         login, logout,
       };
