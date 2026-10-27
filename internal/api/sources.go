@@ -367,10 +367,21 @@ func (a *API) handleSourceUpdate(w http.ResponseWriter, r *http.Request) {
 		}
 		if req.URL != nil {
 			norm, err := parser.Normalize(*req.URL)
-			if err == nil {
+			if err == nil && norm != sp.URL {
 				sp.URL = norm
+				// 换了地址，旧的解析结果就作废了：不清掉的话 Type 还是 multi、
+				// Detail 还是老仓库的子仓列表，站点源会被继续按旧子仓地址生成，
+				// 新地址反而进不了订阅（要等下一轮探活才修正）。
+				sp.Type = model.TypeUnknown
+				sp.Detail = nil
 				sp.Status = model.StatusUnknown
 				sp.CheckMsg = ""
+				sp.HTTPCode = 0
+				sp.LatencyMs = 0
+				// 换地址等于换了个源，旧的连续失败/成功次数不能带过来，
+				// 否则新地址第一次失败就可能撞上自动禁用阈值
+				sp.FailStreak = 0
+				sp.OKStreak = 0
 			}
 		}
 		if req.Group != nil {

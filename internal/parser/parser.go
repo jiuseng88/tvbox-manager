@@ -36,17 +36,31 @@ func Normalize(raw string) (string, error) {
 	}
 	u.Scheme = strings.ToLower(u.Scheme)
 	host := strings.ToLower(u.Host)
-	// 中文国际域名 → Punycode；转换失败保留原样（部分环境可直接解析）
-	if i := strings.LastIndex(host, ":"); i > 0 {
-		hostname, port := host[:i], host[i:]
-		if ascii, err := idnaToASCII(hostname); err == nil {
-			host = ascii + port
+	// 中文国际域名 → Punycode；转换失败保留原样（部分环境可直接解析）。
+	// 只有「:纯数字」结尾才算端口——IPv6 字面量（如 [::1]）本身就带冒号，
+	// 按最后一个冒号硬切会把 host 切成 "[:" 这种非法值。
+	if i := strings.LastIndex(host, ":"); i > 0 && isPortSuffix(host[i+1:]) {
+		if ascii, err := idnaToASCII(host[:i]); err == nil {
+			host = ascii + host[i:]
 		}
 	} else if ascii, err := idnaToASCII(host); err == nil {
 		host = ascii
 	}
 	u.Host = host
 	return u.String(), nil
+}
+
+// isPortSuffix 判断冒号后是否为合法端口号（纯数字）
+func isPortSuffix(s string) bool {
+	if s == "" || len(s) > 5 {
+		return false
+	}
+	for i := 0; i < len(s); i++ {
+		if s[i] < '0' || s[i] > '9' {
+			return false
+		}
+	}
+	return true
 }
 
 // HostOf 提取主机名（显示用兜底名称）

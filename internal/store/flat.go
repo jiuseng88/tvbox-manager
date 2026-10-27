@@ -204,12 +204,16 @@ func (s *Store) EnabledFlats() []model.FlatSource {
 	return s.ListFlats(FlatFilter{Enabled: "true"})
 }
 
-// FlatGroups 所有站点源分组名（去重排序）
+// FlatGroups 所有站点源分组名（去重排序）；已删除（隐藏）的条目不参与，
+// 否则分组下拉里会留下一个永远筛不出东西的空分组。
 func (s *Store) FlatGroups() []string {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	seen := map[string]bool{}
 	for i := range s.data.Flats {
+		if s.data.Flats[i].Hidden {
+			continue
+		}
 		g := s.data.Flats[i].Group
 		if g == "" {
 			g = "默认"

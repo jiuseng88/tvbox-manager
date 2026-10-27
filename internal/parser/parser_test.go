@@ -124,19 +124,22 @@ func TestParseBOMAndLoose(t *testing.T) {
 func TestNormalize(t *testing.T) {
 	cases := []struct {
 		in, want string
+		idn      bool // 中文域名：只校验 punycode 前缀与后缀，不硬编码具体串
 	}{
-		{"example.com/1.json", "http://example.com/1.json"},                          // 补协议
-		{"  HTTP://Example.COM:8080/a.json  ", "http://example.com:8080/a.json"},     // 大小写
-		{"http://example.com/Path/Keeps.Case", "http://example.com/Path/Keeps.Case"}, // path 大小写保留
-		{"肥猫.live/1.json", "http://xn--xn--/1.json"},                                 // IDN→punycode（占位断言见下方真实校验）
+		{"example.com/1.json", "http://example.com/1.json", false},                          // 补协议
+		{"  HTTP://Example.COM:8080/a.json  ", "http://example.com:8080/a.json", false},     // 大小写
+		{"http://example.com/Path/Keeps.Case", "http://example.com/Path/Keeps.Case", false}, // path 大小写保留
+		{"example.com:8080/a.json", "http://example.com:8080/a.json", false},                // 端口保留
+		{"http://[::1]:8080/a.json", "http://[::1]:8080/a.json", false},                     // IPv6 字面量不能被当端口切
+		{"http://[2001:db8::1]/a.json", "http://[2001:db8::1]/a.json", false},               // IPv6 无端口
+		{"肥猫.live/1.json", "", true},                                                        // IDN→punycode
 	}
 	for i, c := range cases {
 		got, err := Normalize(c.in)
 		if err != nil {
 			t.Fatalf("case %d(%s) 错误: %v", i, c.in, err)
 		}
-		if i == 3 {
-			// 中文域名转 punycode：校验前缀与 .live 后缀，不硬编码具体 punycode 串
+		if c.idn {
 			if !strings.HasPrefix(got, "http://xn--") || !strings.Contains(got, ".live/1.json") {
 				t.Errorf("IDN 转换结果异常: %s", got)
 			}

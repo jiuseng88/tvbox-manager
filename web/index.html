@@ -64,7 +64,7 @@
             </div>
           </div>
           <div class="muted" style="margin-top:8px">
-            「{{ config.subPath || '/sub' }}」实际下发的就是这批条目：多仓已拆成单仓、单仓直接并入；
+            「{{ (config && config.subPath) || '/sub' }}」实际下发的就是这批条目：多仓已拆成单仓、单仓直接并入；
             「实际下发」= 自身启用且至少有一个父源启用。上面的卡是父源口径，这里是订阅真实条数。
           </div>
         </div>
@@ -310,7 +310,7 @@
       </section>
 
       <!-- ===== 设置 ===== -->
-      <section v-if="view==='settings'">
+      <section v-if="view==='settings' && config">
         <h2>设置</h2>
 
         <div class="panel" v-if="config">
@@ -526,8 +526,9 @@
       <template v-else-if="preview.data">
         <div class="pv-block">
           <div class="pv-status">
-            <span class="dot big" :class="preview.data.type ? 'ok' : 'fail'"></span>
-            <b>{{ preview.data.type ? '可用' : '不可用' }}</b>
+            <!-- 用 errMsg 判定：解析失败的源 type 会是 "unknown"（非空），按 type 判断会误显示「可用」 -->
+            <span class="dot big" :class="preview.data.errMsg ? 'fail' : 'ok'"></span>
+            <b>{{ preview.data.errMsg ? '不可用' : '可用' }}</b>
             <span v-if="preview.data.httpCode">HTTP {{ preview.data.httpCode }}</span>
             <span>{{ preview.data.latencyMs }}ms</span>
             <span>{{ fmtBytes(preview.data.size) }}</span>

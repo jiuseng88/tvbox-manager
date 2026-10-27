@@ -733,3 +733,45 @@ func TestStaticIndex(t *testing.T) {
 		t.Fatalf("首页应输出嵌入的 index.html: %d", code)
 	}
 }
+
+// 改父源地址后必须清掉旧的解析结果：否则 Type 还是 multi、Detail 还是老仓库的子仓，
+// 站点源会继续按旧子仓地址生成，新地址反而进不了订阅。
+func TestUpdateSourceURLDropsStaleDetail(t *testing.T) {
+	e := newEnv(t)
+	_, body := e.doJSON("POST", "/api/sources", map[string]interface{}{
+		"name": "老多仓", "url": "http://old.example/all.json", "autoCheck": false,
+	})
+	id := dataOf(t, body)["id"].(string)
+
+	// 构造「已探活成功、类型 multi」的状态（相当于这个源刚被检测过）
+	if err := e.st.Update(id, func(sp *model.Source) {
+		sp.Type = model.TypeMulti
+		sp.Detail = &model.Detail{SubURLs: []model.SubURL{
+			{Name: "旧子仓", URL: "http://old.example/1.json"},
+		}}
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	// 换成完全不同的单仓地址
+	code, body := e.doJSON("PUT", "/api/sources/"+id, map[string]interface{}{"url": "http://new.example/9.json"})
+	if code != 200 {
+		t.Fatalf("改地址失败: %d %v", code, body)
+	}
+	got := dataOf(t, body)
+	if got["type"] != model.TypeUnknown {
+		t.Errorf("改地址后类型应重置为 unknown，实际 %v", got["type"])
+	}
+	if got["detail"] != nil {
+		t.Errorf("改地址后旧解析结果应清空，实际 %v", got["detail"])
+	}
+
+	_, body = e.doJSON("GET", "/api/flats?size=50", nil)
+	list, _ := dataOf(t, body)["list"].([]interface{})
+	if len(list) != 1 {
+		t.Fatalf("改地址后应只有 1 条站点源，实际 %d: %v", len(list), list)
+	}
+	if url := list[0].(map[string]interface{})["url"]; url != "http://new.example/9.json" {
+		t.Errorf("站点源没跟着换地址，仍是 %v", url)
+	}
+}

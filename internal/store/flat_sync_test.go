@@ -216,3 +216,36 @@ func TestFlatCheckStreakReset(t *testing.T) {
 		t.Errorf("连续失败应从 1 重新计: %d", got.FailStreak)
 	}
 }
+
+// 已删除（隐藏）的条目不应把分组留在下拉里
+func TestFlatGroupsSkipHidden(t *testing.T) {
+	st := newTestStore(t)
+	a := model.Source{Name: "甲", URL: "http://ga.example/1.json", Group: "甲组", Enabled: true}
+	b := model.Source{Name: "乙", URL: "http://gb.example/1.json", Group: "乙组", Enabled: true}
+	if err := st.Add(&a); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.Add(&b); err != nil {
+		t.Fatal(err)
+	}
+	if got := st.FlatGroups(); len(got) != 2 {
+		t.Fatalf("应有 2 个分组，实际 %v", got)
+	}
+	// 删掉甲组的站点源
+	var victim string
+	for _, f := range st.ListFlats(FlatFilter{}) {
+		if f.Group == "甲组" {
+			victim = f.ID
+		}
+	}
+	if victim == "" {
+		t.Fatal("没找到甲组站点源")
+	}
+	if _, err := st.DeleteFlats([]string{victim}); err != nil {
+		t.Fatal(err)
+	}
+	groups := st.FlatGroups()
+	if len(groups) != 1 || groups[0] != "乙组" {
+		t.Errorf("隐藏条目的分组不应出现，实际 %v", groups)
+	}
+}

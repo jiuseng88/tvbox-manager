@@ -341,7 +341,12 @@
         return f.status || "";
       }
       async function toggleFlat(f) {
-        try { await api("POST", "/api/flats/" + f.id + "/toggle"); f.enabled = !f.enabled; }
+        try {
+          await api("POST", "/api/flats/" + f.id + "/toggle");
+          f.enabled = !f.enabled;
+          // 生效状态还取决于父源是否启用，只能回查；否则状态列会停在旧文字
+          loadFlats();
+        }
         catch (e) { toast(e.message, "error"); }
       }
       async function checkFlat(f) {
@@ -353,7 +358,7 @@
         } catch (e) { toast(e.message, "error"); }
       }
       function delFlat(f) {
-        if (!confirm(`确认删除站点源「${f.name}」？\n注意：若其父源下次检测仍包含该地址，会重新生成。`)) return;
+        if (!confirm(`确认删除站点源「${f.name}」？\n删除后不会再出现在订阅里，父源再次同步也不会把它加回来（可在数据里手动恢复）。`)) return;
         api("DELETE", "/api/flats/" + f.id).then(() => {
           toast("已删除", "ok"); loadFlats(); loadFlatGroups();
         }).catch(e => toast(e.message, "error"));
