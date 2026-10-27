@@ -16,7 +16,16 @@
 
 ### Docker（推荐）
 
+镜像已发布到阿里云容器镜像服务，可直接拉取：
+
 ```bash
+docker pull registry.cn-hangzhou.aliyuncs.com/qdjzw/jiuseng:latest
+```
+
+```bash
+# 绑定挂载的数据目录要先建好并改属主：容器内以 app 用户（uid=100 gid=101）运行
+mkdir -p /opt/tvbox/data && chown -R 100:101 /opt/tvbox/data
+
 docker run -d --name tvbox-manager \
   -p 8080:8080 \
   -e TOKEN=你的令牌 \
@@ -25,18 +34,22 @@ docker run -d --name tvbox-manager \
   -e TZ=Asia/Shanghai \
   -v /opt/tvbox/data:/data \
   --restart unless-stopped \
-  tvbox-manager:latest
+  registry.cn-hangzhou.aliyuncs.com/qdjzw/jiuseng:latest
 ```
 
 `TOKEN` / `PORT` / `SUB_PATH` 在**首次启动**时作为初始值写入 `data/config.json`；
 之后在后台「设置」页改即可，配置文件优先于环境变量（详见下方「环境变量」一节）。
 改 `PORT` 时记得同步改 `-p 宿主机端口:容器端口` 的容器端口。
 
-或用 compose：
+或用 compose（默认就是从上面这个地址拉取，不再本地构建）：
 
 ```bash
+mkdir -p data && chown -R 100:101 data   # 首次且用 ./data 绑定挂载时需要
 docker compose up -d
 ```
+
+要从源码构建镜像，用仓库根目录的 `Dockerfile`（多阶段，需能拉 `golang:1.27-alpine`）：
+`docker build -t tvbox-manager:latest .`，然后把 compose 里的 `image` 换成 `tvbox-manager:latest` 并启用 `build: .`。
 
 启动后：
 

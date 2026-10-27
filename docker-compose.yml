@@ -1,7 +1,9 @@
 services:
   tvbox-manager:
-    build: .
-    image: tvbox-manager:latest
+    # 直接从阿里云镜像仓库拉取，不在本地构建。
+    # 需要自己从源码构建时：注释掉 image，改用下面的 build。
+    image: registry.cn-hangzhou.aliyuncs.com/qdjzw/jiuseng:latest
+    # build: .
     container_name: tvbox-manager
     restart: unless-stopped
     ports:
@@ -26,6 +28,9 @@ services:
 
       # ENV_OVERRIDE: "1"   # 打开后环境变量重新变为最高优先级
     volumes:
+      # 绑定挂载前请先建目录并改属主，否则容器内以 app 用户（uid=100 gid=101）写不进去：
+      #   mkdir -p ./data && chown -R 100:101 ./data
+      # 或用命名卷替掉这行：tvbox-data:/data（并在文件末尾加 volumes: { tvbox-data: {} }）
       - ./data:/data
     healthcheck:
       # 用 CMD-SHELL 让容器内的 PORT 生效，改端口后健康检查不会误报
