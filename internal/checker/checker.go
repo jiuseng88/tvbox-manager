@@ -17,7 +17,7 @@ import (
 	"tvbox-manager/internal/parser"
 )
 
-const maxBody = 10 << 20 // 10MB
+const maxBody = 20 << 20 // 20MB：大仓库 JSON（几千站点/上百子仓）10MB 装不下，会被误判成失效
 
 // maxTimeout 单次探活超时的硬上限（秒）。client 级超时固定用它兜底，
 // 单条源单独配置的超时（无论大小）都由每次请求的 context 精确控制。
@@ -134,7 +134,7 @@ func (c *Checker) FetchT(ctx context.Context, rawURL string, guardPrivate bool, 
 		return r, nil
 	}
 	if len(body) > maxBody {
-		r := failResult(resp.StatusCode, latency, "响应体超过 10MB 限制")
+		r := failResult(resp.StatusCode, latency, fmt.Sprintf("响应体超过 %dMB 限制", maxBody>>20))
 		r.CheckedAt = time.Now()
 		return r, nil
 	}

@@ -55,6 +55,7 @@ func (a *API) Router() http.Handler {
 	apiMux.HandleFunc("PUT /api/sources/{id}", a.handleSourceUpdate)
 	apiMux.HandleFunc("DELETE /api/sources/{id}", a.handleSourceDelete)
 	apiMux.HandleFunc("POST /api/sources/{id}/toggle", a.handleSourceToggle)
+	apiMux.HandleFunc("POST /api/sources/{id}/restore", a.handleSourceRestore)
 	apiMux.HandleFunc("GET /api/sources/{id}/preview", a.handlePreviewStored)
 	apiMux.HandleFunc("POST /api/sources/{id}/check", a.handleCheckOne)
 	apiMux.HandleFunc("GET /api/groups", a.handleGroups)
@@ -209,9 +210,12 @@ func serverError(w http.ResponseWriter, err error) {
 	writeJSON(w, http.StatusInternalServerError, envelope{Code: 500, Msg: err.Error()})
 }
 
-// decodeJSON 读取请求体并限制 2MB
+// maxJSONBody 请求体上限：粘贴导入的大 JSON 也走这里的接口，太小会直接报解析失败
+const maxJSONBody = 20 << 20
+
+// decodeJSON 读取请求体并限制 20MB
 func decodeJSON(w http.ResponseWriter, r *http.Request, v interface{}) bool {
-	r.Body = http.MaxBytesReader(w, r.Body, 2<<20)
+	r.Body = http.MaxBytesReader(w, r.Body, maxJSONBody)
 	dec := json.NewDecoder(r.Body)
 	if err := dec.Decode(v); err != nil {
 		badRequest(w, "请求体解析失败: "+err.Error())

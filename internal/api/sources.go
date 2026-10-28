@@ -20,14 +20,15 @@ import (
 func (a *API) handleSourceList(w http.ResponseWriter, r *http.Request) {
 	q := r.URL.Query()
 	f := store.Filter{
-		Keyword: q.Get("keyword"),
-		Type:    q.Get("type"),
-		Status:  q.Get("status"),
-		Group:   q.Get("group"),
-		Enabled: q.Get("enabled"),
-		Sort:    q.Get("sort"),
-		SortBy:  q.Get("sort_by"),
-		SortDir: q.Get("sort_dir"),
+		Keyword:  q.Get("keyword"),
+		Type:     q.Get("type"),
+		Status:   q.Get("status"),
+		Group:    q.Get("group"),
+		Enabled:  q.Get("enabled"),
+		NotInSub: q.Get("notInSub") == "true" || q.Get("notInSub") == "1",
+		Sort:     q.Get("sort"),
+		SortBy:   q.Get("sort_by"),
+		SortDir:  q.Get("sort_dir"),
 	}
 	fmt.Sscanf(q.Get("page"), "%d", &f.Page)
 	fmt.Sscanf(q.Get("size"), "%d", &f.Size)
@@ -61,6 +62,7 @@ type addSourceReq struct {
 	Enabled        *bool  `json:"enabled"`
 	AutoCheck      *bool  `json:"autoCheck"`
 	TimeoutSeconds *int   `json:"timeoutSeconds"` // 本条单独的探活超时，0=用全局
+	ForceType      string `json:"forceType"`      // 手动定型：single / multi，空=自动
 }
 
 func (a *API) handleSourceAdd(w http.ResponseWriter, r *http.Request) {
@@ -87,6 +89,10 @@ func (a *API) handleSourceAdd(w http.ResponseWriter, r *http.Request) {
 	}
 	if req.TimeoutSeconds != nil {
 		src.TimeoutSeconds = *req.TimeoutSeconds
+	}
+	if ft := strings.TrimSpace(req.ForceType); ft == model.TypeSingle || ft == model.TypeMulti {
+		src.ForceType = ft
+		src.Type = ft // 定了型就别等探活了，站点源立刻能生成
 	}
 	if src.Name == "" {
 		src.Name = parser.HostOf(norm)
@@ -334,9 +340,9 @@ func splitNameURL(line string) (string, string) {
 
 // handleSourceImport 文件导入：multipart/form-data 字段 file，.json / .txt
 func (a *API) handleSourceImport(w http.ResponseWriter, r *http.Request) {
-	r.Body = http.MaxBytesReader(w, r.Body, 8<<20) // multipart 总量上限
-	if err := r.ParseMultipartForm(2 << 20); err != nil {
-		badRequest(w, "文件上传失败（上限 2MB）: "+err.Error())
+	r.Body = http.MaxBytesReader(w, r.Body, 64<<20) // multipart 总量上限（大仓库 JSON 可达十几 MB）
+	if err := r.ParseMultipartForm(8 << 20); err != nil {
+		badRequest(w, "文件上传失败: "+err.Error())
 		return
 	}
 	file, header, err := r.FormFile("file")
@@ -345,11 +351,11 @@ func (a *API) handleSourceImport(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer file.Close()
-	if header.Size > 2<<20 {
-		badRequest(w, "文件超过 2MB 上限")
+	if header.Size > maxJSONBody {
+		badRequest(w, fmt.Sprintf("文件超过 %dMB 上限", maxJSONBody>>20))
 		return
 	}
-	body, err := io.ReadAll(io.LimitReader(file, 2<<20+1))
+	body, err := io.ReadAll(io.LimitReader(file, maxJSONBody+1))
 	if err != nil {
 		badRequest(w, "读取文件失败: "+err.Error())
 		return
@@ -411,6 +417,8 @@ type updateSourceReq struct {
 	Enabled        *bool   `json:"enabled"`
 	Sort           *int    `json:"sort"`
 	TimeoutSeconds *int    `json:"timeoutSeconds"` // 本条单独的探活超时，0=用全局
+	// ForceType 手动定型：""/"single"/"multi"。传 "" 表示恢复自动判定。
+	ForceType *string `json:"forceType"`
 }
 
 func (a *API) handleSourceUpdate(w http.ResponseWriter, r *http.Request) {
@@ -445,7 +453,12 @@ func (a *API) handleSourceUpdate(w http.ResponseWriter, r *http.Request) {
 				// 换了地址，旧的解析结果就作废了：不清掉的话 Type 还是 multi、
 				// Detail 还是老仓库的子仓列表，站点源会被继续按旧子仓地址生成，
 				// 新地址反而进不了订阅（要等下一轮探活才修正）。
+				// 用户手动定的 ForceType 要保留：它是对「这类地址是什么」的判断，
+				// 换个地址通常还是同一批源，清掉会退回未定型、站点源跟着消失。
 				sp.Type = model.TypeUnknown
+				if sp.ForceType != "" {
+					sp.Type = sp.ForceType
+				}
 				sp.Detail = nil
 				sp.Status = model.StatusUnknown
 				sp.CheckMsg = ""
@@ -475,6 +488,22 @@ func (a *API) handleSourceUpdate(w http.ResponseWriter, r *http.Request) {
 		if req.TimeoutSeconds != nil {
 			sp.TimeoutSeconds = *req.TimeoutSeconds
 		}
+		// 手动定型（U1）：解决「地址一直是未定型 → 不生成站点源 → 进不了订阅」。
+		// 定了就立即生效，不等下一轮探活。
+		if req.ForceType != nil {
+			ft := strings.TrimSpace(*req.ForceType)
+			if ft != model.TypeSingle && ft != model.TypeMulti {
+				ft = ""
+			}
+			sp.ForceType = ft
+			if ft != "" {
+				sp.Type = ft
+			} else if sp.Status != model.StatusOK {
+				// 取消强制定型后如果还没有可用的探活结果，就退回未定型，
+				// 避免用一个来历不明的 Type 继续骗订阅
+				sp.Type = model.TypeUnknown
+			}
+		}
 	})
 	if err != nil {
 		serverError(w, err)
@@ -482,6 +511,18 @@ func (a *API) handleSourceUpdate(w http.ResponseWriter, r *http.Request) {
 	}
 	updated, _ := a.st.Get(id)
 	ok(w, updated)
+}
+
+// handleSourceRestore 按父源重建它的站点源，并复活被误删的条目（U2）。
+// 只读不破坏：不会改动父源的地址/类型/启停状态。
+func (a *API) handleSourceRestore(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	rep, err := a.st.RestoreSourceFlats(id)
+	if err != nil {
+		notFound(w, err.Error())
+		return
+	}
+	ok(w, rep)
 }
 
 func (a *API) handleSourceDelete(w http.ResponseWriter, r *http.Request) {

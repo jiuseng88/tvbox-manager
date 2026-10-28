@@ -34,6 +34,10 @@ type Source struct {
 	// 有的仓库文件很大，全局超时会把它误判成失效，这里可以单独放宽。
 	TimeoutSeconds int `json:"timeoutSeconds,omitempty"`
 
+	// ForceType 手动指定的类型（""=自动，single / multi）。探活成功也不会被覆盖：
+	// 用于「确定这个地址是单仓，但源站探测一直失败」时强制生成站点源进订阅。
+	ForceType string `json:"forceType,omitempty"`
+
 	CreatedAt time.Time `json:"createdAt"`
 	UpdatedAt time.Time `json:"updatedAt"`
 
@@ -51,6 +55,10 @@ type Source struct {
 
 	// —— 解析出的结构信息（探活/预览时回填）——
 	Detail *Detail `json:"detail,omitempty"`
+
+	// FlatCount 名下可用站点源条数（列表接口运行时回填，不落盘）。
+	// 0 + 已启用 = 这条源不会出现在订阅里，前端据此显示原因并给「恢复」入口。
+	FlatCount int `json:"flatCount"`
 }
 
 // Detail 仓库内容摘要
@@ -175,6 +183,12 @@ type Stats struct {
 	FlatFail     int `json:"flatFail"`
 	FlatChecking int `json:"flatChecking"`
 	FlatUnknown  int `json:"flatUnknown"`
+
+	// 「未进订阅」：启用了却没有任何可用站点源的源数量，按原因拆分。
+	// 用户反馈过「源列表里有、仓源里没有」，这三个数就是那件事的量化入口。
+	NotInSub        int `json:"notInSub"`
+	NotInSubUnknown int `json:"notInSubUnknown"` // 原因：还没定型
+	NotInSubEmpty   int `json:"notInSubEmpty"`   // 原因：多仓没解析出子仓地址
 }
 
 // DefaultConfig 内置默认值

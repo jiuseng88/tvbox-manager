@@ -46,11 +46,32 @@ type Filter struct {
 	Status  string // ok / fail / unknown
 	Group   string
 	Enabled string // "true" / "false"
-	Page    int
-	Size    int
-	Sort    string // 默认 sort+name；"failFirst" 失效置顶
-	SortBy  string // 表头排序键（优先于 Sort）：status/name/type/url/group/latency/checks/fails/time/enabled/sort
-	SortDir string // 表头排序方向：asc / desc
+	// NotInSub 只留「启用了却一条可用站点源都没有」的源：
+	// 概览上的「未进订阅」卡片点进来就是这批，直接处理掉
+	NotInSub bool
+	Page     int
+	Size     int
+	Sort     string // 默认 sort+name；"failFirst" 失效置顶
+	SortBy   string // 表头排序键（优先于 Sort）：status/name/type/url/group/latency/checks/fails/time/enabled/sort
+	SortDir  string // 表头排序方向：asc / desc
+}
+
+// flatOwnersLocked 父源 ID → 名下可用站点源条数（未隐藏且自身启用）。
+// 「可用」按订阅输出口径算：父源是否启用由调用方另行判断。
+func (s *Store) flatOwnersLocked() map[string]int {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	own := make(map[string]int, len(s.data.Sources))
+	for i := range s.data.Flats {
+		f := s.data.Flats[i]
+		if f.Hidden || !f.Enabled {
+			continue
+		}
+		for _, pid := range f.ParentIDs {
+			own[pid]++
+		}
+	}
+	return own
 }
 
 // CheckResult 单源探活结果回写
@@ -395,6 +416,12 @@ func (s *Store) List(f Filter) []model.Source {
 	}
 	s.mu.RUnlock()
 
+	// 回填「名下可用站点源条数」：列表要能一眼看出哪条源其实不会进订阅
+	own := s.flatOwnersLocked()
+	for i := range out {
+		out[i].FlatCount = own[out[i].ID]
+	}
+
 	if f.Keyword != "" {
 		kw := strings.ToLower(f.Keyword)
 		out = filterSlice(out, func(x model.Source) bool {
@@ -415,6 +442,11 @@ func (s *Store) List(f Filter) []model.Source {
 	if f.Enabled == "true" || f.Enabled == "false" {
 		out = filterSlice(out, func(x model.Source) bool {
 			return (f.Enabled == "true") == x.Enabled
+		})
+	}
+	if f.NotInSub {
+		out = filterSlice(out, func(x model.Source) bool {
+			return x.Enabled && x.FlatCount == 0
 		})
 	}
 
@@ -620,6 +652,10 @@ func (s *Store) updateCheckResultLocked(id string, r CheckResult) bool {
 		if r.Type != "" && r.Status == model.StatusOK {
 			sp.Type = r.Type
 		}
+		// 手动指定的类型优先级最高：探活成功也不覆盖（源站探测失败时靠它进订阅）
+		if sp.ForceType != "" {
+			sp.Type = sp.ForceType
+		}
 		if r.Status == model.StatusOK {
 			sp.OKStreak++
 			sp.FailStreak = 0
@@ -774,7 +810,31 @@ func (s *Store) Stats(lastRun, nextRun string) model.Stats {
 			st.FlatUnknown++
 		}
 	}
+
+	// 「源列表里有、仓源里没有」的量化：启用了但一条可用站点源都没有的源。
+	// 概览上给个数字 + 下钻，用户不用再逐个点开找。
+	own := s.flatOwnersLocked()
+	for _, x := range srcs {
+		if !x.Enabled || own[x.ID] > 0 {
+			continue
+		}
+		st.NotInSub++
+		switch {
+		case x.Type == model.TypeUnknown:
+			st.NotInSubUnknown++ // 没定型：分不清单仓多仓，系统不敢下发
+		case x.Type == model.TypeMulti && len(subURLsOf(x)) == 0:
+			st.NotInSubEmpty++ // 多仓但没解析出子仓地址
+		}
+	}
 	return st
+}
+
+// subURLsOf 安全取多仓子仓列表
+func subURLsOf(x model.Source) []model.SubURL {
+	if x.Detail == nil {
+		return nil
+	}
+	return x.Detail.SubURLs
 }
 
 // ReplaceAll 导入备份 replace 模式

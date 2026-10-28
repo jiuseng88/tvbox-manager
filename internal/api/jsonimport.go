@@ -59,8 +59,8 @@ func ParseSourceJSON(text string) (*parsedJSON, error) {
 	if trimmed == "" {
 		return nil, fmt.Errorf("内容为空")
 	}
-	if len(trimmed) > 4<<20 {
-		return nil, fmt.Errorf("内容超过 4MB 上限")
+	if len(trimmed) > maxJSONBody {
+		return nil, fmt.Errorf("内容超过 %dMB 上限", maxJSONBody>>20)
 	}
 	// TVBox 社区流传的配置普遍是「带注释的 JSONC」：// 与 /* */ 注释、末尾悬挂逗号。
 	// 先清洗成标准 JSON 再解析；无注释时清洗是纯透传，对标准 JSON 零影响。
@@ -375,8 +375,8 @@ func (a *API) importContent(w http.ResponseWriter, r *http.Request, text, name, 
 		badRequest(w, "内容为空")
 		return
 	}
-	if len(text) > 4<<20 {
-		badRequest(w, "内容超过 4MB 上限")
+	if len(text) > maxJSONBody {
+		badRequest(w, fmt.Sprintf("内容超过 %dMB 上限", maxJSONBody>>20))
 		return
 	}
 

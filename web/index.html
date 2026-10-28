@@ -61,6 +61,11 @@
           <div class="card fail clickable" title="查看失效的源" @click="gotoSource('fail')">
             <div class="card-num">{{ stats.fail }}</div><div class="card-label">失效（点击筛选）</div>
           </div>
+          <div class="card fail clickable" v-if="stats.notInSub"
+            :title="'启用了但没有任何可用仓源，不会出现在订阅里：未定型 ' + stats.notInSubUnknown + ' 条 / 多仓无子仓 ' + stats.notInSubEmpty + ' 条'"
+            @click="gotoNotInSub()">
+            <div class="card-num">{{ stats.notInSub }}</div><div class="card-label">未进订阅（点击处理）</div>
+          </div>
         </div>
 
         <div class="panel">
@@ -145,6 +150,13 @@
           </select>
         </div>
 
+        <div class="check-bar" v-if="filters.notInSub==='true'" style="margin-bottom:10px">
+          <span>🔎 只显示「已启用但没有可用仓源」的源：它们不会出现在订阅里。</span>
+          <span class="grow"></span>
+          <button class="btn xs primary" @click="restoreAllMissing()">一键恢复本页</button>
+          <button class="btn xs" @click="filters.notInSub=''; applyFilter()">显示全部源</button>
+        </div>
+
         <div class="table-wrap">
           <table>
             <thead>
@@ -178,7 +190,10 @@
                 <td><a @click="openEdit(s)" class="link">{{ s.name }}</a></td>
                 <td><span class="tag" :class="s.type">{{ {single:'单仓',multi:'多仓',local:'本地源',unknown:'未知',file:'文件'}[s.type] || s.type }}</span></td>
                 <td class="url-cell" :title="s.url" @click="copyText(s.url)">{{ s.url }}</td>
-                <td class="muted">{{ summary(s) }}</td>
+                <td class="muted">
+                  {{ summary(s) }}
+                  <span v-if="subHint(s)" class="tag warn" :title="'这条源已启用，但没有可用仓源，订阅里不会出现它。点「恢复」重建，或编辑里手动指定类型'" style="margin-left:6px">{{ subHint(s) }}</span>
+                </td>
                 <td><span class="tag group">{{ s.group }}</span></td>
                 <td :title="absTime(s.lastCheckAt)">{{ relTime(s.lastCheckAt) }}</td>
                 <td :class="{slow: s.latencyMs > 3000}">{{ s.status==='ok' ? s.latencyMs + 'ms' : '—' }}</td>
@@ -191,6 +206,7 @@
                 <td class="ops">
                   <button class="btn xs" @click="openPreview(s)">预览</button>
                   <button class="btn xs" v-if="s.type!=='local'" @click="checkOne(s)">检测</button>
+                  <button class="btn xs" v-if="subHint(s)" @click="restoreSource(s)" title="按此源重建站点源，并复活被误删的条目">恢复</button>
                   <button class="btn xs" @click="openEdit(s)">编辑</button>
                   <button class="btn xs danger" @click="delSource(s)">删除</button>
                 </td>
@@ -589,6 +605,18 @@
       <div class="modal-title">编辑源<button class="close" @click="editSrc=null">✕</button></div>
       <div class="form-row"><label>名称</label><input v-model="editSrc.name"></div>
       <div class="form-row"><label>地址</label><input v-model="editSrc.url"></div>
+      <div class="form-row">
+        <label>类型</label>
+        <select v-model="editSrc.forceType">
+          <option value="">自动判定（按探活结果）</option>
+          <option value="single">强制单仓</option>
+          <option value="multi">强制多仓</option>
+        </select>
+        <span class="muted">探活一直失败、源列表有但仓源里没有时用它</span>
+      </div>
+      <div class="form-row" v-if="forceTypeHint(editSrc)">
+        <label></label><span class="muted">{{ forceTypeHint(editSrc) }}</span>
+      </div>
       <div class="form-row"><label>分组</label><input v-model="editSrc.group" list="group-list"></div>
       <div class="form-row"><label>排序值</label><input type="number" v-model.number="editSrc.sort"><span class="muted">小的在前</span></div>
       <div class="form-row"><label>检测超时（秒）</label><input type="number" min="0" max="120" v-model.number="editSrc.timeoutSeconds" placeholder="0 = 用全局设置"><span class="muted">0=用全局；大仓库可放宽到 30-60</span></div>

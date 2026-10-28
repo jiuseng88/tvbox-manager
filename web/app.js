@@ -136,7 +136,7 @@
       /* ---- 源列表 ---- */
       const list = ref([]);
       const total = ref(0);
-      const filters = reactive({ keyword: "", type: "", status: "", group: "", enabled: "", page: 1, size: 50, sort: "", sort_by: "", sort_dir: "" });
+      const filters = reactive({ keyword: "", type: "", status: "", group: "", enabled: "", notInSub: "", page: 1, size: 50, sort: "", sort_by: "", sort_dir: "" });
       const groups = ref([]);
       const checked = ref([]);
       let searchDebounce = null;
@@ -200,6 +200,45 @@
         if (s.type === "multi") return (d.subUrls || []).length + " 个子仓";
         return `${d.sites} 站点 / ${d.lives} 直播`;
       }
+      // subHint 说明「这条源为什么进不了订阅」：启用了却一条可用站点源都没有时才有值。
+      // flatCount 由后端按「未隐藏且自身启用的站点源」实时回填，判定比前端猜更准。
+      function subHint(s) {
+        if (!s.enabled) return "";
+        if (s.flatCount > 0) return "";
+        if (s.type === "unknown") return "未定型，未进订阅";
+        if (s.type === "multi" && !((s.detail && s.detail.subUrls) || []).length) return "多仓无子仓，未进订阅";
+        return "仓源被删，未进订阅";
+      }
+      // 恢复：按父源重建站点源 + 复活误删条目（后端 RestoreSourceFlats）
+      async function restoreSource(s) {
+        try {
+          const rep = await api("POST", "/api/sources/" + s.id + "/restore");
+          if (rep.hint) {
+            toast(rep.hint, "error");
+          } else {
+            const bits = [];
+            if (rep.restored) bits.push(`恢复 ${rep.restored} 条`);
+            if (rep.created) bits.push(`新建 ${rep.created} 条`);
+            toast(bits.length ? bits.join("，") : `已重建，当前 ${rep.alive} 条`, "ok");
+          }
+          loadSources(); loadStats();
+        } catch (e) { toast(e.message, "error"); }
+      }
+      // 一键恢复当前列表里所有「未进订阅」的源
+      async function restoreAllMissing() {
+        const targets = list.value.filter(s => subHint(s));
+        if (!targets.length) { toast("没有需要恢复的源", "info"); return; }
+        let restored = 0, failed = 0;
+        for (const s of targets) {
+          try {
+            const rep = await api("POST", "/api/sources/" + s.id + "/restore");
+            restored += rep.restored + rep.created;
+            if (rep.hint) failed++;
+          } catch (e) { failed++; }
+        }
+        toast(`处理 ${targets.length} 条：新增/恢复 ${restored} 条仓源${failed ? `，${failed} 条仍需先检测或定型` : ""}`, failed ? "info" : "ok");
+        loadSources(); loadStats();
+      }
       function pages() { return Math.max(1, Math.ceil(total.value / filters.size)); }
 
       async function toggleSource(s) {
@@ -250,15 +289,24 @@
 
       /* 编辑弹窗 */
       const editSrc = ref(null);
-      function openEdit(s) { editSrc.value = { ...s, _id: s.id }; }
+      function openEdit(s) { editSrc.value = { ...s, _id: s.id, forceType: s.forceType || "" }; }
+      // 手动定型：某些地址探活一直失败/内容抓不全，系统分不清单仓多仓就不下发。
+      // 用户确认了是什么，就在这里钉住，不必等探活成功。
+      function forceTypeHint(e0) {
+        if (!e0 || !e0.forceType) return "";
+        return e0.forceType === "single"
+          ? "已强制按单仓处理：直接用这条地址生成 1 条仓源"
+          : "已强制按多仓处理：需要探活成功解析出子仓地址才会展开";
+      }
       async function saveEdit() {
         const e0 = editSrc.value;
         try {
           await api("PUT", "/api/sources/" + e0._id, {
             name: e0.name, url: e0.url, group: e0.group, remark: e0.remark, sort: Number(e0.sort) || 0,
             timeoutSeconds: Math.max(0, Math.min(120, Number(e0.timeoutSeconds) || 0)),
+            forceType: e0.forceType || "",
           });
-          toast("已保存", "ok"); editSrc.value = null; loadSources(); loadGroups();
+          toast("已保存", "ok"); editSrc.value = null; loadSources(); loadGroups(); loadStats();
         } catch (err) { toast(err.message, "error"); }
       }
 
@@ -351,6 +399,7 @@
         filters.keyword = "";
         filters.type = "";
         filters.group = "";
+        filters.notInSub = "";
         filters.sort = "";
         filters.sort_by = "";
         filters.sort_dir = "";
@@ -369,6 +418,14 @@
         resetSourceFilters();
         filters.status = status || "";
         filters.enabled = enabled || "";
+        view.value = "sources";
+      }
+      // 概览「未进订阅」下钻：只看启用了却没有可用仓源的源
+      function gotoNotInSub() {
+        resetSourceFilters();
+        filters.status = "";
+        filters.enabled = "true";
+        filters.notInSub = "true";
         view.value = "sources";
       }
       function gotoFlat(status, enabled) {
@@ -814,6 +871,7 @@
         sortArrow, toggleSort,
         toggleSource, checkOne, delSource,
         flatList, flatsTotal, flatFilters, flatGroups, flatChecked, flatPages, loadFlats, loadFlatGroups, applyFlatFilter, gotoSource, gotoFlat,
+        gotoNotInSub, subHint, restoreSource, restoreAllMissing, forceTypeHint,
         flatSortArrow, toggleFlatSort,
         flatStatusText, flatStatusClass, toggleFlat, checkFlat, delFlat, flatBatchAction, batchCheckFlats,
         editFlat, openFlatEdit, saveFlatEdit, openFlatPreview,

@@ -133,6 +133,8 @@ td.failnum { color: var(--fail); font-weight: 600; }
 .tag.multi { background: #f3e8ff; color: #7c3aed; }
 .tag.group { background: #f1f5f9; }
 .tag.fail { background: #fee2e2; color: #b91c1c; }
+/* 未进订阅 / 待处理：橙色比红色温和，这不是「坏了」而是「没生效」，别吓人 */
+.tag.warn { background: #fef3c7; color: #b45309; }
 
 /* 关联源：直接列出父源名字（有多个就并排），不再显示「N 个源」 */
 td.parent-cell { max-width: 240px; overflow: hidden; }

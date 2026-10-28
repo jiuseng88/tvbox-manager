@@ -484,43 +484,67 @@ func (s *Store) upsertFlatLocked(parent model.Source, rawURL, name string, force
 	return true
 }
 
-// syncFlatsForSourceLocked 父源变化后对齐其关联站点源：
-//   - 单仓：自身地址生成一条站点源；
-//   - 多仓：Detail.SubURLs 全部展开；
-//   - 未知（还没探活成功过）：不生成——此时分不清是多仓还是单仓，
-//     把多仓地址当单仓发出去，客户端拿到那一条会直接报错；
-//     等第一次探活确定类型后（UpdateCheckResult → 本函数）再生成。
-//   - 期望集合中已消失的旧关联（多仓内容变化、父源改地址）→ 摘除父引用，无父则删。
+// desiredFlat 父源期望生成的一条站点源
+type desiredFlat struct {
+	URL       string // 已归一化
+	Name      string
+	ForceName bool // true=名称始终随父源同步（单仓），false=首次名称优先
+}
+
+// desiredFlats 计算父源期望生成的站点源集合。
 //
-// 返回是否发生实际变化。调用方需持有写锁。
-func (s *Store) syncFlatsForSourceLocked(src model.Source) bool {
-	changed := false
-	expect := map[string]bool{} // 键为 parser.DedupKey：带不带尾斜杠都算同一个期望
+// 第二个返回值 definitive 表示「这次能不能对账」：
+//   - false：父源自身地址都归一化不了，此时返回空集合绝不代表「该源不该有站点源」，
+//     调用方必须原样跳过（否则会把已有站点源全摘掉）；
+//   - true + 空集合：确实不该有站点源（未定型 / 多仓缺子仓列表），
+//     调用方应当把残留的旧关联清掉。
+func desiredFlats(src model.Source) (list []desiredFlat, definitive bool) {
 	switch {
-	case src.Type == model.TypeMulti && src.Detail != nil:
+	case src.Type == model.TypeMulti:
+		// 还没拿到子仓列表（首次探活未成功 / 手动强制多仓）→ 先不生成，
+		// 等 Detail 到位再由同步函数展开，避免把多仓地址当单仓下发
+		if src.Detail == nil {
+			return nil, true
+		}
+		out := make([]desiredFlat, 0, len(src.Detail.SubURLs))
 		for _, su := range src.Detail.SubURLs {
 			norm, err := parser.Normalize(su.URL)
 			if err != nil {
 				continue
 			}
-			expect[parser.DedupKey(norm)] = true
 			name := su.Name
 			if name == "" {
 				name = src.Name
 			}
-			if s.upsertFlatLocked(src, norm, name, false) { // 多仓子仓：首次名称优先
-				changed = true
-			}
+			out = append(out, desiredFlat{URL: norm, Name: name})
 		}
+		return out, true
 	case src.Type == model.TypeUnknown:
-		// 未确认类型的源不进订阅；expect 为空 → 下面会把它之前可能生成过的自身站点源清掉
+		// 未确认类型的源不进订阅
+		return nil, true
 	default:
 		norm, err := parser.Normalize(src.URL)
 		if err != nil {
-			return changed
+			return nil, false
 		}
-		expect[parser.DedupKey(norm)] = true
-		if s.upsertFlatLocked(src, norm, src.Name, true) { // 单仓父源：名称/分组始终随父源同步
+		return []desiredFlat{{URL: norm, Name: src.Name, ForceName: true}}, true
+	}
+}
+
+// syncFlatsForSourceLocked 父源变化后对齐其关联站点源（期望集合见 desiredFlats）；
+// 期望集合中已消失的旧关联（多仓内容变化、父源改地址）→ 摘除父引用，无父则删。
+//
+// 返回是否发生实际变化。调用方需持有写锁。
+func (s *Store) syncFlatsForSourceLocked(src model.Source) bool {
+	changed := false
+	want, definitive := desiredFlats(src)
+	if !definitive {
+		return false
+	}
+	expect := make(map[string]bool, len(want))
+	for _, d := range want {
+		expect[parser.DedupKey(d.URL)] = true
+		if s.upsertFlatLocked(src, d.URL, d.Name, d.ForceName) {
 			changed = true
 		}
 	}
@@ -531,6 +555,99 @@ func (s *Store) syncFlatsForSourceLocked(src model.Source) bool {
 		changed = true
 	}
 	return changed
+}
+
+// RestoreReport 恢复结果，前端据此给用户看「到底恢复了几条、为什么恢复不了」
+type RestoreReport struct {
+	SourceID string `json:"sourceId"`
+	Type     string `json:"type"`
+	Restored int    `json:"restored"` // 从墓碑复活（用户之前删掉的）
+	Created  int    `json:"created"`  // 新生成的
+	Total    int    `json:"total"`    // 该源期望的站点源总数
+	Alive    int    `json:"alive"`    // 恢复后该源可见的站点源条数
+	Hint     string `json:"hint,omitempty"`
+}
+
+// RestoreSourceFlats 按父源重建它应有的站点源，并复活被删掉的条目。
+//
+// 解决「源列表里有、仓源里没有」里最难自查的一类：用户在多仓展开后误删了子仓，
+// 该条目变成墓碑（Hidden），此后父源怎么同步都不会复活它，界面上下次看到的就是
+// 「这个源明明启用了，订阅里却没有它」。这里显式清墓碑 + 对账，是用户可触发的补救。
+func (s *Store) RestoreSourceFlats(id string) (RestoreReport, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	rep := RestoreReport{SourceID: id}
+	idx := -1
+	for i := range s.data.Sources {
+		if s.data.Sources[i].ID == id {
+			idx = i
+			break
+		}
+	}
+	if idx < 0 {
+		return rep, fmt.Errorf("源不存在: %s", id)
+	}
+	src := s.data.Sources[idx]
+	rep.Type = src.Type
+
+	want, definitive := desiredFlats(src)
+	if !definitive {
+		rep.Hint = "该源地址无法解析，请检查地址是否正确"
+		return rep, nil
+	}
+	if len(want) == 0 {
+		switch {
+		case src.Type == model.TypeUnknown:
+			rep.Hint = "该源还没定型，分不清是单仓还是多仓，所以不会下发。请先「检测」，或在编辑里手动指定类型后再恢复"
+		case src.Type == model.TypeMulti:
+			rep.Hint = "多仓源还没解析出子仓地址（探活未成功或子仓列表为空）。请先「检测」，让它把子仓展开出来"
+		default:
+			rep.Hint = "该源没有可用的站点地址"
+		}
+		return rep, nil
+	}
+	rep.Total = len(want)
+
+	// 恢复前该父源名下可见条数（用于区分「复活」和「新建」）
+	before := 0
+	for i := range s.data.Flats {
+		if f := s.data.Flats[i]; !f.Hidden && containsID(f.ParentIDs, src.ID) {
+			before++
+		}
+	}
+
+	// 1) 复活墓碑：期望集合内、之前被删掉的条目
+	now := time.Now()
+	restorable := make(map[string]bool, len(want))
+	for _, d := range want {
+		restorable[parser.DedupKey(d.URL)] = true
+	}
+	for i := range s.data.Flats {
+		f := &s.data.Flats[i]
+		if !f.Hidden || !restorable[parser.DedupKey(f.URL)] {
+			continue
+		}
+		f.Hidden = false
+		f.Enabled = true
+		f.UpdatedAt = now
+		rep.Restored++
+	}
+
+	// 2) 对账补齐：缺少的建出来，父引用丢失的补回来
+	s.syncFlatsForSourceLocked(src)
+
+	// 3) 统计恢复后该父源名下可见的站点源
+	for i := range s.data.Flats {
+		f := s.data.Flats[i]
+		if f.Hidden || !containsID(f.ParentIDs, src.ID) {
+			continue
+		}
+		rep.Alive++
+	}
+	if grew := rep.Alive - before; grew > rep.Restored {
+		rep.Created = grew - rep.Restored
+	}
+	return rep, s.flush()
 }
 
 // pruneFlatsLocked 摘除命中 drop 的站点源上的 parentID 引用；
