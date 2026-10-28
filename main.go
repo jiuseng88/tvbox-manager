@@ -22,7 +22,7 @@ import (
 //go:embed all:web
 var webFS embed.FS
 
-const version = "1.3.0"
+const version = "1.3.1"
 
 func main() {
 	// 开发模式：-web ./web 或 WEB_DIR=./web，前端从磁盘读取，改完刷新浏览器即可，无需重新编译

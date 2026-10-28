@@ -2,7 +2,6 @@ package api
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"io"
 	"log"
@@ -115,12 +114,40 @@ func (a *API) handleSourceAdd(w http.ResponseWriter, r *http.Request) {
 	ok(w, created)
 }
 
+// batchItem 结构化条目：名称里带逗号/竖线时不会被 splitNameURL 切坏
+type batchItem struct {
+	Name string `json:"name"`
+	URL  string `json:"url"`
+}
+
 type batchAddReq struct {
-	URLs        []string `json:"urls"`
-	Group       string   `json:"group"`
-	Enabled     *bool    `json:"enabled"`
-	AutoCheck   *bool    `json:"autoCheck"`   // 默认 true：新增的源立即探活一次，类型定型后才会进订阅
-	OnDuplicate string   `json:"onDuplicate"` // skip(默认) / update
+	URLs        []string    `json:"urls"`
+	Items       []batchItem `json:"items"` // 结构化条目，优先于 URLs
+	Group       string      `json:"group"`
+	Enabled     *bool       `json:"enabled"`
+	AutoCheck   *bool       `json:"autoCheck"`   // 默认 true：新增的源立即探活一次，类型定型后才会进订阅
+	OnDuplicate string      `json:"onDuplicate"` // skip(默认) / update
+}
+
+// entries 把两种入参统一成结构化条目
+func (req batchAddReq) entries() []batchItem {
+	if len(req.Items) > 0 {
+		out := make([]batchItem, 0, len(req.Items))
+		for _, it := range req.Items {
+			u := strings.TrimSpace(it.URL)
+			if u == "" {
+				continue
+			}
+			out = append(out, batchItem{Name: strings.TrimSpace(it.Name), URL: u})
+		}
+		return out
+	}
+	out := make([]batchItem, 0, len(req.URLs))
+	for _, raw := range req.URLs {
+		n, u := splitNameURL(raw)
+		out = append(out, batchItem{Name: n, URL: u})
+	}
+	return out
 }
 
 func (a *API) handleSourceBatch(w http.ResponseWriter, r *http.Request) {
@@ -132,11 +159,12 @@ func (a *API) handleSourceBatch(w http.ResponseWriter, r *http.Request) {
 }
 
 func (a *API) batchAdd(w http.ResponseWriter, req batchAddReq) {
-	if len(req.URLs) == 0 {
+	list := req.entries()
+	if len(list) == 0 {
 		badRequest(w, "urls 不能为空")
 		return
 	}
-	if len(req.URLs) > 2000 {
+	if len(list) > 2000 {
 		badRequest(w, "单次最多 2000 条")
 		return
 	}
@@ -159,8 +187,8 @@ func (a *API) batchAdd(w http.ResponseWriter, req batchAddReq) {
 	addedCount := 0
 	updated := 0
 
-	for _, raw := range req.URLs {
-		name, url := splitNameURL(raw)
+	for _, it := range list {
+		name, url := it.Name, it.URL
 		norm, err := parser.Normalize(url)
 		if err != nil {
 			skipped = append(skipped, skippedItem{URL: url, Reason: "地址非法: " + err.Error()})
@@ -332,89 +360,34 @@ func (a *API) handleSourceImport(w http.ResponseWriter, r *http.Request) {
 	text := string(body)
 	lower := strings.ToLower(header.Filename)
 
-	var entries []string
+	var items []batchItem
 	if strings.HasSuffix(lower, ".txt") || !jsonLooksLike(text) {
-		entries = strings.Split(text, "\n")
+		for _, e := range strings.Split(text, "\n") {
+			if strings.TrimSpace(e) == "" {
+				continue
+			}
+			n, u := splitNameURL(e)
+			items = append(items, batchItem{Name: n, URL: u})
+		}
 	} else {
-		entries, err = importFromJSON(text)
-		if err != nil {
-			badRequest(w, err.Error())
+		parsed, perr := ParseSourceJSON(text)
+		if perr != nil {
+			badRequest(w, perr.Error())
 			return
+		}
+		for _, e := range parsed.Entries {
+			items = append(items, batchItem{Name: e.Name, URL: e.URL})
 		}
 	}
 
 	// 复用批量添加逻辑
-	urls := make([]string, 0, len(entries))
-	for _, e := range entries {
-		if strings.TrimSpace(e) == "" {
-			continue
-		}
-		urls = append(urls, e)
-	}
 	enabledPtr := enabled
-	a.batchAdd(w, batchAddReq{URLs: urls, Group: group, Enabled: &enabledPtr, OnDuplicate: "skip"})
+	a.batchAdd(w, batchAddReq{Items: items, Group: group, Enabled: &enabledPtr, OnDuplicate: "skip"})
 }
 
 func jsonLooksLike(s string) bool {
 	t := strings.TrimLeft(s, " \t\r\n\ufeff")
 	return strings.HasPrefix(t, "{") || strings.HasPrefix(t, "[")
-}
-
-// importFromJSON 解析三种 JSON 形态为行数组
-func importFromJSON(text string) ([]string, error) {
-	trimmed := strings.TrimSpace(text)
-	if strings.HasPrefix(trimmed, "[") {
-		var arr []struct {
-			URL  string `json:"url"`
-			Name string `json:"name"`
-		}
-		if err := json.Unmarshal([]byte(trimmed), &arr); err != nil {
-			return nil, fmt.Errorf("JSON 数组解析失败: %v", err)
-		}
-		out := make([]string, 0, len(arr))
-		for _, x := range arr {
-			if x.URL == "" {
-				continue
-			}
-			if x.Name != "" {
-				out = append(out, x.Name+","+x.URL)
-			} else {
-				out = append(out, x.URL)
-			}
-		}
-		return out, nil
-	}
-	var probe map[string]json.RawMessage
-	if err := json.Unmarshal([]byte(trimmed), &probe); err != nil {
-		return nil, fmt.Errorf("JSON 解析失败: %v", err)
-	}
-	if _, hasURLs := probe["urls"]; hasURLs {
-		var o struct {
-			URLs []struct {
-				URL  string `json:"url"`
-				Name string `json:"name"`
-			} `json:"urls"`
-		}
-		if err := json.Unmarshal([]byte(trimmed), &o); err != nil {
-			return nil, fmt.Errorf("urls 解析失败: %v", err)
-		}
-		out := make([]string, 0, len(o.URLs))
-		for _, x := range o.URLs {
-			if x.URL == "" {
-				continue
-			}
-			if x.Name != "" {
-				out = append(out, x.Name+","+x.URL)
-			} else {
-				out = append(out, x.URL)
-			}
-		}
-		return out, nil
-	}
-	if _, hasSites := probe["sites"]; hasSites {
-		return nil, fmt.Errorf("该文件是仓库内容而非地址列表，请改用「粘贴 JSON 内容」方式或直接把该文件托管地址添加为源")
-	}
-	return nil, fmt.Errorf("无法识别的 JSON 结构（缺少 urls）")
 }
 
 func (a *API) handleSourceGet(w http.ResponseWriter, r *http.Request) {

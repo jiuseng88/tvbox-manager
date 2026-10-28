@@ -47,6 +47,7 @@ func (a *API) Router() http.Handler {
 	apiMux.HandleFunc("POST /api/sources/batch", a.handleSourceBatch)
 	apiMux.HandleFunc("POST /api/sources/batch-action", a.handleBatchAction)
 	apiMux.HandleFunc("POST /api/sources/import", a.handleSourceImport)
+	apiMux.HandleFunc("POST /api/sources/import/json", a.handleSourceImportJSON)
 	apiMux.HandleFunc("GET /api/sources/{id}", a.handleSourceGet)
 	apiMux.HandleFunc("PUT /api/sources/{id}", a.handleSourceUpdate)
 	apiMux.HandleFunc("DELETE /api/sources/{id}", a.handleSourceDelete)

@@ -400,6 +400,9 @@
             <button class="btn" @click="openBackupModal">导出备份（sources + config）</button>
             <button class="btn" @click="importBackup">导入备份</button>
           </div>
+          <div class="muted">
+            只恢复部分源、或手上只有一段 JSON 文本时，用「添加源 → JSON 粘贴」：整段粘进去即自动识别（支持 {"urls":[…]}、数组、备份格式等）。
+          </div>
         </div>
       </section>
     </main>
@@ -415,6 +418,7 @@
       <div class="tabs">
         <div class="tab" :class="{active: addTab==='single'}" @click="addTab='single'">单个添加</div>
         <div class="tab" :class="{active: addTab==='paste'}" @click="addTab='paste'">批量粘贴</div>
+        <div class="tab" :class="{active: addTab==='json'}" @click="addTab='json'">JSON 粘贴</div>
         <div class="tab" :class="{active: addTab==='file'}" @click="addTab='file'">文件导入</div>
       </div>
 
@@ -469,6 +473,55 @@
         <div v-if="batchResult" class="result-box">
           新增 {{ batchResult.added }} 条，跳过 {{ (batchResult.skipped||[]).length }} 条
           <div v-for="sk in batchResult.skipped" :key="sk.url" class="muted">✕ {{ sk.url }} — {{ sk.reason }}</div>
+        </div>
+      </div>
+
+      <!-- JSON 粘贴 -->
+      <div class="panel" v-if="addTab==='json'">
+        <div class="muted" style="margin-bottom:8px">
+          把 JSON 整段粘进来，自动识别以下形态（含包装层）：<br>
+          ① TVBox 分享格式 <b>{"urls":[{"url":"…","name":"…"}]}</b>　② 字符串数组 <b>["http://…"]</b><br>
+          ③ 对象数组 <b>[{"name":"…","url":"…"}]</b>　④ 本工具备份 <b>{"sources":[…]}</b>　⑤ 单个 <b>{"name":"…","url":"…"}</b><br>
+          当前分组：<b>{{ singleForm.group || '默认' }}</b>（在「单个添加」页修改）
+        </div>
+        <textarea v-model="jsonText" rows="10" style="font-size:12px" placeholder='{"urls":[{"url":"http://example.com/tvbox.json","name":"肥猫"}]}'></textarea>
+        <div class="preview-inline" v-if="jsonParsing">解析中…</div>
+        <template v-else-if="jsonParsed">
+          <div class="preview-inline" v-if="jsonParsed.errMsg"><span class="err">✕ {{ jsonParsed.errMsg }}</span></div>
+          <template v-else>
+            <div class="preview-inline">
+              已识别 <b>{{ jsonParsed.total }}</b> 条，其中 <b>{{ jsonParsed.dup }}</b> 条与现有源重复（导入时自动跳过）
+              <span v-if="jsonParsed.kind==='sources'" class="tag fail" style="margin-left:6px">备份数据</span>
+            </div>
+            <div class="muted" v-if="jsonParsed.kind==='sources'" style="margin-bottom:6px">
+              这段内容像本工具的备份，这里只会导入其中的源地址（配置项不变）。要连配置一起恢复，请到「设置 → 导入备份」。
+            </div>
+            <div class="table-wrap" style="max-height:260px" v-if="jsonRows.length">
+              <table>
+                <thead><tr><th class="w-num">#</th><th>名称</th><th>地址</th><th>状态</th></tr></thead>
+                <tbody>
+                  <tr v-for="(r, i) in jsonRows" :key="i" :class="{disabled: r.dup || r.reason}">
+                    <td class="muted w-num">{{ i + 1 }}</td>
+                    <td>{{ r.name || '（自动取名）' }}</td>
+                    <td class="url-cell">{{ r.url }}</td>
+                    <td>
+                      <span v-if="r.reason" class="tag fail" :title="r.reason">地址非法</span>
+                      <span v-else-if="r.dup" class="tag fail">已存在</span>
+                      <span v-else class="tag ok">新增</span>
+                    </td>
+                  </tr>
+                </tbody>
+              </table>
+            </div>
+            <div class="muted" v-if="jsonParsed.total > jsonRows.length">仅显示前 {{ jsonRows.length }} 条，其余 {{ jsonParsed.total - jsonRows.length }} 条同样按上述规则导入</div>
+          </template>
+        </template>
+        <div class="form-actions">
+          <button class="btn primary" @click="submitJsonImport" :disabled="jsonParsing || !jsonText.trim()">导入</button>
+        </div>
+        <div v-if="jsonResult" class="result-box">
+          新增 {{ jsonResult.added }} 条，跳过 {{ (jsonResult.skipped||[]).length }} 条
+          <div v-for="sk in jsonResult.skipped.slice(0, 20)" :key="sk.url" class="muted">✕ {{ sk.url }} — {{ sk.reason }}</div>
         </div>
       </div>
 

@@ -598,6 +598,57 @@
         } catch (e) { toast(e.message, "error"); }
       }
 
+      /* JSON 粘贴导入：解析规则统一放后端（ParseSourceJSON），前端只负责预览与提交，
+         避免两边各写一套识别逻辑后越走越偏。 */
+      const jsonText = ref("");
+      const jsonParsed = ref(null);
+      const jsonParsing = ref(false);
+      const jsonResult = ref(null);
+      let jsonTimer = 0;
+      let jsonSeq = 0;
+      async function previewJsonImport() {
+        const text = jsonText.value;
+        if (!text.trim()) { jsonParsed.value = null; jsonParsing.value = false; return; }
+        const seq = ++jsonSeq; // 连打时只认最后一次响应
+        jsonParsing.value = true;
+        try {
+          const r = await api("POST", "/api/sources/import/json", { text, dryRun: true });
+          if (seq !== jsonSeq) return;
+          jsonParsed.value = { ...r, errMsg: "" };
+          jsonParsing.value = false;
+        } catch (e) {
+          if (seq !== jsonSeq) return;
+          jsonParsed.value = { errMsg: e.message, entries: [], total: 0, dup: 0, kind: "" };
+          jsonParsing.value = false;
+        }
+      }
+      watch(jsonText, (v) => {
+        // 只有「用户又粘了新内容」才作废旧结果；导入成功后主动清空输入框不能把结果一起清掉
+        if (v.trim()) jsonResult.value = null;
+        clearTimeout(jsonTimer);
+        if (!v.trim()) { jsonParsed.value = null; jsonParsing.value = false; return; }
+        jsonParsing.value = true;
+        jsonTimer = setTimeout(previewJsonImport, 400);
+      });
+      const jsonRows = computed(() => {
+        const p = jsonParsed.value;
+        if (!p || !p.entries) return [];
+        return p.entries.slice(0, 200);
+      });
+      async function submitJsonImport() {
+        const text = jsonText.value;
+        if (!text.trim()) { toast("请先粘贴 JSON 内容", "warn"); return; }
+        try {
+          jsonResult.value = await api("POST", "/api/sources/import/json", {
+            text, group: singleForm.group || "默认", enabled: true,
+          });
+          toast(`已导入 ${jsonResult.value.added} 条，正在后台探活（确认是单仓/多仓后才进订阅）`, "ok");
+          jsonText.value = "";
+          jsonParsed.value = null;
+          loadSources(); loadGroups(); loadKnownUrls();
+        } catch (e) { toast(e.message, "error"); }
+      }
+
       /* ---- 设置 ---- */
       const config = ref(null);
       const subUrls = computed(() => {
@@ -766,6 +817,7 @@
         preview, openPreview, retryPreview, siteNamesExpanded, rawExpanded, batchCheck,
         addTab, singleForm, singlePreview, singlePreviewing, previewUrl, addSingle,
         batchText, batchResult, batchParsed, submitBatch,
+        jsonText, jsonParsed, jsonParsing, jsonResult, jsonRows, submitJsonImport,
         showAdd, openAddModal, knownUrls,
         fileRows, fileResult, handleFile, submitFileRows,
         config, subUrls, loadConfig, saveConfig, newToken, changeToken, authRequired,
