@@ -107,22 +107,30 @@
           progress.value = await api("GET", "/api/check/status");
         } catch (e) { /* 静默 */ }
       }
+      // 只在「确实有检测在跑」时轮询进度；平时不产生任何周期请求。
+      // 以前是只要停在概览页就每 2 秒打一次 /api/check/status，纯浪费。
       function startPolling() {
         stopPolling();
-        loadProgress();
-        pollTimer = setInterval(() => {
-          if (progress.value.running || view.value === "dashboard") loadProgress();
-          if (progress.value.running && view.value === "sources") loadSources();
-          if (progress.value.running && view.value === "flats") loadFlats();
+        pollTimer = setInterval(async () => {
+          await loadProgress();
+          if (progress.value.running) return; // 还在跑，下个周期继续
+          stopPolling();                      // 跑完了：停表并刷新一次真实数据
+          loadStats();
+          loadSources();
+          loadFlats();
         }, 2000);
       }
-      function stopPolling() { if (pollTimer) clearInterval(pollTimer); }
+      function stopPolling() { if (pollTimer) { clearInterval(pollTimer); pollTimer = null; } }
       async function runCheckAll() {
         try {
           await api("POST", "/api/check/run");
           toast("已开始全量检测", "ok");
           loadProgress();
-        } catch (e) { toast(e.message, "warn"); }
+          startPolling(); // 有了明确开始时间才起表，跑完自动停
+        } catch (e) {
+          toast(e.message, "warn"); // 409 = 已在运行，跟上进度即可
+          loadProgress().then(() => { if (progress.value.running) startPolling(); });
+        }
       }
 
       /* ---- 源列表 ---- */
@@ -665,11 +673,15 @@
         if (authRequired.value && !store.token) { needLogin.value = true; return; }
         needLogin.value = false;
         loadStats(); loadSources(); loadGroups(); loadConfig(); loadFlats(); loadFlatGroups();
-        startPolling();
+        // 只在检测真的在跑时续上进度轮询，否则一次都不打
+        loadProgress().then(() => { if (progress.value.running) startPolling(); });
       }
       onMounted(boot);
       watch(view, (v) => {
-        if (v === "dashboard") { loadStats(); loadProgress(); }
+        if (v === "dashboard") {
+          loadStats();
+          loadProgress().then(() => { if (progress.value.running) startPolling(); });
+        }
         if (v === "sources") { loadSources(); loadGroups(); }
         if (v === "flats") { loadFlats(); loadFlatGroups(); }
         if (v === "settings") loadConfig();
