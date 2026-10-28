@@ -179,8 +179,10 @@ func DefaultConfig() Config {
 		CheckTimeoutSeconds:   15,
 		CheckConcurrency:      10,
 		StartupCheck:          false,
-		AutoDisableAfterFails: 0,
-		InsecureSkipVerify:    true,
+		// 连续失败自动禁用的默认阈值。曾经默认 0（关闭），大量用户从未进设置页
+		// 打开过它，误以为功能坏了——现在默认给一个保守值：5 轮连续失败才禁用。
+		// 已在 config.json 里显式保存过该键的不受影响（含主动填 0 关闭的）。
+		AutoDisableAfterFails: 5,		InsecureSkipVerify:    true,
 		CheckSubURLs:          false,
 	}
 }

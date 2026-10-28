@@ -133,6 +133,13 @@ func (s *Store) loadConfig() error {
 	applyEnv(&cfg, present)
 	sanitizeConfig(&cfg)
 
+	// 旧版本默认 0（关闭）且启动时会把 0 持久化进 config.json，
+	// 很多用户因此以为「连续失败自动禁用」坏了。值为 0 时提醒一句，
+	// 避免再当成 bug 报上来；是否开启仍以用户配置为准。
+	if cfg.AutoDisableAfterFails <= 0 {
+		fmt.Printf("[store] 提示: 连续失败自动禁用当前未开启（autoDisableAfterFails=0），需要的话到后台「设置」页填写阈值\n")
+	}
+
 	// 令牌为空 = 无鉴权模式：不自动生成，后台 /api/* 不校验，
 	// 前端会在登录页与设置页提示尽快设置（是否设置由用户决定）。
 	// 首次启动可用环境变量 TOKEN 提供初值；之后以 config.json 为准。

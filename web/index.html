@@ -348,6 +348,7 @@
             <div class="form-row"><label>单请求超时（秒）</label><input type="number" v-model.number="config.checkTimeoutSeconds"></div>
             <div class="form-row"><label>并发数</label><input type="number" v-model.number="config.checkConcurrency"></div>
             <div class="form-row"><label>连续失败自动禁用（0=不自动）<span class="muted">父源与所有仓源同口径，成功一次即清零</span></label><input type="number" v-model.number="config.autoDisableAfterFails"></div>
+            <div class="muted" v-if="config && !config.autoDisableAfterFails" style="color:#d97706">⚠️ 当前为 0：连续失败不会自动禁用，功能未开启。想启用请填一个正整数（如 5）并保存。</div>
             <div class="form-row"><label>启动时立即检测</label>
               <switch-box :on="config.startupCheck" @toggle="config.startupCheck = !config.startupCheck"></switch-box>
             </div>

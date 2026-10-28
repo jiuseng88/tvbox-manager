@@ -1075,3 +1075,54 @@ func TestDedupFlats(t *testing.T) {
 		t.Errorf("应保留首次出现的条目并保持顺序，实际 %s,%s", out[0].ID, out[1].ID)
 	}
 }
+
+// 端到端复现用户操作路径：设置页保存「连续失败自动禁用」→ 添加源 →
+// 手动连续探活 → 达到阈值后源应自动禁用。
+func TestAutoDisableEndToEnd(t *testing.T) {
+	e := newEnv(t)
+	fail := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+		_, _ = w.Write([]byte("boom"))
+	}))
+	defer fail.Close()
+
+	// 1. 设置页保存配置：连续失败 2 次自动禁用
+	code, body := e.doJSON("PUT", "/api/config", map[string]interface{}{
+		"port": 8080, "subPath": "/sub",
+		"checkIntervalMinutes": 360, "checkTimeoutSeconds": 5, "checkConcurrency": 5,
+		"startupCheck": false, "autoDisableAfterFails": 2,
+		"insecureSkipVerify": true, "checkSubUrls": false,
+	})
+	if code != 200 {
+		t.Fatalf("保存配置失败: %v", body)
+	}
+	if got := e.st.Config().AutoDisableAfterFails; got != 2 {
+		t.Fatalf("配置应保存为 2，实际 %d", got)
+	}
+
+	// 2. 添加一个永远 500 的源
+	code, b1 := e.doJSON("POST", "/api/sources", map[string]interface{}{
+		"name": "坏源", "url": fail.URL + "/1.json", "autoCheck": false,
+	})
+	if code != 200 {
+		t.Fatalf("添加源失败: %v", b1)
+	}
+	id := dataOf(t, b1)["id"].(string)
+
+	// 3. 连续手动探活 3 轮（阈值 2，第 2 轮就应禁用；多跑 1 轮确认不恢复）
+	for round := 1; round <= 3; round++ {
+		e.sch.RunAll("test") // 同步跑完一轮
+	}
+
+	// 4. 断言：源已被自动禁用，且状态为 fail
+	s, _ := e.st.Get(id)
+	if s.Enabled {
+		t.Errorf("连续失败 %d 次应自动禁用，FailStreak=%d, msg=%q", 3, s.FailStreak, s.CheckMsg)
+	}
+	if s.Status != model.StatusFail {
+		t.Errorf("状态应为 fail，实际 %q", s.Status)
+	}
+	if s.FailStreak < 2 {
+		t.Errorf("FailStreak 应 >= 2，实际 %d", s.FailStreak)
+	}
+}
