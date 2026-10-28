@@ -134,6 +134,10 @@ func (a *API) handleFlatCheck(w http.ResponseWriter, r *http.Request) {
 		notFound(w, "站点源不存在")
 		return
 	}
+	if a.isLocalURL(f.URL) {
+		badRequest(w, "本地源不参与检测")
+		return
+	}
 	a.st.UpdateFlatInMemory(id, func(fp *model.FlatSource) { fp.Status = model.StatusChecking })
 	go func() {
 		res, _ := a.sch.Checker().FetchT(context.Background(), f.URL, false, f.TimeoutSeconds)
@@ -211,6 +215,21 @@ func (a *API) handleFlatCheckBatch(w http.ResponseWriter, r *http.Request) {
 			}
 			targets = append(targets, f)
 		}
+	}
+	if len(targets) == 0 {
+		badRequest(w, "没有可检测的站点源")
+		return
+	}
+	// 本地源不参与检测：过滤掉（内容在本服务上，探活无意义）
+	{
+		kept := make([]model.FlatSource, 0, len(targets))
+		for _, f := range targets {
+			if a.isLocalURL(f.URL) {
+				continue
+			}
+			kept = append(kept, f)
+		}
+		targets = kept
 	}
 	if len(targets) == 0 {
 		badRequest(w, "没有可检测的站点源")

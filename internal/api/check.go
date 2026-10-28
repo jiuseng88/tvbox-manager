@@ -84,11 +84,18 @@ func (a *API) handleCheckOne(w http.ResponseWriter, r *http.Request) {
 		notFound(w, "源不存在")
 		return
 	}
+	if src.Type == model.TypeLocal {
+		badRequest(w, "本地源不参与检测")
+		return
+	}
 	a.asyncCheckOne(src.ID, src.URL, src.TimeoutSeconds)
 	ok(w, map[string]interface{}{"id": id, "status": model.StatusChecking})
 }
 
 func (a *API) asyncCheckOne(id, url string, timeoutSeconds int) {
+	if s, ok := a.st.Get(id); ok && s.Type == model.TypeLocal {
+		return // 本地源不参与检测
+	}
 	a.st.UpdateInMemory(id, func(sp *model.Source) {
 		sp.Status = model.StatusChecking
 	})

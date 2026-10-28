@@ -126,7 +126,7 @@
           <input v-model="filters.keyword" placeholder="搜索名称 / 地址 / 备注" class="grow">
           <select v-model="filters.type">
             <option value="">全部类型</option><option value="single">单仓</option>
-            <option value="multi">多仓</option><option value="unknown">未知</option>
+            <option value="multi">多仓</option><option value="local">本地源</option><option value="unknown">未知</option>
           </select>
           <select v-model="filters.status">
             <option value="">全部状态</option><option value="ok">可用</option>
@@ -176,7 +176,7 @@
                   <span v-if="s.status==='checking'" class="spinner"></span>
                 </td>
                 <td><a @click="openEdit(s)" class="link">{{ s.name }}</a></td>
-                <td><span class="tag" :class="s.type">{{ {single:'单仓',multi:'多仓',unknown:'未知',file:'文件'}[s.type] || s.type }}</span></td>
+                <td><span class="tag" :class="s.type">{{ {single:'单仓',multi:'多仓',local:'本地源',unknown:'未知',file:'文件'}[s.type] || s.type }}</span></td>
                 <td class="url-cell" :title="s.url" @click="copyText(s.url)">{{ s.url }}</td>
                 <td class="muted">{{ summary(s) }}</td>
                 <td><span class="tag group">{{ s.group }}</span></td>
@@ -190,7 +190,7 @@
                 <td><switch-box :on="s.enabled" @toggle="toggleSource(s)"></switch-box></td>
                 <td class="ops">
                   <button class="btn xs" @click="openPreview(s)">预览</button>
-                  <button class="btn xs" @click="checkOne(s)">检测</button>
+                  <button class="btn xs" v-if="s.type!=='local'" @click="checkOne(s)">检测</button>
                   <button class="btn xs" @click="openEdit(s)">编辑</button>
                   <button class="btn xs danger" @click="delSource(s)">删除</button>
                 </td>
@@ -434,7 +434,7 @@
         <div class="preview-inline" v-if="singlePreview">
           <template v-if="!singlePreview.errMsg">
             <span class="dot" :class="singlePreview.type ? 'ok' : 'fail'"></span>
-            <b>{{ {single:'单仓',multi:'多仓',unknown:'未知'}[singlePreview.type] || '未知' }}</b>
+            <b>{{ {single:'单仓',multi:'多仓',local:'本地源',unknown:'未知'}[singlePreview.type] || '未知' }}</b>
             <span v-if="singlePreview.httpCode">HTTP {{ singlePreview.httpCode }}</span>
             <span v-if="singlePreview.latencyMs">{{ singlePreview.latencyMs }}ms</span>
             <span v-if="singlePreview.detail">
@@ -644,7 +644,7 @@
             <span class="k">实际</span><code>{{ preview.data.finalUrl }}</code>
             <button class="btn xs" @click="copyText(preview.data.finalUrl)">复制</button>
           </div>
-          <div class="kv"><span class="k">类型</span>{{ {single:'单仓',multi:'多仓',unknown:'未知'}[preview.data.type] || preview.data.type }}
+          <div class="kv"><span class="k">类型</span>{{ {single:'单仓',multi:'多仓',local:'本地源',unknown:'未知'}[preview.data.type] || preview.data.type }}
             <span class="k" style="margin-left:16px">拉取时间</span>{{ absTime(preview.data.fetchedAt) }}</div>
         </div>
 

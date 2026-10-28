@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net/http"
 	"strings"
+	"time"
 
 	"tvbox-manager/internal/model"
 	"tvbox-manager/internal/parser"
@@ -505,9 +506,13 @@ func (a *API) importRepoSingle(w http.ResponseWriter, r *http.Request, cleaned s
 	if enabled != nil {
 		en = *enabled
 	}
+	// 本地源：内容就在本服务上，不参与检测、始终可用；
+	// 站点源由 syncFlatsForSourceLocked 的默认分支生成，URL 即托管地址，直接进订阅。
+	now := time.Now()
 	src := model.Source{
 		Name: nm, URL: url, Group: gr, Enabled: en,
-		Type: model.TypeUnknown, Status: model.StatusUnknown,
+		Type: model.TypeLocal, Status: model.StatusOK,
+		LastCheckAt: &now, CheckMsg: "本地源，无需检测",
 		Remark: "粘贴内容本地托管",
 	}
 	if err := a.st.Add(&src); err != nil {
@@ -515,9 +520,8 @@ func (a *API) importRepoSingle(w http.ResponseWriter, r *http.Request, cleaned s
 		badRequest(w, err.Error())
 		return
 	}
-	go a.asyncCheckOne(src.ID, src.URL, src.TimeoutSeconds)
 	ok(w, map[string]interface{}{
-		"kind": "repo-single", "added": 1, "id": src.ID,
+		"kind": "repo-single", "added": 1, "id": src.ID, "type": model.TypeLocal,
 		"selfHosted": url, "summary": summary,
 	})
 }

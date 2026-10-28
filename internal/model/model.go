@@ -7,6 +7,7 @@ const (
 	TypeSingle  = "single" // 单仓：含 sites/lives/parses
 	TypeMulti   = "multi"  // 多仓：含 urls 数组
 	TypeFile    = "file"   // 由本地 JSON 文件导入
+	TypeLocal   = "local"  // 本地源：粘贴托管的内容，不参与检测，始终可用
 	TypeUnknown = "unknown"
 )
 

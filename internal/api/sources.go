@@ -263,6 +263,9 @@ func (a *API) asyncCheckSources(srcs []model.Source) {
 	done := 0
 
 	for _, s := range srcs {
+		if s.Type == model.TypeLocal {
+			continue // 本地源不参与检测
+		}
 		s := s
 		a.st.UpdateInMemory(s.ID, func(sp *model.Source) { sp.Status = model.StatusChecking })
 		wg.Add(1)

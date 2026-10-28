@@ -9,7 +9,9 @@ import (
 	"strings"
 	"testing"
 
+	"tvbox-manager/internal/model"
 	"tvbox-manager/internal/parser"
+	"tvbox-manager/internal/store"
 )
 
 func TestParseSourceJSONShapes(t *testing.T) {
@@ -318,9 +320,39 @@ func TestImportRepoSinglePaste(t *testing.T) {
 	if src.Name != "我的粘贴仓" || src.URL != selfURL {
 		t.Fatalf("源信息不符: %+v", src)
 	}
+	// 本地源：类型 local、直接可用、无需检测
+	if src.Type != model.TypeLocal {
+		t.Fatalf("类型 = %q，期望 local", src.Type)
+	}
+	if src.Status != model.StatusOK {
+		t.Fatalf("状态 = %q，期望直接可用", src.Status)
+	}
+
+	// 站点源已生成：地址即托管地址、直接可用，并进入订阅输出
+	flats := e.st.EnabledFlats()
+	var localFlat *model.FlatSource
+	for i := range flats {
+		if flats[i].URL == selfURL {
+			localFlat = &flats[i]
+			break
+		}
+	}
+	if localFlat == nil {
+		t.Fatalf("本地源站点源未生成")
+	}
+	if localFlat.Status != model.StatusOK {
+		t.Fatalf("站点源状态 = %q，期望直接可用", localFlat.Status)
+	}
+	code, raw := e.do("GET", "/sub", "", "", "")
+	if code != 200 {
+		t.Fatalf("订阅拉取失败 code=%d", code)
+	}
+	if !strings.Contains(raw, selfURL) {
+		t.Fatalf("订阅输出应包含托管地址 %s: %s", selfURL, raw)
+	}
 
 	// 托管文件能通过无鉴权路由拉到，且内容是清洗后的合法 JSON
-	code, raw := e.do("GET", "/configs/"+selfURL[strings.LastIndex(selfURL, "/")+1:], "", "", "")
+	code, raw = e.do("GET", "/configs/"+selfURL[strings.LastIndex(selfURL, "/")+1:], "", "", "")
 	if code != 200 {
 		t.Fatalf("托管文件拉取失败 code=%d", code)
 	}
@@ -472,4 +504,38 @@ func TestProbeToleratesJunkWrappedConfig(t *testing.T) {
 		t.Fatalf("预览应包含原始返回内容: %v", pd)
 	}
 	_ = selfURL
+}
+
+// 订阅接口只看启用开关：检测状态（可用/失效/未知）不影响输出
+func TestSubIgnoresStatus(t *testing.T) {
+	e := newEnv(t)
+	// 直接构造一个已定型的单仓源（绕过异步探活的时序）
+	src := model.Source{Name: "甲", URL: e.mock.URL + "/tv.json", Type: model.TypeSingle, Enabled: true}
+	if err := e.st.Add(&src); err != nil {
+		t.Fatal(err)
+	}
+	// 模拟探活失败：状态 fail 但仍然启用
+	if err := e.st.UpdateCheckResult(src.ID, store.CheckResult{Status: model.StatusFail, Msg: "模拟失效"}, false); err != nil {
+		t.Fatal(err)
+	}
+
+	code, raw := e.do("GET", "/sub", "", "", "")
+	if code != 200 {
+		t.Fatalf("订阅拉取失败 code=%d", code)
+	}
+	if !strings.Contains(raw, e.mock.URL+"/tv.json") {
+		t.Fatalf("失效但启用的仓源必须照常下发: %s", raw)
+	}
+
+	// 关掉启用开关后才应消失
+	if err := e.st.Update(src.ID, func(sp *model.Source) { sp.Enabled = false }); err != nil {
+		t.Fatal(err)
+	}
+	code, raw = e.do("GET", "/sub", "", "", "")
+	if code != 200 {
+		t.Fatalf("订阅拉取失败 code=%d", code)
+	}
+	if strings.Contains(raw, e.mock.URL+"/tv.json") {
+		t.Fatalf("禁用后不应下发: %s", raw)
+	}
 }

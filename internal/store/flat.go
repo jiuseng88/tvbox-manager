@@ -438,6 +438,14 @@ func (s *Store) upsertFlatLocked(parent model.Source, rawURL, name string, force
 			f.Group = group
 			changed = true
 		}
+		// 本地源的站点源始终可用（内容就在本服务上，无需探活）
+		if parent.Type == model.TypeLocal && f.Status != model.StatusOK {
+			t := time.Now()
+			f.Status = model.StatusOK
+			f.LastCheckAt = &t
+			f.CheckMsg = "本地源，无需检测"
+			changed = true
+		}
 		if changed {
 			f.UpdatedAt = time.Now()
 		}
@@ -446,6 +454,15 @@ func (s *Store) upsertFlatLocked(parent model.Source, rawURL, name string, force
 	now := s.nowStrictLocked()
 	if name == "" {
 		name = parent.Name
+	}
+	flatStatus := model.StatusUnknown
+	var flatLastCheck *time.Time
+	flatMsg := ""
+	if parent.Type == model.TypeLocal { // 本地源：直接可用，不参与检测
+		flatStatus = model.StatusOK
+		t := now
+		flatLastCheck = &t
+		flatMsg = "本地源，无需检测"
 	}
 	s.data.Flats = append(s.data.Flats, model.FlatSource{
 		ID:             NewFlatID(),
@@ -458,7 +475,9 @@ func (s *Store) upsertFlatLocked(parent model.Source, rawURL, name string, force
 		TimeoutSeconds: parent.TimeoutSeconds, // 探活超时随父源，子仓往往同样大
 		NameAuto:  true,
 		GroupAuto: true,
-		Status:    model.StatusUnknown,
+		Status:    flatStatus,
+		LastCheckAt: flatLastCheck,
+		CheckMsg:    flatMsg,
 		CreatedAt: now,
 		UpdatedAt: now,
 	})

@@ -161,6 +161,30 @@ func (s *Scheduler) runAll(trigger string) {
 
 	sources := s.st.AllSources()
 	flats := s.st.ListFlats(store.FlatFilter{}) // 已排除隐藏项；订阅实际下发的就是这批
+
+	// 本地源（粘贴托管）不参与检测：内容就在本服务上，探活它纯属浪费请求，
+	// 其站点源（同地址）同样跳过。
+	{
+		localURLs := map[string]bool{}
+		probes := make([]model.Source, 0, len(sources))
+		for _, src := range sources {
+			if src.Type == model.TypeLocal {
+				localURLs[src.URL] = true
+				continue
+			}
+			probes = append(probes, src)
+		}
+		sources = probes
+		kept := make([]model.FlatSource, 0, len(flats))
+		for _, f := range flats {
+			if localURLs[f.URL] {
+				continue
+			}
+			kept = append(kept, f)
+		}
+		flats = kept
+	}
+
 	now := time.Now()
 	s.progMu.Lock()
 	s.prog = model.CheckProgress{

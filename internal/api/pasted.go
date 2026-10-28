@@ -8,6 +8,9 @@ import (
 	"path/filepath"
 	"regexp"
 	"strings"
+
+	"tvbox-manager/internal/model"
+	"tvbox-manager/internal/parser"
 )
 
 /*
@@ -53,6 +56,18 @@ func (a *API) cleanupPasted(srcURL string) {
 		return
 	}
 	_ = os.Remove(filepath.Join(a.PastedDir, name)) // 清理失败不打断删除流程
+}
+
+// isLocalURL 地址是否属于本地托管源（本地源不参与检测，始终可用）
+func (a *API) isLocalURL(rawURL string) bool {
+	norm, err := parser.Normalize(rawURL)
+	if err != nil {
+		return false
+	}
+	if src, found := a.st.GetByURL(norm); found {
+		return src.Type == model.TypeLocal
+	}
+	return false
 }
 
 // handlePastedConfig GET /configs/{name}：对外提供托管配置（无鉴权，与订阅一致）。
