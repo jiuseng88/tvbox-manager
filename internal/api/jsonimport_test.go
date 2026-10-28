@@ -69,6 +69,44 @@ func TestParseSourceJSONShapes(t *testing.T) {
 			want: []string{"甲,乙|http://a/1.json"},
 		},
 		{
+			name: "URL 内的 // 与 /* 不被当注释",
+			in:   `{"urls":[{"url":"http://a//b.json?x=1/*2"},{"url":"http://c/d.json"}]}`,
+			kind: "urls",
+			want: []string{"|http://a//b.json?x=1/*2", "|http://c/d.json"},
+		},
+		{
+			name: "JSONC 行注释 + 块注释 + 悬挂逗号",
+			in: "// TVBox 常用源\n" +
+				"/* 说明：仅测试 */\n" +
+				"{\n" +
+				"  // 分享格式\n" +
+				"  \"urls\": [\n" +
+				"    {\"url\": \"http://a/1.json\", \"name\": \"甲\"}, // 行尾注释\n" +
+				"    {\"url\": \"http://a/2.json\", /* 名称见下 */ \"name\": \"乙\"},\n" +
+				"  ],\n" +
+				"}",
+			kind: "urls",
+			want: []string{"甲|http://a/1.json", "乙|http://a/2.json"},
+		},
+		{
+			name: "字符串内的 // 注释写法原样保留",
+			in:   `{"urls":[{"url":"http://a/1.json","name":"看这个 // 不是注释"}]}`,
+			kind: "urls",
+			want: []string{"看这个 // 不是注释|http://a/1.json"},
+		},
+		{
+			name: "转义引号里的 // 保留",
+			in:   `{"urls":[{"url":"http://a/1.json","name":"说 \"http://x\" 不是注释"}]}`,
+			kind: "urls",
+			want: []string{`说 "http://x" 不是注释|http://a/1.json`},
+		},
+		{
+			name: "注释里出现 url 键不算数",
+			in:   "{\n// {\"url\": \"http://fake/0.json\"}\n\"urls\":[{\"url\":\"http://a/1.json\"}]\n}",
+			kind: "urls",
+			want: []string{"|http://a/1.json"},
+		},
+		{
 			name: "忽略仓库里的 sites/lives",
 			in:   `{"urls":[{"url":"http://a/1.json"}],"sites":[{"api":"http://x/api.php"}],"lives":[{"urls":["http://live/1.m3u8"]}]}`,
 			kind: "urls",
@@ -98,6 +136,28 @@ func TestParseSourceJSONShapes(t *testing.T) {
 	}
 }
 
+// 清洗函数本身的边界行为：标准 JSON 必须逐字节透传
+func TestSanitizeJSONText(t *testing.T) {
+	std := `{"urls":[{"url":"http://a/1.json","name":"甲"}],"note":"含 // 和 /* 都不能动"}`
+	if got := sanitizeJSONText(std); got != std {
+		t.Fatalf("标准 JSON 被改动：\n got  %q\n want %q", got, std)
+	}
+	cases := []struct{ name, in, want string }{
+		{"行注释 EOF", `{"a":1}// 尾注`, `{"a":1}`},
+		{"未闭合块注释", `{"a":1} /* 未闭合`, `{"a":1}  `},
+		{"悬挂逗号跨行", "[1,2\n,]\n", "[1,2\n]\n"},
+		{"字符串内悬挂逗号形态", `{"a":"x,}"}`, `{"a":"x,}"}`},
+		{"转义引号后出串", `{"a":"x\"","b":1,}`, `{"a":"x\"","b":1}`},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			if got := sanitizeJSONText(c.in); got != c.want {
+				t.Fatalf("got %q want %q", got, c.want)
+			}
+		})
+	}
+}
+
 func TestParseSourceJSONErrors(t *testing.T) {
 	cases := []struct {
 		name string
@@ -105,7 +165,8 @@ func TestParseSourceJSONErrors(t *testing.T) {
 		want string
 	}{
 		{"空内容", "   ", "内容为空"},
-		{"非法 JSON", `{"urls":[{"url":"http://a/1.json"},]}`, "JSON 格式不合法"},
+		{"JSON 被截断", `{"urls":[{"url":"http://a/1.json"`, "JSON 格式不合法"},
+		{"合法 JSON 但没有 url", `{"foo":{"bar":1},"n":2}`, "未识别到任何 url 条目"},
 		{"仓库内容", `{"sites":[{"api":"http://x"}],"lives":[{"name":"直播"}]}`, "TVBox 仓库内容"},
 		{"没有 url 字段", `{"name":"x","version":"1"}`, "未识别到任何 url 条目"},
 	}

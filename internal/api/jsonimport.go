@@ -60,12 +60,15 @@ func ParseSourceJSON(text string) (*parsedJSON, error) {
 	if len(trimmed) > 4<<20 {
 		return nil, fmt.Errorf("内容超过 4MB 上限")
 	}
-	if !json.Valid([]byte(trimmed)) {
-		return nil, fmt.Errorf("JSON 格式不合法：可能复制不完整，或末尾多了逗号 / 缺少右括号")
+	// TVBox 社区流传的配置普遍是「带注释的 JSONC」：// 与 /* */ 注释、末尾悬挂逗号。
+	// 先清洗成标准 JSON 再解析；无注释时清洗是纯透传，对标准 JSON 零影响。
+	cleaned := sanitizeJSONText(trimmed)
+	if !json.Valid([]byte(cleaned)) {
+		return nil, fmt.Errorf("JSON 格式不合法：可能复制不完整，或缺少右括号")
 	}
 
 	var root interface{}
-	if err := json.Unmarshal([]byte(trimmed), &root); err != nil {
+	if err := json.Unmarshal([]byte(cleaned), &root); err != nil {
 		return nil, fmt.Errorf("JSON 解析失败: %v", err)
 	}
 
@@ -188,6 +191,148 @@ func (sc *jsonScanner) walkObject(obj map[string]interface{}, depth int) {
 func looksLikeURL(s string) bool {
 	t := strings.TrimSpace(s)
 	return strings.HasPrefix(t, "http://") || strings.HasPrefix(t, "https://")
+}
+
+// sanitizeJSONText 把 JSONC 清洗成标准 JSON：去掉注释 + 悬挂逗号。
+// 逐字符状态机扫描：字符串内部的 // 和 /* 原样保留（URL 里全是 /，必须严格区分内外）。
+// 无注释、无悬挂逗号时输出与输入逐字节相同，对标准 JSON 零影响。
+// 注意：悬挂逗号与闭合符之间可能隔着换行/空格（",\n  ]"），不能只查 ",}" 字面量；
+// 且注释剥掉后可能暴露出新悬挂逗号（"1, /* c */\n}" → "1, \n}"），所以剥完要复查。
+func sanitizeJSONText(s string) string {
+	hasComment := strings.Contains(s, "//") || strings.Contains(s, "/*")
+	if !hasComment && !hasTrailingComma(s) {
+		return s // 快速通道：纯透传
+	}
+	if hasComment {
+		s = stripJSONComments(s)
+	}
+	if hasTrailingComma(s) {
+		s = removeTrailingCommas(s)
+	}
+	return s
+}
+
+// hasTrailingComma 只探测不输出：是否存在悬挂逗号（零分配）。
+func hasTrailingComma(s string) bool {
+	inStr, esc := false, false
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		if inStr {
+			switch {
+			case esc:
+				esc = false
+			case c == '\\':
+				esc = true
+			case c == '"':
+				inStr = false
+			}
+			continue
+		}
+		switch c {
+		case '"':
+			inStr = true
+		case ',':
+			j := i + 1
+			for j < len(s) && (s[j] == ' ' || s[j] == '\t' || s[j] == '\r' || s[j] == '\n') {
+				j++
+			}
+			if j < len(s) && (s[j] == '}' || s[j] == ']') {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// stripJSONComments 去掉 // 行注释与 /* */ 块注释；字符串字面量内部不动。
+func stripJSONComments(s string) string {
+	if !strings.Contains(s, "//") && !strings.Contains(s, "/*") {
+		return s
+	}
+	var b strings.Builder
+	b.Grow(len(s))
+	inStr, esc := false, false
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		if inStr {
+			b.WriteByte(c)
+			switch {
+			case esc:
+				esc = false
+			case c == '\\':
+				esc = true
+			case c == '"':
+				inStr = false
+			}
+			continue
+		}
+		switch {
+		case c == '"':
+			inStr = true
+			b.WriteByte(c)
+		case c == '/' && i+1 < len(s) && s[i+1] == '/': // 行注释：吃掉到行尾，保留换行
+			for i++; i < len(s) && s[i] != '\n'; i++ {
+			}
+			if i < len(s) {
+				b.WriteByte('\n')
+			}
+		case c == '/' && i+1 < len(s) && s[i+1] == '*': // 块注释：吃掉到 */，用一个空格占位防粘连
+			i += 2
+			for ; i+1 < len(s) && !(s[i] == '*' && s[i+1] == '/'); i++ {
+			}
+			if i+1 < len(s) {
+				i++ // 指向 '/'，外层 i++ 越过它
+			}
+			b.WriteByte(' ')
+		default:
+			b.WriteByte(c)
+		}
+	}
+	return b.String()
+}
+
+// removeTrailingCommas 去掉 } / ] 前的悬挂逗号（JSONC 常见写法，允许中间隔空白）。
+// 无悬挂逗号时原样返回（零拷贝）。
+func removeTrailingCommas(s string) string {
+	var b strings.Builder
+	b.Grow(len(s))
+	changed := false
+	inStr, esc := false, false
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		if inStr {
+			b.WriteByte(c)
+			switch {
+			case esc:
+				esc = false
+			case c == '\\':
+				esc = true
+			case c == '"':
+				inStr = false
+			}
+			continue
+		}
+		if c == '"' {
+			inStr = true
+			b.WriteByte(c)
+			continue
+		}
+		if c == ',' { // 逗号后只隔空白就是闭合符 → 悬挂逗号，跳过
+			j := i + 1
+			for j < len(s) && (s[j] == ' ' || s[j] == '\t' || s[j] == '\r' || s[j] == '\n') {
+				j++
+			}
+			if j < len(s) && (s[j] == '}' || s[j] == ']') {
+				changed = true
+				continue
+			}
+		}
+		b.WriteByte(c)
+	}
+	if !changed {
+		return s
+	}
+	return b.String()
 }
 
 // ---- HTTP 接口 ----

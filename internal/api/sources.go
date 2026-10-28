@@ -386,7 +386,15 @@ func (a *API) handleSourceImport(w http.ResponseWriter, r *http.Request) {
 }
 
 func jsonLooksLike(s string) bool {
-	t := strings.TrimLeft(s, " \t\r\n\ufeff")
+	t := strings.TrimSpace(strings.TrimPrefix(s, "\ufeff"))
+	// JSONC 风格文件常以 // 说明开头，跳过开头注释行再判断
+	for strings.HasPrefix(t, "//") {
+		i := strings.IndexByte(t, '\n')
+		if i < 0 {
+			return false
+		}
+		t = strings.TrimSpace(t[i+1:])
+	}
 	return strings.HasPrefix(t, "{") || strings.HasPrefix(t, "[")
 }
 

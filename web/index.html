@@ -482,7 +482,7 @@
           把 JSON 整段粘进来，自动识别以下形态（含包装层）：<br>
           ① TVBox 分享格式 <b>{"urls":[{"url":"…","name":"…"}]}</b>　② 字符串数组 <b>["http://…"]</b><br>
           ③ 对象数组 <b>[{"name":"…","url":"…"}]</b>　④ 本工具备份 <b>{"sources":[…]}</b>　⑤ 单个 <b>{"name":"…","url":"…"}</b><br>
-          当前分组：<b>{{ singleForm.group || '默认' }}</b>（在「单个添加」页修改）
+          支持 <b>//</b> 与 <b>/* */</b> 注释、末尾多余逗号（TVBox 社区常见的 JSONC 写法）。当前分组：<b>{{ singleForm.group || '默认' }}</b>（在「单个添加」页修改）
         </div>
         <textarea v-model="jsonText" rows="10" style="font-size:12px" placeholder='{"urls":[{"url":"http://example.com/tvbox.json","name":"肥猫"}]}'></textarea>
         <div class="preview-inline" v-if="jsonParsing">解析中…</div>
