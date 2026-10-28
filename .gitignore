@@ -27,3 +27,8 @@ data/*.corrupt.*
 *.swp
 .DS_Store
 Thumbs.db
+
+# ---- Go 构建缓存（Windows Defender 拦 
+# ---- Go 构建缓存（Windows Defender 拦 TEMP 时的替代目录）----
+.gocache/
+.gotmp/

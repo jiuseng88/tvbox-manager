@@ -17,19 +17,50 @@ func idnaToASCII(host string) (string, error) {
 }
 
 // CleanJSON 宽松 JSON 修复（真实社区源的常见毛病）：
-//  1. 前后杂文字（公告、HTML 残片、使用说明）→ 提取嵌在中间的完整 JSON 段
+//  1. 字符串内夹带的裸控制字符（"优\n酷" 中间断了行）→ 删除/转空格
 //  2. // 行注释与 /* */ 块注释 → 剥除（字符串字面量内的 "//" 不动）
 //  3. 单引号字符串 → 转双引号（内部双引号转义）
 //  4. } ] 前的尾逗号 → 删除
+//  5. 元素缺开引号（"其他剧",日韩剧",其他片",）→ 按标准库报错位置迭代补齐
+//  6. 前后杂文字（公告、HTML 残片、使用说明）→ 提取嵌在中间的完整 JSON 段
 //
-// 词法扫描保证只处理真实代码位置，不破坏字符串内容。
+// 路径选择：先试「整体剥注释+迭代修复」（缺引号的文件引号总数是奇数，
+// 括号配平必失败，嵌入段提取帮不上忙；fxz/4k 这类顶格大括号的源走这条路）；
+// 修不出合法整体再回退「提取嵌入 JSON 段」（公告包配置的源走这条）。
 func CleanJSON(src []byte) []byte {
-	// 1) 前后杂文字：提取嵌入的 JSON 段
+	// 必须最先：裸换行会骗过后面所有字符串感知扫描
+	src = fixRawControlChars(src)
+	if json.Valid(src) {
+		return src
+	}
+	// 路径 A：整体剥注释 + 迭代修复缺引号。只有修出「以 { 或 [ 开头的合法文档」
+	// 才采纳——单个字符串/数字也是合法 JSON 文档，杂文可能被误修成那种形态，
+	// 采纳会把正文弄丢。
+	cleaned := stripTrailingCommas(singleToDoubleQuotes(stripComments(src)))
+	if fixed := lenientFix(cleaned); json.Valid(fixed) {
+		if b := firstNonSpace(fixed); b == '{' || b == '[' {
+			return fixed
+		}
+	}
+	// 路径 B：提取嵌入的 JSON 段再修复
 	src = extractEmbedded(src)
 	src = stripComments(src)
 	src = singleToDoubleQuotes(src)
 	src = stripTrailingCommas(src)
+	src = lenientFix(src)
 	return src
+}
+
+// firstNonSpace 返回第一个非空白字节；全空白返回 0
+func firstNonSpace(src []byte) byte {
+	for _, c := range src {
+		switch c {
+		case ' ', '\t', '\n', '\r':
+			continue
+		}
+		return c
+	}
+	return 0
 }
 
 // extractEmbedded 整体不是 JSON、但其中嵌着一段正常 JSON 时（前后有公告/说明文字），
@@ -71,9 +102,10 @@ func extractEmbedded(src []byte) []byte {
 	return src
 }
 
-// fixJSON 剥注释 + 修单引号 + 去尾逗号（不提取，供嵌入段合法性预判用）
+// fixJSON 修控制字符 + 剥注释 + 修单引号 + 去尾逗号 + 缺引号修复
+// （不提取，供嵌入段合法性预判用）
 func fixJSON(src []byte) []byte {
-	return stripTrailingCommas(singleToDoubleQuotes(stripComments(src)))
+	return lenientFix(stripTrailingCommas(singleToDoubleQuotes(stripComments(fixRawControlChars(src)))))
 }
 
 // balancedEnd 从 start（{ 或 [）做括号配平扫描，返回配对闭合符的下标；失败返回 -1。
