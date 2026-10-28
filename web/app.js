@@ -141,29 +141,42 @@
       const checked = ref([]);
       let searchDebounce = null;
       let sourceReqSeq = 0; // 请求序号：翻页/轮询并发时只采纳最新响应，防止旧响应覆盖新页内容
+      let sourceInflight = null; // 参数相同的并发请求合并成一次（{qs, p}）
 
       async function loadSources() {
-        const seq = ++sourceReqSeq;
         const q = new URLSearchParams();
         Object.keys(filters).forEach(k => { if (filters[k] !== "" && filters[k] != null) q.set(k, filters[k]); });
-        try {
-          const data = await api("GET", "/api/sources?" + q.toString());
-          if (seq !== sourceReqSeq) return; // 已有更新的请求在途，丢弃本次旧响应
-          list.value = data.list || [];
-          total.value = data.total || 0;
-          checked.value = checked.value.filter(id => list.value.some(s => s.id === id));
-          // 数据变少导致当前页越界时，自动回到最后一页重载
-          const maxPage = Math.max(1, Math.ceil(total.value / filters.size));
-          if (!list.value.length && filters.page > maxPage) {
-            filters.page = maxPage;
-            loadSources();
-          }
-        } catch (e) { if (seq === sourceReqSeq) toast(e.message, "error"); }
+        const qs = q.toString();
+        // 同一次操作可能同时触发「筛选变化」和「切换视图」两个 watch，参数一样就等前一个的结果
+        if (sourceInflight && sourceInflight.qs === qs) return sourceInflight.p;
+        const p = (async () => {
+          const seq = ++sourceReqSeq;
+          try {
+            const data = await api("GET", "/api/sources?" + qs);
+            if (seq !== sourceReqSeq) return; // 已有更新的请求在途，丢弃本次旧响应
+            list.value = data.list || [];
+            total.value = data.total || 0;
+            checked.value = checked.value.filter(id => list.value.some(s => s.id === id));
+            // 数据变少导致当前页越界时，自动回到最后一页重载
+            const maxPage = Math.max(1, Math.ceil(total.value / filters.size));
+            if (!list.value.length && filters.page > maxPage) {
+              filters.page = maxPage;
+              loadSources();
+            }
+          } catch (e) { if (seq === sourceReqSeq) toast(e.message, "error"); }
+        })();
+        sourceInflight = { qs, p };
+        try { await p; } finally { if (sourceInflight && sourceInflight.p === p) sourceInflight = null; }
       }
       async function loadGroups() {
         try { groups.value = await api("GET", "/api/groups"); } catch (e) { /* 忽略 */ }
       }
-      function applyFilter() { filters.page = 1; loadSources(); }
+      function applyFilter() {
+        filters.page = 1;
+        // 不在源列表页时不预加载：切过去时 watch(view) 会带着当前条件加载一次，
+        // 否则同一次点击会连发两个一模一样的请求。
+        if (view.value === "sources") loadSources();
+      }
       watch(() => filters.keyword, () => {
         clearTimeout(searchDebounce);
         searchDebounce = setTimeout(applyFilter, 300);
@@ -331,21 +344,40 @@
       // 概览「订阅输出 → 失效」卡片：切到仓源页并筛出失效。
       // 筛选项先摆好再切视图，watch(view) 加载时直接就是筛选后的结果；
       // 顺手清掉其它条件，避免点进来发现「空列表」其实是被上次的搜索词挡住了。
-      function gotoFlatFail() {
+      // ---- 概览卡片下钻：把筛选条件摆好再切视图，watch(view) 加载时就是筛选后的结果 ----
+      // 无关条件一并清掉，避免「点进来是空列表、其实被上次的搜索词挡住」。
+      function resetSourceFilters() {
+        filters.keyword = "";
+        filters.type = "";
+        filters.group = "";
+        filters.sort = "";
+        filters.sort_by = "";
+        filters.sort_dir = "";
+        filters.page = 1;
+      }
+      function resetFlatFilters() {
         flatFilters.keyword = "";
         flatFilters.group = "";
-        flatFilters.enabled = "";
         flatFilters.sort = "";
         flatFilters.sort_by = "";
         flatFilters.sort_dir = "";
-        flatFilters.status = "fail";
         flatFilters.page = 1;
+      }
+      // status="" 表示全部；enabled 传 "true"/"false" 对应「仅启用/仅禁用」
+      function gotoSource(status, enabled) {
+        resetSourceFilters();
+        filters.status = status || "";
+        filters.enabled = enabled || "";
+        view.value = "sources";
+      }
+      function gotoFlat(status, enabled) {
+        resetFlatFilters();
+        flatFilters.status = status || "";
+        flatFilters.enabled = enabled || "";
         view.value = "flats";
       }
       function applyFlatFilter() {
         flatFilters.page = 1;
-        // 不在仓源页时不预加载：切过去时 watch(view) 会带着当前条件加载一次，
-        // 否则同一次点击会连发两个一模一样的请求。
         if (view.value === "flats") loadFlats();
       }
       watch(() => flatFilters.keyword, () => {
@@ -724,7 +756,7 @@
         list, total, filters, groups, checked, summary, pages, loadSources, loadGroups, applyFilter,
         sortArrow, toggleSort,
         toggleSource, checkOne, delSource,
-        flatList, flatsTotal, flatFilters, flatGroups, flatChecked, flatPages, loadFlats, loadFlatGroups, applyFlatFilter, gotoFlatFail,
+        flatList, flatsTotal, flatFilters, flatGroups, flatChecked, flatPages, loadFlats, loadFlatGroups, applyFlatFilter, gotoSource, gotoFlat,
         flatSortArrow, toggleFlatSort,
         flatStatusText, flatStatusClass, toggleFlat, checkFlat, delFlat, flatBatchAction, batchCheckFlats,
         editFlat, openFlatEdit, saveFlatEdit, openFlatPreview,

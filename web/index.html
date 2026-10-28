@@ -46,11 +46,19 @@
       <section v-if="view==='dashboard'">
         <h2>概览</h2>
         <div class="cards">
-          <div class="card"><div class="card-num">{{ stats.total }}</div><div class="card-label">总源数</div></div>
-          <div class="card"><div class="card-num">{{ stats.enabled }}</div><div class="card-label">已启用</div></div>
-          <div class="card ok"><div class="card-num">{{ stats.ok }}</div><div class="card-label">可用</div></div>
-          <div class="card" v-if="stats.checking"><div class="card-num">{{ stats.checking }}</div><div class="card-label">检测中</div></div>
-          <div class="card fail clickable" @click="view='sources'; filters.status='fail'; filters.page=1">
+          <div class="card clickable" title="查看全部源" @click="gotoSource('')">
+            <div class="card-num">{{ stats.total }}</div><div class="card-label">总源数</div>
+          </div>
+          <div class="card clickable" title="查看已启用的源" @click="gotoSource('', 'true')">
+            <div class="card-num">{{ stats.enabled }}</div><div class="card-label">已启用</div>
+          </div>
+          <div class="card ok clickable" title="查看可用的源" @click="gotoSource('ok')">
+            <div class="card-num">{{ stats.ok }}</div><div class="card-label">可用</div>
+          </div>
+          <div class="card clickable" v-if="stats.checking" title="查看检测中的源" @click="gotoSource('checking')">
+            <div class="card-num">{{ stats.checking }}</div><div class="card-label">检测中</div>
+          </div>
+          <div class="card fail clickable" title="查看失效的源" @click="gotoSource('fail')">
             <div class="card-num">{{ stats.fail }}</div><div class="card-label">失效（点击筛选）</div>
           </div>
         </div>
@@ -58,11 +66,19 @@
         <div class="panel">
           <div class="panel-title">订阅输出（站点源 / 平铺层）</div>
           <div class="cards">
-            <div class="card"><div class="card-num">{{ stats.flatTotal }}</div><div class="card-label">站点源总数</div></div>
-            <div class="card"><div class="card-num">{{ stats.flatEnabled }}</div><div class="card-label">实际下发</div></div>
-            <div class="card ok"><div class="card-num">{{ stats.flatOk }}</div><div class="card-label">可用</div></div>
-            <div class="card" v-if="stats.flatChecking"><div class="card-num">{{ stats.flatChecking }}</div><div class="card-label">检测中</div></div>
-            <div class="card fail clickable" @click="gotoFlatFail()">
+            <div class="card clickable" title="查看全部站点源" @click="gotoFlat('')">
+              <div class="card-num">{{ stats.flatTotal }}</div><div class="card-label">站点源总数</div>
+            </div>
+            <div class="card clickable" title="查看实际下发的站点源" @click="gotoFlat('', 'true')">
+              <div class="card-num">{{ stats.flatEnabled }}</div><div class="card-label">实际下发</div>
+            </div>
+            <div class="card ok clickable" title="查看可用的站点源" @click="gotoFlat('ok')">
+              <div class="card-num">{{ stats.flatOk }}</div><div class="card-label">可用</div>
+            </div>
+            <div class="card clickable" v-if="stats.flatChecking" title="查看检测中的站点源" @click="gotoFlat('checking')">
+              <div class="card-num">{{ stats.flatChecking }}</div><div class="card-label">检测中</div>
+            </div>
+            <div class="card fail clickable" title="查看失效的站点源" @click="gotoFlat('fail')">
               <div class="card-num">{{ stats.flatFail }}</div><div class="card-label">失效（点击筛选）</div>
             </div>
           </div>
@@ -114,7 +130,8 @@
           </select>
           <select v-model="filters.status">
             <option value="">全部状态</option><option value="ok">可用</option>
-            <option value="fail">失效</option><option value="unknown">未检测</option>
+            <option value="fail">失效</option><option value="checking">检测中</option>
+            <option value="unknown">未检测</option>
           </select>
           <select v-model="filters.group">
             <option value="">全部分组</option>
@@ -221,7 +238,8 @@
           <input v-model="flatFilters.keyword" placeholder="搜索名称 / 地址 / 备注" class="grow">
           <select v-model="flatFilters.status">
             <option value="">全部状态</option><option value="ok">可用</option>
-            <option value="fail">失效</option><option value="unknown">未检测</option>
+            <option value="fail">失效</option><option value="checking">检测中</option>
+            <option value="unknown">未检测</option>
           </select>
           <select v-model="flatFilters.group">
             <option value="">全部分组</option>

@@ -48,6 +48,8 @@ body {
 /* ---------- 卡片 / 面板 ---------- */
 .cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 14px; margin-bottom: 18px; }
 .card { background: var(--card); border: 1px solid var(--line); border-radius: 10px; padding: 18px; text-align: center; }
+.card.clickable { transition: border-color .15s, background .15s; }
+.card.clickable:hover { border-color: #409eff; background: #f8fbff; }
 .card-num { font-size: 30px; font-weight: 700; }
 .card-label { color: var(--muted); margin-top: 4px; font-size: 12px; }
 .card.ok .card-num { color: var(--ok); }
