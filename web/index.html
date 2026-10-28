@@ -62,8 +62,8 @@
             <div class="card"><div class="card-num">{{ stats.flatEnabled }}</div><div class="card-label">实际下发</div></div>
             <div class="card ok"><div class="card-num">{{ stats.flatOk }}</div><div class="card-label">可用</div></div>
             <div class="card" v-if="stats.flatChecking"><div class="card-num">{{ stats.flatChecking }}</div><div class="card-label">检测中</div></div>
-            <div class="card fail clickable" @click="view='flats'">
-              <div class="card-num">{{ stats.flatFail }}</div><div class="card-label">失效（点击查看）</div>
+            <div class="card fail clickable" @click="gotoFlatFail()">
+              <div class="card-num">{{ stats.flatFail }}</div><div class="card-label">失效（点击筛选）</div>
             </div>
           </div>
           <div class="muted" style="margin-top:8px">

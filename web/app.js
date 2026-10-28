@@ -297,29 +297,57 @@
       const flatChecked = ref([]);
       let flatSearchDebounce = null;
       let flatReqSeq = 0; // 请求序号：同 loadSources，防止旧响应覆盖新页内容
+      let flatInflight = null; // 参数相同的并发请求合并成一次（{qs, p}）
 
       async function loadFlats() {
-        const seq = ++flatReqSeq;
         const q = new URLSearchParams();
         Object.keys(flatFilters).forEach(k => { if (flatFilters[k] !== "" && flatFilters[k] != null) q.set(k, flatFilters[k]); });
-        try {
-          const data = await api("GET", "/api/flats?" + q.toString());
-          if (seq !== flatReqSeq) return; // 已有更新的请求在途，丢弃本次旧响应
-          flatList.value = data.list || [];
-          flatsTotal.value = data.total || 0;
-          flatChecked.value = flatChecked.value.filter(id => flatList.value.some(f => f.id === id));
-          // 数据变少导致当前页越界时，自动回到最后一页重载
-          const maxPage = Math.max(1, Math.ceil(flatsTotal.value / flatFilters.size));
-          if (!flatList.value.length && flatFilters.page > maxPage) {
-            flatFilters.page = maxPage;
-            loadFlats();
-          }
-        } catch (e) { if (seq === flatReqSeq) toast(e.message, "error"); }
+        const qs = q.toString();
+        // 同一次操作可能同时触发「筛选变化」和「切换视图」两个 watch，
+        // 参数一样就直接等前一个的结果，不再发一遍。
+        if (flatInflight && flatInflight.qs === qs) return flatInflight.p;
+        const p = (async () => {
+          const seq = ++flatReqSeq;
+          try {
+            const data = await api("GET", "/api/flats?" + qs);
+            if (seq !== flatReqSeq) return; // 已有更新的请求在途，丢弃本次旧响应
+            flatList.value = data.list || [];
+            flatsTotal.value = data.total || 0;
+            flatChecked.value = flatChecked.value.filter(id => flatList.value.some(f => f.id === id));
+            // 数据变少导致当前页越界时，自动回到最后一页重载
+            const maxPage = Math.max(1, Math.ceil(flatsTotal.value / flatFilters.size));
+            if (!flatList.value.length && flatFilters.page > maxPage) {
+              flatFilters.page = maxPage;
+              loadFlats();
+            }
+          } catch (e) { if (seq === flatReqSeq) toast(e.message, "error"); }
+        })();
+        flatInflight = { qs, p };
+        try { await p; } finally { if (flatInflight && flatInflight.p === p) flatInflight = null; }
       }
       async function loadFlatGroups() {
         try { flatGroups.value = await api("GET", "/api/flats/groups"); } catch (e) { /* 忽略 */ }
       }
-      function applyFlatFilter() { flatFilters.page = 1; loadFlats(); }
+      // 概览「订阅输出 → 失效」卡片：切到仓源页并筛出失效。
+      // 筛选项先摆好再切视图，watch(view) 加载时直接就是筛选后的结果；
+      // 顺手清掉其它条件，避免点进来发现「空列表」其实是被上次的搜索词挡住了。
+      function gotoFlatFail() {
+        flatFilters.keyword = "";
+        flatFilters.group = "";
+        flatFilters.enabled = "";
+        flatFilters.sort = "";
+        flatFilters.sort_by = "";
+        flatFilters.sort_dir = "";
+        flatFilters.status = "fail";
+        flatFilters.page = 1;
+        view.value = "flats";
+      }
+      function applyFlatFilter() {
+        flatFilters.page = 1;
+        // 不在仓源页时不预加载：切过去时 watch(view) 会带着当前条件加载一次，
+        // 否则同一次点击会连发两个一模一样的请求。
+        if (view.value === "flats") loadFlats();
+      }
       watch(() => flatFilters.keyword, () => {
         clearTimeout(flatSearchDebounce);
         flatSearchDebounce = setTimeout(applyFlatFilter, 300);
@@ -672,7 +700,9 @@
         await checkAuthMode();
         if (authRequired.value && !store.token) { needLogin.value = true; return; }
         needLogin.value = false;
-        loadStats(); loadSources(); loadGroups(); loadConfig(); loadFlats(); loadFlatGroups();
+        // 落地页是概览，看不到仓源列表：等真正切过去时 watch(view) 再加载，
+        // 省掉每次进后台都白拉一页站点源。
+        loadStats(); loadSources(); loadGroups(); loadConfig();
         // 只在检测真的在跑时续上进度轮询，否则一次都不打
         loadProgress().then(() => { if (progress.value.running) startPolling(); });
       }
@@ -694,7 +724,7 @@
         list, total, filters, groups, checked, summary, pages, loadSources, loadGroups, applyFilter,
         sortArrow, toggleSort,
         toggleSource, checkOne, delSource,
-        flatList, flatsTotal, flatFilters, flatGroups, flatChecked, flatPages, loadFlats, loadFlatGroups, applyFlatFilter,
+        flatList, flatsTotal, flatFilters, flatGroups, flatChecked, flatPages, loadFlats, loadFlatGroups, applyFlatFilter, gotoFlatFail,
         flatSortArrow, toggleFlatSort,
         flatStatusText, flatStatusClass, toggleFlat, checkFlat, delFlat, flatBatchAction, batchCheckFlats,
         editFlat, openFlatEdit, saveFlatEdit, openFlatPreview,
