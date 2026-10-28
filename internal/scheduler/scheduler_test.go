@@ -31,6 +31,10 @@ func TestAutoDisableAfterConsecutiveFails(t *testing.T) {
 	cfg.CheckTimeoutSeconds = 3
 	cfg.CheckConcurrency = 2
 	cfg.AutoDisableAfterFails = 2
+	// 自动禁用阈值现在以 store 的配置为准（回写层统一判断），要同步进 store
+	if err := st.UpdateConfig(cfg); err != nil {
+		t.Fatal(err)
+	}
 
 	sch := Start(st, &cfg)
 	defer sch.Shutdown()
@@ -93,6 +97,10 @@ func TestNoAutoDisableWhenRecovered(t *testing.T) {
 	cfg.CheckTimeoutSeconds = 5
 	cfg.CheckConcurrency = 2
 	cfg.AutoDisableAfterFails = 2
+	// 自动禁用阈值现在以 store 的配置为准（回写层统一判断），要同步进 store
+	if err := st.UpdateConfig(cfg); err != nil {
+		t.Fatal(err)
+	}
 
 	sch := Start(st, &cfg)
 	defer sch.Shutdown()

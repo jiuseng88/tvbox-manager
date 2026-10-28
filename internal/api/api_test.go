@@ -1169,3 +1169,51 @@ func TestSourceTimeoutSeconds(t *testing.T) {
 		t.Fatalf("站点源应保存 60，实际 %d", f.TimeoutSeconds)
 	}
 }
+
+// 用户报障场景：点单条「检测」，连续失败达到阈值也必须自动禁用——
+// 此前禁用判断只挂在全量探活里，手动检测路径只累计次数从不禁用。
+func TestAutoDisableViaManualCheck(t *testing.T) {
+	e := newEnv(t)
+	fail := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+	}))
+	defer fail.Close()
+
+	if code, b := e.doJSON("PUT", "/api/config", map[string]interface{}{
+		"port": 8080, "subPath": "/sub",
+		"checkIntervalMinutes": 360, "checkTimeoutSeconds": 5, "checkConcurrency": 5,
+		"startupCheck": false, "autoDisableAfterFails": 2,
+		"insecureSkipVerify": true, "checkSubUrls": false,
+	}); code != 200 {
+		t.Fatalf("保存配置失败: %v", b)
+	}
+
+	code, b1 := e.doJSON("POST", "/api/sources", map[string]interface{}{
+		"name": "坏源", "url": fail.URL + "/1.json", "autoCheck": false,
+	})
+	if code != 200 {
+		t.Fatalf("添加失败: %v", b1)
+	}
+	id := dataOf(t, b1)["id"].(string)
+
+	// 手动点两次「检测」（阈值 2），每次等异步探活落定
+	for i := 0; i < 2; i++ {
+		if code, b := e.do("POST", "/api/sources/"+id+"/check", e.token, "", ""); code != 200 {
+			t.Fatalf("第 %d 次检测触发失败: %v", i+1, b)
+		}
+		for j := 0; j < 300; j++ {
+			if s, _ := e.st.Get(id); s.Status != model.StatusChecking {
+				break
+			}
+			time.Sleep(10 * time.Millisecond)
+		}
+	}
+
+	s, _ := e.st.Get(id)
+	if s.Enabled {
+		t.Errorf("手动检测连续失败 2 次应自动禁用: streak=%d, msg=%q", s.FailStreak, s.CheckMsg)
+	}
+	if !strings.Contains(s.CheckMsg, "已自动禁用") {
+		t.Errorf("检测信息应注明自动禁用: %q", s.CheckMsg)
+	}
+}

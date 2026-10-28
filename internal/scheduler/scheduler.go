@@ -232,16 +232,7 @@ func (s *Scheduler) runAll(trigger string) {
 				Status: res.Status, HTTPCode: res.HTTPCode, LatencyMs: res.LatencyMs,
 				Msg: res.Msg, Type: res.Type, Detail: res.Detail,
 			}, false)
-
-			// 连续失败自动禁用
-			if res.Status == model.StatusFail && cfgSnap.AutoDisableAfterFails > 0 {
-				s.st.UpdateInMemory(src.ID, func(sp *model.Source) {
-					if sp.FailStreak >= cfgSnap.AutoDisableAfterFails && sp.Enabled {
-						sp.Enabled = false
-						sp.CheckMsg += "；已自动禁用"
-					}
-				})
-			}
+			// 连续失败自动禁用已在 store 回写层统一判断（含手动检测路径）
 
 			// 多仓子仓递归探活（可选）
 			if cfgSnap.CheckSubURLs && res.Status == model.StatusOK && res.Detail != nil && len(res.Detail.SubURLs) > 0 {
@@ -272,7 +263,7 @@ func (s *Scheduler) runAll(trigger string) {
 			resMu.Unlock()
 			if hit {
 				// 同地址已在本轮探过，直接复用结果，不重复请求
-				s.saveFlatResult(f.ID, cached, cfgSnap.AutoDisableAfterFails)
+				s.saveFlatResult(f.ID, cached)
 				s.progMu.Lock()
 				s.prog.Done++
 				if cached.Status == model.StatusOK {
@@ -295,7 +286,7 @@ func (s *Scheduler) runAll(trigger string) {
 					}
 				}()
 				res, _ := s.Checker().FetchT(ctx, f.URL, false, f.TimeoutSeconds)
-				s.saveFlatResult(f.ID, res, cfgSnap.AutoDisableAfterFails)
+				s.saveFlatResult(f.ID, res)
 
 				s.progMu.Lock()
 				s.prog.Done++
@@ -325,8 +316,8 @@ func (s *Scheduler) runAll(trigger string) {
 		len(sources), len(flats), prog.OK, prog.Fail, trigger)
 }
 
-// saveFlatResult 站点源探活结果回写（内存），并按配置在连续失败后自动禁用
-func (s *Scheduler) saveFlatResult(id string, res *checker.Result, autoDisableFails int) {
+// saveFlatResult 站点源探活结果回写（内存）；连续失败自动禁用在 store 回写层统一判断
+func (s *Scheduler) saveFlatResult(id string, res *checker.Result) {
 	if res == nil {
 		return
 	}
@@ -334,15 +325,6 @@ func (s *Scheduler) saveFlatResult(id string, res *checker.Result, autoDisableFa
 		Status: res.Status, HTTPCode: res.HTTPCode, LatencyMs: res.LatencyMs,
 		Msg: res.Msg, Type: res.Type, Detail: res.Detail,
 	}, false)
-	if res.Status == model.StatusFail && autoDisableFails > 0 {
-		s.st.UpdateFlatInMemory(id, func(fp *model.FlatSource) {
-			// 与父源同口径：看「连续失败」而不是累计失败，成功一次就清零
-			if fp.FailStreak >= autoDisableFails && fp.Enabled {
-				fp.Enabled = false
-				fp.CheckMsg += "；已自动禁用"
-			}
-		})
-	}
 }
 
 // probeSubURLs 多仓子仓探活（并发减半），结果回写 Detail.SubURLs[].Status

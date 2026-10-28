@@ -109,7 +109,7 @@ func (a *API) handleSourceAdd(w http.ResponseWriter, r *http.Request) {
 		autoCheck = *req.AutoCheck
 	}
 	if autoCheck {
-		a.asyncCheckOne(src.ID, src.URL)
+		a.asyncCheckOne(src.ID, src.URL, src.TimeoutSeconds)
 	}
 	created, _ := a.st.Get(src.ID)
 	ok(w, created)
@@ -256,7 +256,7 @@ func (a *API) asyncCheckSources(srcs []model.Source) {
 					}, false)
 				}()
 			}()
-			res, _ := ck.Fetch(context.Background(), s.URL, false)
+			res, _ := ck.FetchT(context.Background(), s.URL, false, s.TimeoutSeconds)
 			if res == nil {
 				res = &checker.Result{Status: model.StatusFail, Msg: "探活无结果"}
 			}

@@ -632,11 +632,32 @@ func (s *Store) updateCheckResultLocked(id string, r CheckResult) bool {
 			sp.OKStreak = 0
 			sp.FailCount++ // 累计检测不通次数
 		}
+		// 连续失败自动禁用：放在回写层统一判断，全量探活、单条检测、批量检测、
+		// 添加后首检所有路径口径一致（此前只有全量探活会禁用，手动点「检测」
+		// 失败再多也永不禁用，被用户当成 bug 报上来）。
+		s.autoDisableLocked(&sp.Enabled, &sp.FailStreak, &sp.CheckMsg)
 		s.data.Sources[i] = sp
 		s.syncFlatsForSourceLocked(sp) // 多仓子仓列表变化同步到站点源
 		return true
 	}
 	return false
+}
+
+// autoDisableLocked 连续失败自动禁用的统一判断（调用方需持写锁）。
+// enabled/failStreak/checkMsg 由调用方传入对应字段，父源与站点源同口径：
+// 连续失败达到阈值且仍启用 → 禁用，并在检测结果信息里注明原因。
+// 放在回写层而不是探活调度里，是为了让全量探活、手动单条检测、批量检测、
+// 添加后首检所有路径的禁用行为完全一致。
+func (s *Store) autoDisableLocked(enabled *bool, failStreak *int, checkMsg *string) {
+	threshold := 0
+	if s.cfg != nil {
+		threshold = s.cfg.AutoDisableAfterFails
+	}
+	if threshold <= 0 || !*enabled || *failStreak < threshold {
+		return
+	}
+	*enabled = false
+	*checkMsg += "；已自动禁用"
 }
 
 // Groups 所有分组名（去重排序）

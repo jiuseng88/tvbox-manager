@@ -281,6 +281,8 @@ func (s *Store) UpdateFlatCheckResult(id string, r CheckResult, persist bool) er
 			fp.OKStreak = 0
 			fp.FailCount++
 		}
+		// 连续失败自动禁用：与父源同口径，回写层统一判断（含手动单条/批量检测）
+		s.autoDisableLocked(&fp.Enabled, &fp.FailStreak, &fp.CheckMsg)
 	}
 	if persist {
 		return s.UpdateFlat(id, apply)

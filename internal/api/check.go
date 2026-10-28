@@ -84,16 +84,16 @@ func (a *API) handleCheckOne(w http.ResponseWriter, r *http.Request) {
 		notFound(w, "源不存在")
 		return
 	}
-	a.asyncCheckOne(src.ID, src.URL)
+	a.asyncCheckOne(src.ID, src.URL, src.TimeoutSeconds)
 	ok(w, map[string]interface{}{"id": id, "status": model.StatusChecking})
 }
 
-func (a *API) asyncCheckOne(id, url string) {
+func (a *API) asyncCheckOne(id, url string, timeoutSeconds int) {
 	a.st.UpdateInMemory(id, func(sp *model.Source) {
 		sp.Status = model.StatusChecking
 	})
 	go func() {
-		res, _ := a.sch.Checker().Fetch(context.Background(), url, false)
+		res, _ := a.sch.Checker().FetchT(context.Background(), url, false, timeoutSeconds)
 		_ = a.st.UpdateCheckResult(id, store.CheckResult{
 			Status: res.Status, HTTPCode: res.HTTPCode, LatencyMs: res.LatencyMs,
 			Msg: res.Msg, Type: res.Type, Detail: res.Detail,

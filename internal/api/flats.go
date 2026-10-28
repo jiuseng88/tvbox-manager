@@ -136,7 +136,7 @@ func (a *API) handleFlatCheck(w http.ResponseWriter, r *http.Request) {
 	}
 	a.st.UpdateFlatInMemory(id, func(fp *model.FlatSource) { fp.Status = model.StatusChecking })
 	go func() {
-		res, _ := a.sch.Checker().Fetch(context.Background(), f.URL, false)
+		res, _ := a.sch.Checker().FetchT(context.Background(), f.URL, false, f.TimeoutSeconds)
 		_ = a.st.UpdateFlatCheckResult(id, store.CheckResult{
 			Status: res.Status, HTTPCode: res.HTTPCode, LatencyMs: res.LatencyMs,
 			Msg: res.Msg, Type: res.Type, Detail: res.Detail,
@@ -257,7 +257,7 @@ func (a *API) runFlatCheckBatch(targets []model.FlatSource) {
 					}, false)
 				}()
 			}()
-			res, _ := ck.Fetch(context.Background(), t.URL, false)
+			res, _ := ck.FetchT(context.Background(), t.URL, false, t.TimeoutSeconds)
 			if res == nil {
 				res = &checker.Result{Status: model.StatusFail, Msg: "探活无结果"}
 			}
