@@ -446,13 +446,14 @@ func (s *Store) upsertFlatLocked(parent model.Source, rawURL, name string, force
 		name = parent.Name
 	}
 	s.data.Flats = append(s.data.Flats, model.FlatSource{
-		ID:        NewFlatID(),
-		Name:      name,
-		URL:       norm,
-		ParentIDs: []string{parent.ID},
-		Enabled:   true,
-		Group:     group,
-		Sort:      parent.Sort,
+		ID:             NewFlatID(),
+		Name:           name,
+		URL:            norm,
+		ParentIDs:      []string{parent.ID},
+		Enabled:        true,
+		Group:          group,
+		Sort:           parent.Sort,
+		TimeoutSeconds: parent.TimeoutSeconds, // 探活超时随父源，子仓往往同样大
 		NameAuto:  true,
 		GroupAuto: true,
 		Status:    model.StatusUnknown,

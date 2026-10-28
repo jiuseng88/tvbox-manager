@@ -6,6 +6,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"tvbox-manager/internal/model"
 )
@@ -130,5 +131,33 @@ func TestSSRFOnPreview(t *testing.T) {
 	res, _ := newChecker().Fetch(context.Background(), srv.URL, true)
 	if res.Status != model.StatusFail || !strings.Contains(res.Msg, "拒绝") {
 		t.Fatalf("guard 应拦截内网地址: %+v", res)
+	}
+}
+
+// 单条源单独配置的超时要能覆盖全局：同一慢地址，全局 1 秒判失败、
+// 单独放宽到 6 秒应判成功。
+func TestFetchTPerCallTimeout(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		time.Sleep(2500 * time.Millisecond)
+		_, _ = w.Write([]byte(`{"sites":[{"key":"a","name":"A站","type":1,"api":"http://x/a.php"}]}`))
+	}))
+	defer srv.Close()
+
+	cfg := model.DefaultConfig()
+	cfg.CheckTimeoutSeconds = 1
+	cfg.CheckConcurrency = 2
+	ck := New(&cfg)
+
+	ctx := context.Background()
+	if res, _ := ck.Fetch(ctx, srv.URL+"/slow.json", false); res.Status != model.StatusFail {
+		t.Errorf("全局 1 秒超时应判失败，实际 %s (%s)", res.Status, res.Msg)
+	}
+	res, _ := ck.FetchT(ctx, srv.URL+"/slow.json", false, 6)
+	if res.Status != model.StatusOK {
+		t.Errorf("单独放宽到 6 秒应判成功，实际 %s (%s)", res.Status, res.Msg)
+	}
+	// 非法值按全局处理
+	if res, _ := ck.FetchT(ctx, srv.URL+"/slow.json", false, 999); res.Status != model.StatusFail {
+		t.Errorf("超范围超时应按全局处理（1 秒判失败），实际 %s", res.Status)
 	}
 }

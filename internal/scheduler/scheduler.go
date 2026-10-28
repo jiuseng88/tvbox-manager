@@ -222,7 +222,7 @@ func (s *Scheduler) runAll(trigger string) {
 				}
 			}()
 
-			res, _ := s.Checker().Fetch(ctx, src.URL, false)
+			res, _ := s.Checker().FetchT(ctx, src.URL, false, src.TimeoutSeconds)
 			if u, err := parser.Normalize(src.URL); err == nil && res != nil {
 				resMu.Lock()
 				resByURL[u] = res
@@ -294,7 +294,7 @@ func (s *Scheduler) runAll(trigger string) {
 						log.Printf("[scheduler] 站点源探活 panic（已隔离）: %v", r)
 					}
 				}()
-				res, _ := s.Checker().Fetch(ctx, f.URL, false)
+				res, _ := s.Checker().FetchT(ctx, f.URL, false, f.TimeoutSeconds)
 				s.saveFlatResult(f.ID, res, cfgSnap.AutoDisableAfterFails)
 
 				s.progMu.Lock()
@@ -347,6 +347,11 @@ func (s *Scheduler) saveFlatResult(id string, res *checker.Result, autoDisableFa
 
 // probeSubURLs 多仓子仓探活（并发减半），结果回写 Detail.SubURLs[].Status
 func (s *Scheduler) probeSubURLs(sourceID string, subs []model.SubURL) {
+	// 子仓探活沿用父源单独配置的超时（0 = 全局）
+	parentTimeout := 0
+	if parent, found := s.st.Get(sourceID); found {
+		parentTimeout = parent.TimeoutSeconds
+	}
 	cfgSnap := s.currentCfg()
 	conc := cfgSnap.CheckConcurrency / 2
 	if conc < 1 {
@@ -362,7 +367,7 @@ func (s *Scheduler) probeSubURLs(sourceID string, subs []model.SubURL) {
 		go func() {
 			defer wg.Done()
 			defer func() { <-sem }()
-			res, _ := s.Checker().Fetch(context.Background(), subs[i].URL, false)
+			res, _ := s.Checker().FetchT(context.Background(), subs[i].URL, false, parentTimeout)
 			if res.Status == model.StatusOK {
 				statuses[i] = model.StatusOK
 			} else {

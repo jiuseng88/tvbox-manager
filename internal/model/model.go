@@ -29,6 +29,10 @@ type Source struct {
 	Remark  string `json:"remark"`
 	Sort    int    `json:"sort"` // 订阅接口中的排序，小的在前
 
+	// 本条源单独的探活超时（秒），0 = 用全局 checkTimeoutSeconds。
+	// 有的仓库文件很大，全局超时会把它误判成失效，这里可以单独放宽。
+	TimeoutSeconds int `json:"timeoutSeconds,omitempty"`
+
 	CreatedAt time.Time `json:"createdAt"`
 	UpdatedAt time.Time `json:"updatedAt"`
 
@@ -82,6 +86,9 @@ type FlatSource struct {
 	Sort      int      `json:"sort"`      // 创建时继承父源排序，可单独改
 	NameAuto  bool     `json:"nameAuto"`  // 名称是否随父源同步（手动改名后置 false）
 	GroupAuto bool     `json:"groupAuto"` // 分组是否随父源同步（手动改组后置 false）
+
+	// 本条单独的探活超时（秒），创建时继承父源；0 = 用全局 checkTimeoutSeconds
+	TimeoutSeconds int `json:"timeoutSeconds,omitempty"`
 
 	CreatedAt time.Time `json:"createdAt"`
 	UpdatedAt time.Time `json:"updatedAt"`
@@ -176,7 +183,7 @@ func DefaultConfig() Config {
 		Port:                  8080,
 		SubPath:               "/sub",
 		CheckIntervalMinutes:  360,
-		CheckTimeoutSeconds:   15,
+		CheckTimeoutSeconds:   10,
 		CheckConcurrency:      10,
 		StartupCheck:          false,
 		// 连续失败自动禁用的默认阈值。曾经默认 0（关闭），大量用户从未进设置页

@@ -526,6 +526,7 @@
       <div class="form-row"><label>地址</label><input v-model="editSrc.url"></div>
       <div class="form-row"><label>分组</label><input v-model="editSrc.group" list="group-list"></div>
       <div class="form-row"><label>排序值</label><input type="number" v-model.number="editSrc.sort"><span class="muted">小的在前</span></div>
+      <div class="form-row"><label>检测超时（秒）</label><input type="number" min="0" max="120" v-model.number="editSrc.timeoutSeconds" placeholder="0 = 用全局设置"><span class="muted">0=用全局；大仓库可放宽到 30-60</span></div>
       <div class="form-row"><label>备注</label><input v-model="editSrc.remark"></div>
       <div class="form-actions">
         <button class="btn" @click="editSrc=null">取消</button>
@@ -544,6 +545,7 @@
         <datalist id="flat-group-list"><option v-for="g in flatGroups" :key="g" :value="g"></option></datalist>
       </div>
       <div class="form-row"><label>排序值</label><input type="number" v-model.number="editFlat.sort"><span class="muted">小的在前</span></div>
+      <div class="form-row"><label>检测超时（秒）</label><input type="number" min="0" max="120" v-model.number="editFlat.timeoutSeconds" placeholder="0 = 用全局设置"><span class="muted">0=用全局；创建时随父源</span></div>
       <div class="form-row"><label>备注</label><input v-model="editFlat.remark"></div>
       <div class="form-actions">
         <button class="btn" @click="editFlat=null">取消</button>

@@ -293,7 +293,7 @@ func sanitizeConfig(cfg *model.Config) {
 		cfg.CheckIntervalMinutes = 360
 	}
 	if cfg.CheckTimeoutSeconds <= 0 || cfg.CheckTimeoutSeconds > 120 {
-		cfg.CheckTimeoutSeconds = 15
+		cfg.CheckTimeoutSeconds = 10
 	}
 	if cfg.CheckConcurrency <= 0 || cfg.CheckConcurrency > 100 {
 		cfg.CheckConcurrency = 10

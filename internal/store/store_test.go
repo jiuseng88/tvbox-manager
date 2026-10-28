@@ -209,7 +209,7 @@ func TestConfigSanitize(t *testing.T) {
 		t.Fatal(err)
 	}
 	c := st.Config()
-	if c.Port != 8080 || c.SubPath != "/sub" || c.CheckTimeoutSeconds != 15 ||
+	if c.Port != 8080 || c.SubPath != "/sub" || c.CheckTimeoutSeconds != 10 ||
 		c.CheckConcurrency != 10 || c.CheckIntervalMinutes != 360 {
 		t.Fatalf("非法配置应被修正: %+v", c)
 	}

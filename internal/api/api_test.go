@@ -1126,3 +1126,46 @@ func TestAutoDisableEndToEnd(t *testing.T) {
 		t.Errorf("FailStreak 应 >= 2，实际 %d", s.FailStreak)
 	}
 }
+
+// 每条源单独的检测超时：编辑接口要能保存并回读（0 = 用全局）。
+func TestSourceTimeoutSeconds(t *testing.T) {
+	e := newEnv(t)
+	code, b1 := e.doJSON("POST", "/api/sources", map[string]interface{}{
+		"name": "大仓库", "url": e.mock.URL + "/big.json", "autoCheck": false, "timeoutSeconds": 45,
+	})
+	if code != 200 {
+		t.Fatalf("添加失败: %v", b1)
+	}
+	id := dataOf(t, b1)["id"].(string)
+	if s, _ := e.st.Get(id); s.TimeoutSeconds != 45 {
+		t.Fatalf("创建时应保存 timeoutSeconds=45，实际 %d", s.TimeoutSeconds)
+	}
+	// 编辑改成 0（回到全局）
+	if code, _ := e.doJSON("PUT", "/api/sources/"+id, map[string]interface{}{"timeoutSeconds": 0}); code != 200 {
+		t.Fatal("编辑失败")
+	}
+	if s, _ := e.st.Get(id); s.TimeoutSeconds != 0 {
+		t.Fatalf("编辑后应为 0（用全局），实际 %d", s.TimeoutSeconds)
+	}
+
+	// 站点源：更新接口同样支持
+	e.markType(id, model.TypeSingle) // 单仓 → 生成站点源
+	flats := e.st.ListFlats(store.FlatFilter{})
+	if len(flats) == 0 {
+		t.Fatal("应生成站点源")
+	}
+	fid := flats[0].ID
+	if flats[0].TimeoutSeconds != 0 {
+		t.Fatalf("站点源创建时应继承父源的 0，实际 %d", flats[0].TimeoutSeconds)
+	}
+	// 父源改为 30 后，新同步不应覆盖已存在条目的单独设置
+	if code, _ := e.doJSON("PUT", "/api/sources/"+id, map[string]interface{}{"timeoutSeconds": 30}); code != 200 {
+		t.Fatal("编辑失败")
+	}
+	if code, _ := e.doJSON("PUT", "/api/flats/"+fid, map[string]interface{}{"timeoutSeconds": 60}); code != 200 {
+		t.Fatal("站点源编辑失败")
+	}
+	if f, _ := e.st.GetFlat(fid); f.TimeoutSeconds != 60 {
+		t.Fatalf("站点源应保存 60，实际 %d", f.TimeoutSeconds)
+	}
+}

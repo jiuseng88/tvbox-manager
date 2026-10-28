@@ -19,6 +19,10 @@ import (
 
 const maxBody = 10 << 20 // 10MB
 
+// maxTimeout 单次探活超时的硬上限（秒）。client 级超时固定用它兜底，
+// 单条源单独配置的超时（无论大小）都由每次请求的 context 精确控制。
+const maxTimeout = 120 * time.Second
+
 // defaultUA 探活固定 UA：大量源站对浏览器 UA 返回 403，必须模拟 TVBox 客户端，不开放配置
 const defaultUA = "okhttp/4.9.1"
 
@@ -31,7 +35,7 @@ type Checker struct {
 func New(cfg *model.Config) *Checker {
 	timeout := time.Duration(cfg.CheckTimeoutSeconds) * time.Second
 	if timeout <= 0 {
-		timeout = 15 * time.Second
+		timeout = 10 * time.Second
 	}
 	tr := &http.Transport{
 		MaxIdleConns:        100,
@@ -46,7 +50,9 @@ func New(cfg *model.Config) *Checker {
 	return &Checker{
 		client: &http.Client{
 			Transport: tr,
-			Timeout:   timeout,
+			// 兜底上限，不是日常超时：日常超时由每次请求的 context 控制，
+			// 这样单条源才能配置出比全局更长的超时（大仓库拉取慢）。
+			Timeout: maxTimeout,
 			CheckRedirect: func(req *http.Request, via []*http.Request) error {
 				if len(via) >= 3 {
 					return fmt.Errorf("stopped after 3 redirects")
@@ -77,7 +83,14 @@ type Result struct {
 }
 
 // Fetch 拉取并解析。guardPrivate=true 时拒绝内网/链路本地地址（SSRF 防护）。
+// Fetch 探活一个地址，超时用全局配置
 func (c *Checker) Fetch(ctx context.Context, rawURL string, guardPrivate bool) (*Result, []byte) {
+	return c.FetchT(ctx, rawURL, guardPrivate, 0)
+}
+
+// FetchT 探活一个地址。timeoutSeconds>0 时覆盖全局超时（单条源单独配置用，
+// 允许比全局更长——大仓库拉取慢）；<=0 用全局。范围 1-120 秒，超出按全局处理。
+func (c *Checker) FetchT(ctx context.Context, rawURL string, guardPrivate bool, timeoutSeconds int) (*Result, []byte) {
 	u, err := parser.Normalize(rawURL)
 	if err != nil {
 		return failResult(0, 0, "地址格式非法: "+err.Error()), nil
@@ -88,7 +101,11 @@ func (c *Checker) Fetch(ctx context.Context, rawURL string, guardPrivate bool) (
 		}
 	}
 
-	ctx, cancel := context.WithTimeout(ctx, c.timeout)
+	timeout := c.timeout
+	if timeoutSeconds > 0 && timeoutSeconds <= 120 {
+		timeout = time.Duration(timeoutSeconds) * time.Second
+	}
+	ctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, u, nil)
@@ -103,7 +120,7 @@ func (c *Checker) Fetch(ctx context.Context, rawURL string, guardPrivate bool) (
 	resp, err := c.client.Do(req)
 	latency := time.Since(start).Milliseconds()
 	if err != nil {
-		r := failResult(0, latency, classifyErr(err, c.TimeoutSeconds()))
+		r := failResult(0, latency, classifyErr(err, int(timeout.Seconds())))
 		r.CheckedAt = time.Now()
 		return r, nil
 	}
@@ -112,7 +129,7 @@ func (c *Checker) Fetch(ctx context.Context, rawURL string, guardPrivate bool) (
 	body, err := io.ReadAll(io.LimitReader(resp.Body, maxBody+1))
 	latency = time.Since(start).Milliseconds()
 	if err != nil {
-		r := failResult(resp.StatusCode, latency, "读取响应失败: "+classifyErr(err, c.TimeoutSeconds()))
+		r := failResult(resp.StatusCode, latency, "读取响应失败: "+classifyErr(err, int(timeout.Seconds())))
 		r.CheckedAt = time.Now()
 		return r, nil
 	}

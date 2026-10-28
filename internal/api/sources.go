@@ -55,12 +55,13 @@ func (a *API) handleSourceList(w http.ResponseWriter, r *http.Request) {
 }
 
 type addSourceReq struct {
-	Name      string `json:"name"`
-	URL       string `json:"url"`
-	Group     string `json:"group"`
-	Remark    string `json:"remark"`
-	Enabled   *bool  `json:"enabled"`
-	AutoCheck *bool  `json:"autoCheck"`
+	Name           string `json:"name"`
+	URL            string `json:"url"`
+	Group          string `json:"group"`
+	Remark         string `json:"remark"`
+	Enabled        *bool  `json:"enabled"`
+	AutoCheck      *bool  `json:"autoCheck"`
+	TimeoutSeconds *int   `json:"timeoutSeconds"` // 本条单独的探活超时，0=用全局
 }
 
 func (a *API) handleSourceAdd(w http.ResponseWriter, r *http.Request) {
@@ -84,6 +85,9 @@ func (a *API) handleSourceAdd(w http.ResponseWriter, r *http.Request) {
 		Remark: strings.TrimSpace(req.Remark),
 		Type:   model.TypeUnknown,
 		Status: model.StatusUnknown,
+	}
+	if req.TimeoutSeconds != nil {
+		src.TimeoutSeconds = *req.TimeoutSeconds
 	}
 	if src.Name == "" {
 		src.Name = parser.HostOf(norm)
@@ -424,12 +428,13 @@ func (a *API) handleSourceGet(w http.ResponseWriter, r *http.Request) {
 }
 
 type updateSourceReq struct {
-	Name    *string `json:"name"`
-	URL     *string `json:"url"`
-	Group   *string `json:"group"`
-	Remark  *string `json:"remark"`
-	Enabled *bool   `json:"enabled"`
-	Sort    *int    `json:"sort"`
+	Name           *string `json:"name"`
+	URL            *string `json:"url"`
+	Group          *string `json:"group"`
+	Remark         *string `json:"remark"`
+	Enabled        *bool   `json:"enabled"`
+	Sort           *int    `json:"sort"`
+	TimeoutSeconds *int    `json:"timeoutSeconds"` // 本条单独的探活超时，0=用全局
 }
 
 func (a *API) handleSourceUpdate(w http.ResponseWriter, r *http.Request) {
@@ -490,6 +495,9 @@ func (a *API) handleSourceUpdate(w http.ResponseWriter, r *http.Request) {
 		}
 		if req.Sort != nil {
 			sp.Sort = *req.Sort
+		}
+		if req.TimeoutSeconds != nil {
+			sp.TimeoutSeconds = *req.TimeoutSeconds
 		}
 	})
 	if err != nil {

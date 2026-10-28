@@ -256,6 +256,7 @@
         try {
           await api("PUT", "/api/sources/" + e0._id, {
             name: e0.name, url: e0.url, group: e0.group, remark: e0.remark, sort: Number(e0.sort) || 0,
+            timeoutSeconds: Math.max(0, Math.min(120, Number(e0.timeoutSeconds) || 0)),
           });
           toast("已保存", "ok"); editSrc.value = null; loadSources(); loadGroups();
         } catch (err) { toast(err.message, "error"); }
@@ -473,6 +474,7 @@
         try {
           await api("PUT", "/api/flats/" + f._id, {
             name: f.name, group: f.group, remark: f.remark, sort: Number(f.sort) || 0,
+            timeoutSeconds: Math.max(0, Math.min(120, Number(f.timeoutSeconds) || 0)),
           });
           toast("已保存", "ok"); editFlat.value = null; loadFlats(); loadFlatGroups();
         } catch (err) { toast(err.message, "error"); }

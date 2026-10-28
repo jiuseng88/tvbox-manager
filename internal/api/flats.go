@@ -54,10 +54,11 @@ func (a *API) handleFlatGroups(w http.ResponseWriter, r *http.Request) {
 }
 
 type updateFlatReq struct {
-	Name   *string `json:"name"`
-	Group  *string `json:"group"`
-	Remark *string `json:"remark"`
-	Sort   *int    `json:"sort"`
+	Name           *string `json:"name"`
+	Group          *string `json:"group"`
+	Remark         *string `json:"remark"`
+	Sort           *int    `json:"sort"`
+	TimeoutSeconds *int    `json:"timeoutSeconds"` // 本条单独的探活超时，0=用全局
 }
 
 func (a *API) handleFlatUpdate(w http.ResponseWriter, r *http.Request) {
@@ -87,6 +88,9 @@ func (a *API) handleFlatUpdate(w http.ResponseWriter, r *http.Request) {
 		}
 		if req.Sort != nil {
 			fp.Sort = *req.Sort
+		}
+		if req.TimeoutSeconds != nil {
+			fp.TimeoutSeconds = *req.TimeoutSeconds
 		}
 	})
 	if err != nil {
