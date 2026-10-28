@@ -51,9 +51,9 @@ func TestListFilterAndSort(t *testing.T) {
 	if len(enabled) != 2 {
 		t.Fatalf("enabled 过滤错误: %d", len(enabled))
 	}
-	// sort 升序、同名按 name
+	// 默认排序：可用优先（B源 ok 在前）→ 非可用组按创建时间保底（A源先于 C源添加）
 	all := st.List(Filter{})
-	if all[0].Name != "C源" || all[1].Name != "A源" || all[2].Name != "B源" {
+	if all[0].Name != "B源" || all[1].Name != "A源" || all[2].Name != "C源" {
 		t.Fatalf("排序错误: %v %v %v", all[0].Name, all[1].Name, all[2].Name)
 	}
 	// failFirst：失效置顶

@@ -493,7 +493,15 @@ func TestSubOutputs(t *testing.T) {
 	e.markType(idC, model.TypeSingle)
 	e.doJSON("POST", "/api/sources/"+idC+"/toggle", nil)
 
-	// 默认：仅启用、按 sort
+	// 给乙回写探活成功：默认排序「可用优先 → 延迟升序 → 创建时间保底」，
+	// 乙（ok）应排在未探活的甲前面。
+	for _, f := range e.st.ListFlats(store.FlatFilter{}) {
+		if f.URL == "http://s2.example/2.json" {
+			if err := e.st.UpdateFlatCheckResult(f.ID, store.CheckResult{Status: model.StatusOK, LatencyMs: 88}, true); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
 	code, bodyStr := e.do("GET", "/sub", "", "", "")
 	if code != 200 {
 		t.Fatal("/sub 失败")
@@ -505,7 +513,7 @@ func TestSubOutputs(t *testing.T) {
 		t.Fatalf("/sub 应只含 2 条启用源: %s", bodyStr)
 	}
 	if urls[0].(map[string]interface{})["name"] != "乙" {
-		t.Fatal("sort=1 的乙应排第一")
+		t.Fatal("探活成功的乙应排第一")
 	}
 
 	// name 前缀
@@ -614,12 +622,13 @@ func TestSubFlattenMulti(t *testing.T) {
 		t.Fatalf("订阅 JSON 解析失败: %v %s", err, bodyStr)
 	}
 
-	// 期望（按名称排序）：单仓C、甲仓（flat1，A 首次命名）、聚合A（flat2 无名兜底父仓名）、聚合B（flat3）
+	// 期望（默认排序：都未探活，同组内按创建时间保底——
+	// flat1 甲仓最早，依次是聚合A、聚合B，单仓C 最后添加）：
 	want := []struct{ url, name string }{
-		{"http://flat4.example/d.json", "单仓C"},
 		{"http://flat1.example/a.json", "甲仓"},
 		{"http://flat2.example/b.json", "聚合A"},
 		{"http://flat3.example/c.json", "聚合B"},
+		{"http://flat4.example/d.json", "单仓C"},
 	}
 	if len(sub.URLs) != len(want) {
 		t.Fatalf("平铺后应 %d 条，实际 %d 条: %s", len(want), len(sub.URLs), bodyStr)

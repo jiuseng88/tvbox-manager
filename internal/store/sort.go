@@ -67,6 +67,58 @@ func latencyVal(st string, ms int64) int64 {
 	return math.MaxInt64
 }
 
+// availRank 可用性分组：可用的排最前，其余（失效/未检测/检测中）一组排后面
+func availRank(st string) int {
+	if st == model.StatusOK {
+		return 0
+	}
+	return 1
+}
+
+// cmpSourceAvail / cmpFlatAvail 列表与订阅共用的默认排序：
+//
+//	可用的在前 → 同组内延迟小的在前（非 ok 视为同组）→ 创建时间早的在前（保底）
+//	之后再用 Sort/Name/URL 定序，保证跨请求顺序稳定、翻页不跳动。
+//
+// 这样后台列表看到的顺序 = 订阅接口下发给客户端的顺序，排障时不用两套脑子。
+func cmpSourceAvail(a, b model.Source) int {
+	if c := cmpInt(availRank(a.Status), availRank(b.Status)); c != 0 {
+		return c
+	}
+	if c := cmpInt64(latencyVal(a.Status, a.LatencyMs), latencyVal(b.Status, b.LatencyMs)); c != 0 {
+		return c
+	}
+	if c := a.CreatedAt.Compare(b.CreatedAt); c != 0 {
+		return c
+	}
+	if c := cmpInt(a.Sort, b.Sort); c != 0 {
+		return c
+	}
+	if c := strings.Compare(a.Name, b.Name); c != 0 {
+		return c
+	}
+	return strings.Compare(a.URL, b.URL)
+}
+
+func cmpFlatAvail(a, b model.FlatSource) int {
+	if c := cmpInt(availRank(a.Status), availRank(b.Status)); c != 0 {
+		return c
+	}
+	if c := cmpInt64(latencyVal(a.Status, a.LatencyMs), latencyVal(b.Status, b.LatencyMs)); c != 0 {
+		return c
+	}
+	if c := a.CreatedAt.Compare(b.CreatedAt); c != 0 {
+		return c
+	}
+	if c := cmpInt(a.Sort, b.Sort); c != 0 {
+		return c
+	}
+	if c := strings.Compare(a.Name, b.Name); c != 0 {
+		return c
+	}
+	return strings.Compare(a.URL, b.URL)
+}
+
 // cmpSource 源列表表头排序键比较
 func cmpSource(a, b model.Source, key string) int {
 	switch key {

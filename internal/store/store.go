@@ -18,11 +18,25 @@ import (
 
 // Store JSON 文件持久化：内存缓存 + RWMutex + 原子写（临时文件 + Rename）。
 type Store struct {
-	mu       sync.RWMutex
-	dataFile string
-	cfgFile  string
-	data     *model.Data
-	cfg      *model.Config
+	mu          sync.RWMutex
+	dataFile    string
+	cfgFile     string
+	data        *model.Data
+	cfg         *model.Config
+	lastCreated time.Time // 见 nowStrictLocked：保证同进程内 CreatedAt 严格递增
+}
+
+// nowStrictLocked 返回严格递增的时间戳（调用方需持写锁）。
+// Windows 等 platform 的 time.Now 分辨率有限（约 0.5ms），同一批创建的
+// 条目可能拿到完全相同的时间；默认排序用 CreatedAt 做保底时，
+// 相同时间会让保底序退化成随机的名称序。这里强制每次 +1ns 错开。
+func (s *Store) nowStrictLocked() time.Time {
+	now := time.Now()
+	if !now.After(s.lastCreated) {
+		now = s.lastCreated.Add(time.Nanosecond)
+	}
+	s.lastCreated = now
+	return now
 }
 
 // Filter 列表过滤条件，全部字段可选
@@ -403,18 +417,11 @@ func (s *Store) List(f Filter) []model.Source {
 	} else {
 		sort.SliceStable(out, func(i, j int) bool {
 			if f.Sort == "failFirst" {
-				fi, fj := statusRank(out[i].Status), statusRank(out[j].Status)
-				if fi != fj {
+				if fi, fj := statusRank(out[i].Status), statusRank(out[j].Status); fi != fj {
 					return fi < fj
 				}
 			}
-			if out[i].Sort != out[j].Sort {
-				return out[i].Sort < out[j].Sort
-			}
-			if out[i].Name != out[j].Name {
-				return out[i].Name < out[j].Name
-			}
-			return out[i].URL < out[j].URL // 兜底定序：同名同排序值时保证跨请求顺序稳定，翻页不跳动
+			return cmpSourceAvail(out[i], out[j]) < 0
 		})
 	}
 
@@ -491,7 +498,7 @@ func (s *Store) Add(src *model.Source) error {
 	if src.ID == "" {
 		src.ID = NewID()
 	}
-	now := time.Now()
+	now := s.nowStrictLocked()
 	src.CreatedAt = now
 	src.UpdatedAt = now
 	if src.Group == "" {

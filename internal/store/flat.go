@@ -120,18 +120,11 @@ func sortFlats(out []model.FlatSource, f FlatFilter) {
 	}
 	sort.SliceStable(out, func(i, j int) bool {
 		if f.Sort == "failFirst" {
-			fi, fj := statusRank(out[i].Status), statusRank(out[j].Status)
-			if fi != fj {
+			if fi, fj := statusRank(out[i].Status), statusRank(out[j].Status); fi != fj {
 				return fi < fj
 			}
 		}
-		if out[i].Sort != out[j].Sort {
-			return out[i].Sort < out[j].Sort
-		}
-		if out[i].Name != out[j].Name {
-			return out[i].Name < out[j].Name
-		}
-		return out[i].URL < out[j].URL // 兜底定序：保证跨请求顺序稳定，翻页不跳动
+		return cmpFlatAvail(out[i], out[j]) < 0
 	})
 }
 
@@ -448,7 +441,7 @@ func (s *Store) upsertFlatLocked(parent model.Source, rawURL, name string, force
 		}
 		return changed
 	}
-	now := time.Now()
+	now := s.nowStrictLocked()
 	if name == "" {
 		name = parent.Name
 	}
