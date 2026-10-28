@@ -264,7 +264,10 @@
                 </td>
                 <td><a @click="openFlatEdit(f)" class="link">{{ f.name }}</a></td>
                 <td class="url-cell" :title="f.url" @click="copyText(f.url)">{{ f.url }}</td>
-                <td><span class="tag group" :title="(f.parentNames||[]).join('、')">{{ (f.parentNames||[]).length ? (f.parentNames.length===1 ? f.parentNames[0] : f.parentNames.length + ' 个源') : '—' }}</span></td>
+                <td class="parent-cell" :title="(f.parentNames||[]).join('、')">
+                  <span class="tag from" v-for="n in (f.parentNames||[])" :key="n">{{ n }}</span>
+                  <span class="muted" v-if="!(f.parentNames||[]).length">—</span>
+                </td>
                 <td><span class="tag group">{{ f.group }}</span></td>
                 <td :title="absTime(f.lastCheckAt)">{{ relTime(f.lastCheckAt) }}</td>
                 <td :class="{slow: f.latencyMs > 3000}">{{ f.status==='ok' ? f.latencyMs + 'ms' : '—' }}</td>

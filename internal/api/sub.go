@@ -5,6 +5,7 @@ import (
 	"net/http"
 	"strings"
 
+	"tvbox-manager/internal/model"
 	"tvbox-manager/internal/parser"
 )
 
@@ -13,6 +14,25 @@ func setSubHeaders(w http.ResponseWriter, contentType string) {
 	w.Header().Set("Content-Type", contentType)
 	w.Header().Set("Access-Control-Allow-Origin", "*")
 	w.Header().Set("Cache-Control", "no-store")
+}
+
+// dedupFlats 订阅出口的最后一道去重：同一个地址只下发第一条（保持原有排序）。
+//
+// 存储层已按 parser.DedupKey 合并，正常情况下这里不会命中；但老版本写进去的
+// 数据、手工改过 data.json、或将来新增的写入路径都可能有漏网，而下发给客户端
+// 的列表一旦重复就是实打实的体验问题，所以出口不做假设。
+func dedupFlats(in []model.FlatSource) []model.FlatSource {
+	out := make([]model.FlatSource, 0, len(in))
+	seen := make(map[string]bool, len(in))
+	for _, f := range in {
+		key := parser.DedupKey(f.URL)
+		if seen[key] {
+			continue
+		}
+		seen[key] = true
+		out = append(out, f)
+	}
+	return out
 }
 
 // subItem 订阅输出条目
@@ -29,7 +49,7 @@ func (a *API) handleSub(w http.ResponseWriter, r *http.Request) {
 	prefix := r.URL.Query().Get("name")
 	fan := r.URL.Query().Get("format") == "fan"
 
-	flats := a.st.EnabledFlats()
+	flats := dedupFlats(a.st.EnabledFlats())
 	urls := make([]subItem, 0, len(flats))
 	for _, f := range flats {
 		it := subItem{URL: f.URL, Name: f.Name}
@@ -57,7 +77,7 @@ func (a *API) handleSubTxt(w http.ResponseWriter, r *http.Request) {
 	withName := q.Has("name")
 	prefix := q.Get("name")
 
-	flats := a.st.EnabledFlats()
+	flats := dedupFlats(a.st.EnabledFlats())
 	var sb strings.Builder
 	for _, f := range flats {
 		if withName {
@@ -78,7 +98,8 @@ func (a *API) handleSubTxt(w http.ResponseWriter, r *http.Request) {
 	_, _ = w.Write([]byte(sb.String()))
 }
 
-// handleSubAll 全量输出（含禁用，需 Token，排障用）——输出父源原始列表
+// handleSubAll 全量输出（含禁用，需 Token，排障用）——输出父源原始列表。
+// 父源之间也可能有同一个地址（换仓时常见的重复添加），这里按去重键只留第一条。
 func (a *API) handleSubAll(w http.ResponseWriter, r *http.Request) {
 	type item struct {
 		URL     string `json:"url"`
@@ -87,7 +108,13 @@ func (a *API) handleSubAll(w http.ResponseWriter, r *http.Request) {
 		Status  string `json:"status"`
 	}
 	urls := make([]item, 0, 16)
+	seen := make(map[string]bool, 16)
 	for _, s := range a.st.AllSources() {
+		key := parser.DedupKey(s.URL)
+		if seen[key] {
+			continue
+		}
+		seen[key] = true
 		name := s.Name
 		if name == "" {
 			name = parser.HostOf(s.URL)

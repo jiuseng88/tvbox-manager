@@ -394,6 +394,10 @@ func removeID(ids []string, id string) []string {
 // forceName=true（单仓父源）时名称随父源同步，否则首次出现的名称优先（不覆盖）；
 // GroupAuto 时同步父源分组。返回是否产生了实际变化（用于决定要不要落盘）。
 //
+// 「已存在」先按原样精确匹配，没命中再按 parser.DedupKey 匹配一次：
+// https://a.com/tv 与 https://a.com/tv/ 是同一条线路，必须合并成一条站点源
+// （父引用累加），否则订阅里会下发两次同一个地址。
+//
 // 已隐藏（用户删除过）的 URL 直接跳过：父源再次同步也不复活，
 // 同时不改动它的任何字段，保证用户意图不被覆盖。
 func (s *Store) upsertFlatLocked(parent model.Source, rawURL, name string, forceName bool) bool {
@@ -405,11 +409,24 @@ func (s *Store) upsertFlatLocked(parent model.Source, rawURL, name string, force
 	if group == "" {
 		group = "默认"
 	}
+	idx := -1
 	for i := range s.data.Flats {
-		f := &s.data.Flats[i]
-		if f.URL != norm {
-			continue
+		if s.data.Flats[i].URL == norm { // 绝大多数情况：零额外开销
+			idx = i
+			break
 		}
+	}
+	if idx < 0 {
+		key := parser.DedupKey(norm)
+		for i := range s.data.Flats {
+			if parser.DedupKey(s.data.Flats[i].URL) == key {
+				idx = i
+				break
+			}
+		}
+	}
+	if idx >= 0 {
+		f := &s.data.Flats[idx]
 		if f.Hidden {
 			return false
 		}
@@ -463,7 +480,7 @@ func (s *Store) upsertFlatLocked(parent model.Source, rawURL, name string, force
 // 返回是否发生实际变化。调用方需持有写锁。
 func (s *Store) syncFlatsForSourceLocked(src model.Source) bool {
 	changed := false
-	expect := map[string]bool{}
+	expect := map[string]bool{} // 键为 parser.DedupKey：带不带尾斜杠都算同一个期望
 	switch {
 	case src.Type == model.TypeMulti && src.Detail != nil:
 		for _, su := range src.Detail.SubURLs {
@@ -471,7 +488,7 @@ func (s *Store) syncFlatsForSourceLocked(src model.Source) bool {
 			if err != nil {
 				continue
 			}
-			expect[norm] = true
+			expect[parser.DedupKey(norm)] = true
 			name := su.Name
 			if name == "" {
 				name = src.Name
@@ -487,14 +504,14 @@ func (s *Store) syncFlatsForSourceLocked(src model.Source) bool {
 		if err != nil {
 			return changed
 		}
-		expect[norm] = true
+		expect[parser.DedupKey(norm)] = true
 		if s.upsertFlatLocked(src, norm, src.Name, true) { // 单仓父源：名称/分组始终随父源同步
 			changed = true
 		}
 	}
 
 	if s.pruneFlatsLocked(src.ID, func(f model.FlatSource) bool {
-		return containsID(f.ParentIDs, src.ID) && !expect[f.URL]
+		return containsID(f.ParentIDs, src.ID) && !expect[parser.DedupKey(f.URL)]
 	}) {
 		changed = true
 	}
@@ -530,6 +547,57 @@ func (s *Store) removeSourceFlatRefsLocked(sourceID string) bool {
 	return s.pruneFlatsLocked(sourceID, func(f model.FlatSource) bool {
 		return containsID(f.ParentIDs, sourceID)
 	})
+}
+
+// ---------- 存量数据修复 ----------
+
+// mergeDuplicateFlatsLocked 合并历史数据里指向同一个地址的多条站点源。
+//
+// 旧版本只按 Normalize 后的字符串判重，而 Normalize 刻意不动尾斜杠，于是
+// https://a.com/tv 与 https://a.com/tv/ 被存成两条（本地实测确实存在），
+// 订阅里同一地址就下发两次、名字还各是各的。现在 upsert 已按 DedupKey 合并，
+// 这里负责把存量也收拢：父引用并到最早那条，其余删除。
+//
+// 两条边界：
+//   - 已隐藏（用户手动删过）的条目不参与合并、也不会被复活；
+//   - 启用状态取「任一条启用即启用」——合并是为了去重，不该顺手把用户的线路关掉。
+func (s *Store) mergeDuplicateFlatsLocked() bool {
+	first := make(map[string]int, len(s.data.Flats))
+	drop := make(map[int]bool)
+	for i := range s.data.Flats {
+		f := &s.data.Flats[i]
+		if f.Hidden {
+			continue
+		}
+		key := parser.DedupKey(f.URL)
+		j, ok := first[key]
+		if !ok {
+			first[key] = i
+			continue
+		}
+		keep := &s.data.Flats[j]
+		for _, pid := range f.ParentIDs {
+			if !containsID(keep.ParentIDs, pid) {
+				keep.ParentIDs = append(keep.ParentIDs, pid)
+			}
+		}
+		if f.Enabled {
+			keep.Enabled = true
+		}
+		keep.UpdatedAt = time.Now()
+		drop[i] = true
+	}
+	if len(drop) == 0 {
+		return false
+	}
+	kept := make([]model.FlatSource, 0, len(s.data.Flats)-len(drop))
+	for i := range s.data.Flats {
+		if !drop[i] {
+			kept = append(kept, s.data.Flats[i])
+		}
+	}
+	s.data.Flats = kept
+	return true
 }
 
 // ResyncAllFlats 与全部父源对账（启动 / replace 导入后调用）

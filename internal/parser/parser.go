@@ -50,6 +50,45 @@ func Normalize(raw string) (string, error) {
 	return u.String(), nil
 }
 
+// DedupKey 订阅去重用的键。Normalize 只统一了「写法」层面的差异（空白、协议、
+// 主机大小写），但同一个地址仍可能有多种并存形态，实测最常见的两种：
+//
+//	https://a.com/tv   与   https://a.com/tv/     ← 多一个尾斜杠
+//	http://a.com/x?b=2&a=1 与 ?a=1&b=2            ← 参数顺序不同
+//
+// 它们在客户端眼里是同一条线路，却会被当成两个站点源存下来，订阅里就重复了。
+// 这里在 Normalize 基础上再抹平这些等价差异：
+//   - 去掉 fragment（客户端不使用 # 之后的部分）
+//   - 去掉默认端口（http:80 / https:443）
+//   - 去掉末尾多余的斜杠（根路径也不例外）
+//   - query 参数按键名排序
+//
+// 刻意不统一路径大小写：多数源站区分大小写，强行合并会把两条真线路并成一条。
+// 归一化失败时退回去空白的原始串，保证调用方总能拿到可比较的键。
+func DedupKey(raw string) string {
+	norm, err := Normalize(raw)
+	if err != nil {
+		return strings.TrimSpace(raw)
+	}
+	u, err := url.Parse(norm)
+	if err != nil {
+		return norm
+	}
+	u.Fragment = ""
+	u.RawFragment = ""
+	if (u.Scheme == "http" && u.Port() == "80") || (u.Scheme == "https" && u.Port() == "443") {
+		u.Host = u.Hostname()
+	}
+	if strings.HasSuffix(u.Path, "/") {
+		u.Path = strings.TrimRight(u.Path, "/")
+		u.RawPath = ""
+	}
+	if u.RawQuery != "" {
+		u.RawQuery = u.Query().Encode() // Encode 会按键名排序
+	}
+	return u.String()
+}
+
 // isPortSuffix 判断冒号后是否为合法端口号（纯数字）
 func isPortSuffix(s string) bool {
 	if s == "" || len(s) > 5 {

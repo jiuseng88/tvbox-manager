@@ -159,3 +159,43 @@ func TestNormalizeEmptyHost(t *testing.T) {
 		t.Error("缺主机名应报错")
 	}
 }
+
+// DedupKey 要能把「同一条线路的不同写法」归到一起，但不能误伤真不同的地址。
+func TestDedupKey(t *testing.T) {
+	same := [][2]string{
+		{"https://a.com/tv", "https://a.com/tv/"},                    // 尾斜杠
+		{"https://a.com/tv/", "https://a.com/tv//"},                  // 多个尾斜杠
+		{"https://a.com", "https://a.com/"},                          // 根路径
+		{"http://a.com/tv", "http://a.com:80/tv"},                    // 默认端口
+		{"https://a.com/tv", "https://a.com:443/tv"},                 // 默认端口
+		{"https://a.com/tv", "https://a.com/tv#anchor"},              // fragment
+		{"https://a.com/x?b=2&a=1", "https://a.com/x?a=1&b=2"},       // 参数顺序
+		{"HTTPS://A.COM/TV", "https://a.com/TV"},                     // 协议/主机大小写
+		{"a.com/tv", "http://a.com/tv"},                              // 补协议
+		{"https://a.com/tv/?x=1", "https://a.com/tv?x=1"},            // 斜杠+参数
+	}
+	for _, c := range same {
+		if got, want := DedupKey(c[0]), DedupKey(c[1]); got != want {
+			t.Errorf("应视为同一条: %q(%s) vs %q(%s)", c[0], got, c[1], want)
+		}
+	}
+
+	// 这些必须保持区分，否则会把真线路并掉
+	diff := [][2]string{
+		{"https://a.com/tv", "https://a.com/TV"},              // 路径大小写
+		{"https://a.com/tv", "https://a.com/tv2"},             // 不同路径
+		{"https://a.com/tv", "http://a.com/tv"},               // 协议不同（服务端可能行为不同）
+		{"https://a.com/tv", "https://b.com/tv"},              // 不同主机
+		{"https://a.com/x?a=1", "https://a.com/x?a=2"},        // 参数值不同
+		{"https://a.com:8443/tv", "https://a.com/tv"},         // 非默认端口
+	}
+	for _, c := range diff {
+		if DedupKey(c[0]) == DedupKey(c[1]) {
+			t.Errorf("不应合并: %q 与 %q", c[0], c[1])
+		}
+	}
+
+	if DedupKey("  ") != "" {
+		t.Errorf("空地址的去重键应为空串，得到 %q", DedupKey("  "))
+	}
+}

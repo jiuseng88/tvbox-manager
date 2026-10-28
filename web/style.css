@@ -131,6 +131,15 @@ td.failnum { color: var(--fail); font-weight: 600; }
 .tag.group { background: #f1f5f9; }
 .tag.fail { background: #fee2e2; color: #b91c1c; }
 
+/* 关联源：直接列出父源名字（有多个就并排），不再显示「N 个源」 */
+td.parent-cell { max-width: 240px; overflow: hidden; }
+.tag.from {
+  background: #e8f0fe; color: #2563eb; max-width: 170px;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  vertical-align: middle; margin-right: 4px;
+}
+.tag.from:last-child { margin-right: 0; }
+
 .link { color: var(--primary); cursor: pointer; text-decoration: none; }
 
 /* ---------- 开关 ---------- */

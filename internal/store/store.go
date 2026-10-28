@@ -66,8 +66,18 @@ func New(dataDir string) (*Store, error) {
 	if err := s.loadData(); err != nil {
 		return nil, err
 	}
-	// 启动时与源列表对账一次：补齐缺失的站点源、清理孤儿，
-	// 已有条目（含用户的启用状态/改名/备注/探活结果）原样保留。
+	// 先把历史上「同一条地址的不同写法」（如带不带尾斜杠）合并掉，
+	// 否则订阅里会重复下发同一个地址；再与源列表对账一次：补齐缺失的站点源、
+	// 清理孤儿，已有条目（含用户的启用状态/改名/备注/探活结果）原样保留。
+	s.mu.Lock()
+	merged := s.mergeDuplicateFlatsLocked()
+	if merged {
+		_ = s.flush()
+	}
+	s.mu.Unlock()
+	if merged {
+		fmt.Printf("[store] 已合并重复的站点源（同一地址的不同写法），订阅不再重复下发\n")
+	}
 	s.resyncAllFlatsLocked()
 	return s, nil
 }

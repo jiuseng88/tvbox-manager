@@ -1,7 +1,11 @@
 package store
 
 import (
+	"encoding/json"
+	"os"
+	"path/filepath"
 	"testing"
+	"time"
 
 	"tvbox-manager/internal/model"
 )
@@ -328,5 +332,98 @@ func TestFlatGroupsSkipHidden(t *testing.T) {
 	groups := st.FlatGroups()
 	if len(groups) != 1 || groups[0] != "乙组" {
 		t.Errorf("隐藏条目的分组不应出现，实际 %v", groups)
+	}
+}
+
+// 同一条线路的不同写法（这里只差一个尾斜杠）必须合并成一条站点源，
+// 否则订阅接口会下发两次同一个地址——实测旧数据里确实存在这种重复。
+func TestFlatsMergeURLVariants(t *testing.T) {
+	st := newTestStore(t)
+	a := model.Source{
+		Name: "A仓", URL: "http://d.example/a.json", Type: model.TypeMulti, Enabled: true,
+		Detail: &model.Detail{SubURLs: []model.SubURL{{Name: "毒盒", URL: "https://d.example/tv"}}},
+	}
+	b := model.Source{
+		Name: "B仓", URL: "http://d.example/b.json", Type: model.TypeMulti, Enabled: true,
+		Detail: &model.Detail{SubURLs: []model.SubURL{{Name: "毒盒线路", URL: "https://d.example/tv/"}}},
+	}
+	if err := st.Add(&a); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.Add(&b); err != nil {
+		t.Fatal(err)
+	}
+
+	flats := st.ListFlats(FlatFilter{})
+	if len(flats) != 1 {
+		t.Fatalf("同一条地址的不同写法应合并为 1 条，实际 %d 条: %+v", len(flats), flats)
+	}
+	if got := len(flats[0].ParentIDs); got != 2 {
+		t.Errorf("应带 2 个父引用，实际 %d: %v", got, flats[0].ParentIDs)
+	}
+	// 首次出现的名称优先（不再随第二个父源改名）
+	if flats[0].Name != "毒盒" {
+		t.Errorf("名称应保留首次出现的「毒盒」，实际 %q", flats[0].Name)
+	}
+	// 订阅口径同样只有 1 条
+	if n := len(st.EnabledFlats()); n != 1 {
+		t.Errorf("订阅应只有 1 条，实际 %d", n)
+	}
+}
+
+// 存量数据修复：旧版本把 https://x/tv 与 https://x/tv/ 存成了两条，
+// 启动时必须合并（父引用累加、只留一条），订阅不再重复。
+func TestLoadMergesDuplicateFlats(t *testing.T) {
+	dir := t.TempDir()
+	now := time.Now()
+
+	src := model.Source{
+		ID: "src_multi", Name: "多仓", URL: "http://d.example/all.json",
+		Type: model.TypeMulti, Enabled: true, Status: model.StatusOK,
+		Detail: &model.Detail{SubURLs: []model.SubURL{{Name: "毒盒", URL: "https://d.example/tv"}}},
+	}
+	data := model.Data{
+		Version: 1,
+		Sources: []model.Source{src},
+		Flats: []model.FlatSource{
+			{ID: "flat_1", Name: "毒盒", URL: "https://d.example/tv", ParentIDs: []string{"src_multi"},
+				Enabled: true, Group: "默认", Status: model.StatusOK, CreatedAt: now, UpdatedAt: now},
+			{ID: "flat_2", Name: "毒盒线路", URL: "https://d.example/tv/", ParentIDs: []string{"src_multi"},
+				Enabled: true, Group: "默认", Status: model.StatusUnknown, CreatedAt: now, UpdatedAt: now},
+		},
+	}
+	b, err := json.MarshalIndent(data, "", "  ")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "data.json"), b, 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	st, err := New(dir)
+	if err != nil {
+		t.Fatalf("New 失败: %v", err)
+	}
+	flats := st.ListFlats(FlatFilter{})
+	if len(flats) != 1 {
+		t.Fatalf("启动后应合并为 1 条，实际 %d 条: %+v", len(flats), flats)
+	}
+	if flats[0].ID != "flat_1" {
+		t.Errorf("应保留先出现的那条，实际 %q", flats[0].ID)
+	}
+	if n := len(st.EnabledFlats()); n != 1 {
+		t.Errorf("订阅应只有 1 条，实际 %d", n)
+	}
+	if n := len(st.ListFlats(FlatFilter{Enabled: "true"})); n != 1 {
+		t.Errorf("启用口径应只有 1 条，实际 %d", n)
+	}
+
+	// 合并结果要落盘：重新打开不应又出现两条
+	st2, err := New(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if n := len(st2.ListFlats(FlatFilter{})); n != 1 {
+		t.Errorf("重启后仍是 1 条，实际 %d", n)
 	}
 }

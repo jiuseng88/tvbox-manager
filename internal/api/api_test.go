@@ -1010,3 +1010,59 @@ func TestUpdateSourceURLDropsStaleDetail(t *testing.T) {
 		t.Errorf("站点源没跟着换地址，仍是 %v", url)
 	}
 }
+
+// 订阅接口必须去重：多仓子仓里同一个地址写了两种写法（只差尾斜杠），
+// 旧版本会生成两条站点源并在订阅里下发两次，现在只应出现一条。
+func TestSubDedupURLVariants(t *testing.T) {
+	e := newEnv(t)
+	code, body := e.doJSON("POST", "/api/sources", map[string]interface{}{
+		"name": "聚合", "url": "http://multi.example/d.json", "autoCheck": false,
+	})
+	if code != 200 {
+		t.Fatalf("添加多仓源失败: %v", body)
+	}
+	id := dataOf(t, body)["id"].(string)
+	e.st.Update(id, func(sp *model.Source) {
+		sp.Type = model.TypeMulti
+		sp.Detail = &model.Detail{SubURLs: []model.SubURL{
+			{Name: "毒盒", URL: "https://tv.example/tv"},
+			{Name: "毒盒线路", URL: "https://tv.example/tv/"},
+		}}
+	})
+
+	code, bodyStr := e.do("GET", "/sub", "", "", "")
+	if code != 200 {
+		t.Fatal("/sub 失败")
+	}
+	var sub map[string]interface{}
+	if err := json.Unmarshal([]byte(bodyStr), &sub); err != nil {
+		t.Fatalf("解析 /sub 失败: %v", err)
+	}
+	urls := sub["urls"].([]interface{})
+	if len(urls) != 1 {
+		t.Fatalf("同一地址的两种写法应只下发 1 条，实际 %d 条: %s", len(urls), bodyStr)
+	}
+
+	// 纯文本口径同样去重
+	_, txt := e.do("GET", "/sub/txt", "", "", "")
+	if n := len(strings.Split(strings.TrimSpace(txt), "\n")); n != 1 {
+		t.Errorf("/sub/txt 应只有 1 行，实际 %d 行: %q", n, txt)
+	}
+}
+
+// 出口兜底：即使数据层混进了同一地址的不同写法，也只下发第一条（保持顺序）。
+func TestDedupFlats(t *testing.T) {
+	in := []model.FlatSource{
+		{ID: "1", URL: "https://d.example/tv"},
+		{ID: "2", URL: "https://d.example/tv/"},  // 尾斜杠
+		{ID: "3", URL: "https://d.example/tv2"},  // 真不同
+		{ID: "4", URL: "https://d.example/tv#x"}, // fragment
+	}
+	out := dedupFlats(in)
+	if len(out) != 2 {
+		t.Fatalf("应去重为 2 条，实际 %d 条", len(out))
+	}
+	if out[0].ID != "1" || out[1].ID != "3" {
+		t.Errorf("应保留首次出现的条目并保持顺序，实际 %s,%s", out[0].ID, out[1].ID)
+	}
+}
