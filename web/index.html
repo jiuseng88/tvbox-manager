@@ -168,8 +168,8 @@
             </thead>
             <tbody>
               <tr v-for="(s, i) in list" :key="s.id" :class="{disabled: !s.enabled}">
-                <td class="muted w-num">{{ (filters.page-1)*filters.size + i + 1 }}</td>
                 <td><input type="checkbox" :value="s.id" v-model="checked"></td>
+                <td class="muted w-num">{{ (filters.page-1)*filters.size + i + 1 }}</td>
                 <td>
                   <span class="dot" :class="s.status" :title="s.checkMsg + '｜' + (s.latencyMs||0) + 'ms'"></span>
                   <span class="st-text" :class="s.status">{{ {ok:'可用',fail:'不可用',checking:'检测中'}[s.status] || '未检测' }}</span>
@@ -277,8 +277,8 @@
             </thead>
             <tbody>
               <tr v-for="(f, i) in flatList" :key="f.id" :class="{disabled: !f.effectiveEnabled}">
-                <td class="muted w-num">{{ (flatFilters.page-1)*flatFilters.size + i + 1 }}</td>
                 <td><input type="checkbox" :value="f.id" v-model="flatChecked"></td>
+                <td class="muted w-num">{{ (flatFilters.page-1)*flatFilters.size + i + 1 }}</td>
                 <td>
                   <span class="dot" :class="f.effectiveEnabled ? f.status : ''" :title="f.checkMsg + '｜' + (f.latencyMs||0) + 'ms'"></span>
                   <span class="st-text" :class="flatStatusClass(f)">{{ flatStatusText(f) }}</span>
