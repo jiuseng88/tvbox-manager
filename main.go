@@ -22,7 +22,7 @@ import (
 //go:embed all:web
 var webFS embed.FS
 
-const version = "1.3.2"
+const version = "1.3.4"
 
 func main() {
 	// 开发模式：-web ./web 或 WEB_DIR=./web，前端从磁盘读取，改完刷新浏览器即可，无需重新编译
@@ -53,6 +53,7 @@ func main() {
 		os.Exit(1)
 	}
 	apiSrv := api.New(st, sch, version, webRoot)
+	apiSrv.PastedDir = filepath.Join(dataDir, "pasted") // 粘贴单仓的本地托管目录
 	if webDir != "" {
 		apiSrv.DevMode(true)
 	}

@@ -2,6 +2,7 @@ package parser
 
 import (
 	"bytes"
+	"encoding/json"
 
 	"golang.org/x/net/idna"
 )
@@ -16,21 +17,95 @@ func idnaToASCII(host string) (string, error) {
 }
 
 // CleanJSON 宽松 JSON 修复（真实社区源的常见毛病）：
-//  1. 前导杂文字（公告、HTML 残片）→ 截取首个 '{' 起
+//  1. 前后杂文字（公告、HTML 残片、使用说明）→ 提取嵌在中间的完整 JSON 段
 //  2. // 行注释与 /* */ 块注释 → 剥除（字符串字面量内的 "//" 不动）
 //  3. 单引号字符串 → 转双引号（内部双引号转义）
 //  4. } ] 前的尾逗号 → 删除
 //
 // 词法扫描保证只处理真实代码位置，不破坏字符串内容。
 func CleanJSON(src []byte) []byte {
-	// 1) 前导杂文字
-	if i := bytes.IndexByte(src, '{'); i > 0 {
-		src = src[i:]
-	}
+	// 1) 前后杂文字：提取嵌入的 JSON 段
+	src = extractEmbedded(src)
 	src = stripComments(src)
 	src = singleToDoubleQuotes(src)
 	src = stripTrailingCommas(src)
 	return src
+}
+
+// extractEmbedded 整体不是 JSON、但其中嵌着一段正常 JSON 时（前后有公告/说明文字），
+// 定位并截取该段：从候选起点（{ 或 [）做字符串感知的括号配平扫描。
+// 候选按从左到右尝试（最多 5 个）：
+//   - 配平且合法 → 直接采用；
+//   - 配平但不合法（JSONC 注释/尾逗号/单引号）→ 做一次修复后合法也采用。
+//     必须在尝试后续候选之前判断，否则内层子对象（本身合法）会抢在外层前面；
+//   - 配平失败（杂文里的干扰括号）→ 试下一个候选。
+// 全部失败时退回旧行为（首个 { 截到结尾），交给后续修复步骤尽力处理。
+func extractEmbedded(src []byte) []byte {
+	// 快速通道：本身已是合法 JSON（绝大多数情况）就不折腾
+	if json.Valid(src) {
+		return src
+	}
+	tried := 0
+	for start := 0; start < len(src); start++ {
+		c := src[start]
+		if c != '{' && c != '[' {
+			continue
+		}
+		tried++
+		if tried > 5 {
+			break
+		}
+		end := balancedEnd(src, start)
+		if end < 0 {
+			continue // 该起点配平失败（干扰括号），试下一个
+		}
+		seg := src[start : end+1]
+		if json.Valid(seg) || json.Valid(fixJSON(seg)) {
+			return seg
+		}
+	}
+	// 没有配平成功的段：退回旧行为（首个 { 起全部保留）
+	if i := bytes.IndexByte(src, '{'); i > 0 {
+		return src[i:]
+	}
+	return src
+}
+
+// fixJSON 剥注释 + 修单引号 + 去尾逗号（不提取，供嵌入段合法性预判用）
+func fixJSON(src []byte) []byte {
+	return stripTrailingCommas(singleToDoubleQuotes(stripComments(src)))
+}
+
+// balancedEnd 从 start（{ 或 [）做括号配平扫描，返回配对闭合符的下标；失败返回 -1。
+// 双引号字符串内的括号不计数（JSON 标准字符串只会用双引号）。
+func balancedEnd(src []byte, start int) int {
+	depth := 0
+	inStr := false
+	for i := start; i < len(src); i++ {
+		c := src[i]
+		if inStr {
+			if c == '\\' {
+				i++
+				continue
+			}
+			if c == '"' {
+				inStr = false
+			}
+			continue
+		}
+		switch c {
+		case '"':
+			inStr = true
+		case '{', '[':
+			depth++
+		case '}', ']':
+			depth--
+			if depth == 0 {
+				return i
+			}
+		}
+	}
+	return -1
 }
 
 // stripComments 剥除 // 与 /* */ 注释（保留换行以维持行号可读）

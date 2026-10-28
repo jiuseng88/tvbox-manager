@@ -359,9 +359,10 @@ func (a *API) handleSourceImport(w http.ResponseWriter, r *http.Request) {
 
 	text := string(body)
 	lower := strings.ToLower(header.Filename)
+	enabledPtr := enabled
 
-	var items []batchItem
 	if strings.HasSuffix(lower, ".txt") || !jsonLooksLike(text) {
+		items := make([]batchItem, 0, 16)
 		for _, e := range strings.Split(text, "\n") {
 			if strings.TrimSpace(e) == "" {
 				continue
@@ -369,20 +370,11 @@ func (a *API) handleSourceImport(w http.ResponseWriter, r *http.Request) {
 			n, u := splitNameURL(e)
 			items = append(items, batchItem{Name: n, URL: u})
 		}
-	} else {
-		parsed, perr := ParseSourceJSON(text)
-		if perr != nil {
-			badRequest(w, perr.Error())
-			return
-		}
-		for _, e := range parsed.Entries {
-			items = append(items, batchItem{Name: e.Name, URL: e.URL})
-		}
+		a.batchAdd(w, batchAddReq{Items: items, Group: group, Enabled: &enabledPtr, OnDuplicate: "skip"})
+		return
 	}
-
-	// 复用批量添加逻辑
-	enabledPtr := enabled
-	a.batchAdd(w, batchAddReq{Items: items, Group: group, Enabled: &enabledPtr, OnDuplicate: "skip"})
+	// JSON 文件：走智能识别（单仓→托管 / 多仓→提取子仓 / 地址列表），与粘贴一致
+	a.importContent(w, r, text, "", group, &enabledPtr, false)
 }
 
 func jsonLooksLike(s string) bool {
@@ -491,10 +483,12 @@ func (a *API) handleSourceUpdate(w http.ResponseWriter, r *http.Request) {
 
 func (a *API) handleSourceDelete(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
+	src, _ := a.st.Get(id) // 删除前取一次：托管源要顺带清理文件
 	if n := a.st.Delete([]string{id}); n == 0 {
 		notFound(w, "源不存在")
 		return
 	}
+	a.cleanupPasted(src.URL)
 	ok(w, map[string]interface{}{"deleted": id})
 }
 

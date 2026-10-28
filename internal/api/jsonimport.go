@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"strings"
 
+	"tvbox-manager/internal/model"
 	"tvbox-manager/internal/parser"
 )
 
@@ -339,6 +340,7 @@ func removeTrailingCommas(s string) string {
 
 type jsonImportReq struct {
 	Text    string `json:"text"`
+	Name    string `json:"name"` // 单仓托管时的源名称，留空自动取名
 	Group   string `json:"group"`
 	Enabled *bool  `json:"enabled"`
 	DryRun  bool   `json:"dryRun"` // true：只解析预览，不落库
@@ -352,42 +354,170 @@ type jsonPreviewRow struct {
 }
 
 // handleSourceImportJSON POST /api/sources/import/json
-// 粘贴 JSON 导入：dryRun 出预览（识别条数 + 重复条数），否则直接灌进批量添加。
+// 粘贴 JSON 导入：dryRun 出预览（识别类型 + 条数 + 重复数），否则落库。
 func (a *API) handleSourceImportJSON(w http.ResponseWriter, r *http.Request) {
 	var req jsonImportReq
 	if !decodeJSON(w, r, &req) {
 		return
 	}
-	parsed, err := ParseSourceJSON(req.Text)
-	if err != nil {
-		badRequest(w, err.Error())
+	a.importContent(w, r, req.Text, req.Name, req.Group, req.Enabled, req.DryRun)
+}
+
+// importContent 粘贴/文件导入共用的智能识别入口，三步分流：
+//  1. 先按「仓库内容」识别（前后带杂文时 CleanJSON 会提取嵌入的 JSON 段）：
+//     单仓 → 本服务托管为源；多仓 → 只提取子仓地址，其余丢弃；
+//  2. 不是仓库结构 → 按地址列表解析（ParseSourceJSON，TVBox 分享格式 / 数组 / 备份 / 深扫）；
+//  3. 都不行 → 明确报错。
+func (a *API) importContent(w http.ResponseWriter, r *http.Request, text, name, group string, enabled *bool, dryRun bool) {
+	text = strings.TrimSpace(strings.TrimPrefix(text, "\ufeff"))
+	if text == "" {
+		badRequest(w, "内容为空")
+		return
+	}
+	if len(text) > 4<<20 {
+		badRequest(w, "内容超过 4MB 上限")
 		return
 	}
 
-	if req.DryRun {
-		rows := make([]jsonPreviewRow, 0, len(parsed.Entries))
-		dup := 0
-		for _, e := range parsed.Entries {
-			norm, nerr := parser.Normalize(e.URL)
-			if nerr != nil {
-				rows = append(rows, jsonPreviewRow{Name: e.Name, URL: e.URL, Reason: "地址非法: " + nerr.Error()})
-				continue
-			}
-			_, found := a.st.GetByURL(norm)
-			if found {
-				dup++
-			}
-			rows = append(rows, jsonPreviewRow{Name: e.Name, URL: norm, Dup: found})
+	cleaned := string(parser.CleanJSON([]byte(text)))
+
+	typ, detail, err := parser.Parse([]byte(cleaned))
+	if err == nil {
+		switch typ {
+		case model.TypeSingle:
+			a.importRepoSingle(w, r, cleaned, detail, name, group, enabled, dryRun)
+			return
+		case model.TypeMulti:
+			a.importRepoMulti(w, detail, group, enabled, dryRun)
+			return
 		}
+	}
+
+	parsed, perr := ParseSourceJSON(cleaned)
+	if perr != nil {
+		badRequest(w, perr.Error())
+		return
+	}
+	a.importURLList(w, parsed, group, enabled, dryRun)
+}
+
+// previewRows 地址条目 → 预览行（归一化 + 重复标记）
+func (a *API) previewRows(entries []jsonEntry) ([]jsonPreviewRow, int) {
+	rows := make([]jsonPreviewRow, 0, len(entries))
+	dup := 0
+	for _, e := range entries {
+		norm, nerr := parser.Normalize(e.URL)
+		if nerr != nil {
+			rows = append(rows, jsonPreviewRow{Name: e.Name, URL: e.URL, Reason: "地址非法: " + nerr.Error()})
+			continue
+		}
+		_, found := a.st.GetByURL(norm)
+		if found {
+			dup++
+		}
+		rows = append(rows, jsonPreviewRow{Name: e.Name, URL: norm, Dup: found})
+	}
+	return rows, dup
+}
+
+// importURLList 地址列表类：预览或批量添加
+func (a *API) importURLList(w http.ResponseWriter, parsed *parsedJSON, group string, enabled *bool, dryRun bool) {
+	if dryRun {
+		rows, dup := a.previewRows(parsed.Entries)
 		ok(w, map[string]interface{}{
 			"kind": parsed.Kind, "total": len(rows), "dup": dup, "entries": rows,
 		})
 		return
 	}
-
 	items := make([]batchItem, 0, len(parsed.Entries))
 	for _, e := range parsed.Entries {
 		items = append(items, batchItem{Name: e.Name, URL: e.URL})
 	}
-	a.batchAdd(w, batchAddReq{Items: items, Group: req.Group, Enabled: req.Enabled, OnDuplicate: "skip"})
+	a.batchAdd(w, batchAddReq{Items: items, Group: group, Enabled: enabled, OnDuplicate: "skip"})
+}
+
+// importRepoMulti 多仓配置：只提取子仓地址（名称+URL）导入，其余结构（spider/直播/壁纸等）丢弃
+func (a *API) importRepoMulti(w http.ResponseWriter, detail *model.Detail, group string, enabled *bool, dryRun bool) {
+	seen := map[string]bool{}
+	entries := make([]jsonEntry, 0, len(detail.SubURLs))
+	for _, s := range detail.SubURLs {
+		key := strings.ToLower(strings.TrimSpace(s.URL))
+		if key == "" || seen[key] {
+			continue
+		}
+		seen[key] = true
+		entries = append(entries, jsonEntry{Name: s.Name, URL: s.URL})
+	}
+	if len(entries) == 0 {
+		badRequest(w, "多仓配置中未提取到子仓地址")
+		return
+	}
+	if dryRun {
+		rows, dup := a.previewRows(entries)
+		ok(w, map[string]interface{}{
+			"kind": "repo-multi", "total": len(rows), "dup": dup, "entries": rows,
+			"note": "识别为多仓配置：仅提取其中的子仓地址导入，其余内容（spider/直播/壁纸等）忽略",
+		})
+		return
+	}
+	items := make([]batchItem, 0, len(entries))
+	for _, e := range entries {
+		items = append(items, batchItem{Name: e.Name, URL: e.URL})
+	}
+	a.batchAdd(w, batchAddReq{Items: items, Group: group, Enabled: enabled, OnDuplicate: "skip"})
+}
+
+// importRepoSingle 单仓配置：本服务托管为源（保存内容 → /configs/{id}.json → 建源 → 自动探活）
+func (a *API) importRepoSingle(w http.ResponseWriter, r *http.Request, cleaned string, detail *model.Detail, name, group string, enabled *bool, dryRun bool) {
+	summary := fmt.Sprintf("%d 站点 / %d 直播 / %d 解析", detail.Sites, detail.Lives, detail.Parses)
+	if dryRun {
+		siteNames := detail.SiteNames
+		if len(siteNames) > 10 {
+			siteNames = siteNames[:10]
+		}
+		ok(w, map[string]interface{}{
+			"kind": "repo-single", "total": 1, "dup": 0, "entries": []jsonPreviewRow{},
+			"summary": summary, "siteNames": siteNames, "selfHost": true,
+			"note": "识别为单仓配置：导入后由本服务托管为本地源并自动探活，站点源照常生成进订阅；删除该源即删除托管文件",
+		})
+		return
+	}
+	if a.PastedDir == "" {
+		badRequest(w, "服务端未启用本地托管，无法导入单仓配置")
+		return
+	}
+	fname, err := a.savePastedConfig(cleaned)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, envelope{Code: 500, Msg: "托管文件保存失败: " + err.Error()})
+		return
+	}
+	url := baseURL(r) + "/configs/" + fname
+
+	nm := strings.TrimSpace(name)
+	if nm == "" {
+		nm = "粘贴单仓"
+	}
+	gr := strings.TrimSpace(group)
+	if gr == "" {
+		gr = "默认"
+	}
+	en := true
+	if enabled != nil {
+		en = *enabled
+	}
+	src := model.Source{
+		Name: nm, URL: url, Group: gr, Enabled: en,
+		Type: model.TypeUnknown, Status: model.StatusUnknown,
+		Remark: "粘贴内容本地托管",
+	}
+	if err := a.st.Add(&src); err != nil {
+		a.cleanupPasted(url) // 建源失败不留孤儿文件
+		badRequest(w, err.Error())
+		return
+	}
+	go a.asyncCheckOne(src.ID, src.URL, src.TimeoutSeconds)
+	ok(w, map[string]interface{}{
+		"kind": "repo-single", "added": 1, "id": src.ID,
+		"selfHosted": url, "summary": summary,
+	})
 }

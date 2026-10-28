@@ -46,7 +46,9 @@ func newEnv(t *testing.T) *testEnv {
 
 	// webFS 以 web 目录为根（生产为 embed 子目录，开发模式为 os.DirFS）
 	webFS := fstest.MapFS{"index.html": &fstest.MapFile{Data: []byte("<html>ok</html>")}}
-	handler := New(st, sch, "test", webFS).Router()
+	api := New(st, sch, "test", webFS)
+	api.PastedDir = t.TempDir() // 粘贴单仓托管目录
+	handler := api.Router()
 
 	mock := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		_, _ = w.Write([]byte(`{"spider":"http://x/s.jar","sites":[
@@ -318,11 +320,15 @@ func TestImportTxtAndJSON(t *testing.T) {
 		t.Fatalf("json 导入条数错误: %s", body)
 	}
 
-	// 仓库内容文件 → 明确报错
+	// 仓库内容文件 → 识别为单仓并本服务托管（与粘贴行为一致）
 	siteBody := `{"sites":[{"key":"a","name":"A","type":1,"api":"http://x"}]}`
 	code, body = e.multipart("/api/sources/import", "repo.json", siteBody, "")
-	if code != 400 || !strings.Contains(body, "仓库内容") {
-		t.Fatalf("仓库内容文件应报错: %d %s", code, body)
+	if code != 200 || !strings.Contains(body, "repo-single") {
+		t.Fatalf("仓库内容文件应托管导入: %d %s", code, body)
+	}
+	_ = json.Unmarshal([]byte(body), &out)
+	if out["data"].(map[string]interface{})["added"].(float64) != 1 {
+		t.Fatalf("托管导入应新增 1 条: %s", body)
 	}
 
 	// 超 2MB 拒绝
@@ -870,7 +876,9 @@ func TestNoAuthWhenTokenEmpty(t *testing.T) {
 	sch := scheduler.Start(st, &cfg)
 	defer sch.Shutdown()
 	webFS := fstest.MapFS{"index.html": &fstest.MapFile{Data: []byte("<html>ok</html>")}}
-	handler := New(st, sch, "test", webFS).Router()
+	api := New(st, sch, "test", webFS)
+	api.PastedDir = t.TempDir() // 粘贴单仓托管目录
+	handler := api.Router()
 
 	do := func(method, path, token string) int {
 		req := httptest.NewRequest(method, path, nil)

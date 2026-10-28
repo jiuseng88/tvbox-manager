@@ -194,13 +194,16 @@ func extractNames(items []json.RawMessage, limit int) []string {
 }
 
 // parseSubURLs 解析多仓 urls 数组，兼容对象与字符串两种写法；
+// 名称/地址同时兼容 name/sourceName 与 url/sourceUrl 两套键（多仓配置两种写法都常见）；
 // 剥离 "csp_XPathhttp://..." 类格式前缀。
 func parseSubURLs(items []json.RawMessage) []model.SubURL {
 	out := make([]model.SubURL, 0, len(items))
 	for _, it := range items {
 		var o struct {
-			URL  string `json:"url"`
-			Name string `json:"name"`
+			URL        string `json:"url"`
+			SourceURL  string `json:"sourceUrl"`
+			Name       string `json:"name"`
+			SourceName string `json:"sourceName"`
 		}
 		if err := json.Unmarshal(it, &o); err != nil {
 			var s string
@@ -210,14 +213,22 @@ func parseSubURLs(items []json.RawMessage) []model.SubURL {
 				continue
 			}
 		}
-		if o.URL == "" {
+		u := o.URL
+		if u == "" {
+			u = o.SourceURL
+		}
+		if u == "" {
 			continue
 		}
-		o.URL = stripFormatPrefix(o.URL)
-		if o.URL == "" {
+		u = stripFormatPrefix(u)
+		if u == "" {
 			continue
 		}
-		out = append(out, model.SubURL{Name: o.Name, URL: o.URL})
+		n := o.Name
+		if n == "" {
+			n = o.SourceName
+		}
+		out = append(out, model.SubURL{Name: n, URL: u})
 	}
 	return out
 }

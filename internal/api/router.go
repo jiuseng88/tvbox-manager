@@ -20,6 +20,9 @@ type API struct {
 	web  fs.FS // 以 web 目录为根
 	dev  bool  // 开发模式：禁缓存、前端从磁盘读
 	reqN atomic.Int64
+
+	// PastedDir 粘贴单仓配置的本地托管目录（main 注入 data/pasted；空 = 托管未启用）
+	PastedDir string
 }
 
 // maxPageSize 列表接口单页上限（sources 与 flats 统一，避免口径不一致）
@@ -93,6 +96,9 @@ func (a *API) Router() http.Handler {
 	root.HandleFunc("GET "+sub+"/all", a.auth(http.HandlerFunc(a.handleSubAll)).ServeHTTP)
 
 	root.HandleFunc("GET /healthz", a.handleHealthz)
+
+	// 粘贴单仓的本地托管配置（无鉴权，与订阅一致）
+	root.HandleFunc("GET /configs/{name}", a.handlePastedConfig)
 
 	// 静态资源（前端 SPA，go:embed 注入）；不限定方法，避免与 /api/ 子树模式冲突
 	root.Handle("/", a.spaHandler())

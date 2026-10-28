@@ -1,6 +1,11 @@
 package api
 
 import (
+	"bytes"
+	"encoding/json"
+	"io"
+	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
 
@@ -253,16 +258,218 @@ func TestImportJSONEndpoint(t *testing.T) {
 	}
 }
 
-// 解析失败时接口要 400 且信息可见
+// 真正无法解析（找不到任何 JSON 数据）时要明确报错
 func TestImportJSONEndpointBadInput(t *testing.T) {
 	e := newEnv(t)
 	code, body := e.doJSON("POST", "/api/sources/import/json", map[string]interface{}{
-		"text": `{"sites":[{"api":"http://x"}],"lives":[{"name":"直播"}]}`,
+		"text": `这段公告里没有任何 JSON 数据，纯文字说明，也没有花括号。`,
 	})
 	if code != 400 {
 		t.Fatalf("code=%d 期望 400，body=%v", code, body)
 	}
-	if msg, _ := body["msg"].(string); !strings.Contains(msg, "仓库内容") {
+	if msg, _ := body["msg"].(string); !strings.Contains(msg, "JSON") {
 		t.Fatalf("提示信息不友好: %v", body["msg"])
 	}
+}
+
+// 粘贴单仓配置：预览出统计 → 导入即本服务托管 → 能通过 /configs/ 拉到 → 删源清理文件
+func TestImportRepoSinglePaste(t *testing.T) {
+	e := newEnv(t)
+	text := `更新公告：本站接口如下，请注意保存。` + "\n" +
+		`{"spider":"http://x/s.jar","sites":[{"key":"a","name":"A站","type":1,"api":"http://x/api.php"},` +
+		`{"key":"b","name":"B站","type":3,"api":"csp_XPath"}],"lives":[{"name":"直播1"}]}` + "\n" +
+		`以上内容仅供学习交流。`
+
+	code, body := e.doJSON("POST", "/api/sources/import/json", map[string]interface{}{
+		"text": text, "dryRun": true,
+	})
+	if code != 200 {
+		t.Fatalf("预览失败 code=%d body=%v", code, body)
+	}
+	d := dataOf(t, body)
+	if k, _ := d["kind"].(string); k != "repo-single" {
+		t.Fatalf("kind=%v 期望 repo-single", d["kind"])
+	}
+	if s, _ := d["summary"].(string); !strings.Contains(s, "2 站点") || !strings.Contains(s, "1 直播") {
+		t.Fatalf("summary=%v", d["summary"])
+	}
+	// spider 应该被忽略（不在统计/站点名里出现是另一回事，这里校验预览不带地址条目）
+	if rows, _ := d["entries"].([]interface{}); len(rows) != 0 {
+		t.Fatalf("单仓预览不应有地址条目: %v", d["entries"])
+	}
+
+	// 导入 → 生成一条指向 /configs/ 的源
+	code, body = e.doJSON("POST", "/api/sources/import/json", map[string]interface{}{
+		"text": text, "name": "我的粘贴仓",
+	})
+	if code != 200 {
+		t.Fatalf("导入失败 code=%d body=%v", code, body)
+	}
+	d = dataOf(t, body)
+	selfURL, _ := d["selfHosted"].(string)
+	if !strings.Contains(selfURL, "/configs/") || !strings.HasSuffix(selfURL, ".json") {
+		t.Fatalf("托管地址异常: %v", selfURL)
+	}
+	srcID, _ := d["id"].(string)
+	src, found := e.st.Get(srcID)
+	if !found {
+		t.Fatalf("源未入库")
+	}
+	if src.Name != "我的粘贴仓" || src.URL != selfURL {
+		t.Fatalf("源信息不符: %+v", src)
+	}
+
+	// 托管文件能通过无鉴权路由拉到，且内容是清洗后的合法 JSON
+	code, raw := e.do("GET", "/configs/"+selfURL[strings.LastIndex(selfURL, "/")+1:], "", "", "")
+	if code != 200 {
+		t.Fatalf("托管文件拉取失败 code=%d", code)
+	}
+	var j map[string]interface{}
+	if err := json.Unmarshal([]byte(raw), &j); err != nil {
+		t.Fatalf("托管内容不是合法 JSON: %v (%s)", err, raw)
+	}
+	if _, ok := j["sites"]; !ok {
+		t.Fatalf("托管内容缺少 sites: %s", raw)
+	}
+
+	// 删除源 → 托管文件同步清理
+	code, _ = e.do("DELETE", "/api/sources/"+srcID, e.token, "", "")
+	if code != 200 {
+		t.Fatalf("删除失败 code=%d", code)
+	}
+	code, _ = e.do("GET", "/configs/"+selfURL[strings.LastIndex(selfURL, "/")+1:], "", "", "")
+	if code != 404 {
+		t.Fatalf("删除源后托管文件应 404，实际 code=%d", code)
+	}
+}
+
+// 粘贴多仓配置：只提取子仓地址（名称+URL），spider 等其余内容丢弃
+func TestImportRepoMultiPaste(t *testing.T) {
+	e := newEnv(t)
+	text := `{"spider":"http://x/mix.jar","lives":[{"name":"不该被导入的直播"}],
+		"urls":[{"sourceName":"肥猫","sourceUrl":"http://a/1.json"},
+		        {"sourceName":"饭太硬","sourceUrl":"http://b/2.json"},
+		        {"sourceName":"肥猫重复","sourceUrl":"http://a/1.json"}]}`
+
+	code, body := e.doJSON("POST", "/api/sources/import/json", map[string]interface{}{
+		"text": text, "dryRun": true,
+	})
+	if code != 200 {
+		t.Fatalf("预览失败 code=%d body=%v", code, body)
+	}
+	d := dataOf(t, body)
+	if k, _ := d["kind"].(string); k != "repo-multi" {
+		t.Fatalf("kind=%v 期望 repo-multi", d["kind"])
+	}
+	if n := num(d, "total"); n != 2 {
+		t.Fatalf("提取条数 %d 期望 2（同址去重）：%v", n, d["entries"])
+	}
+
+	code, body = e.doJSON("POST", "/api/sources/import/json", map[string]interface{}{
+		"text": text, "group": "多仓粘贴",
+	})
+	if code != 200 {
+		t.Fatalf("导入失败 code=%d body=%v", code, body)
+	}
+	if n := num(dataOf(t, body), "added"); n != 2 {
+		t.Fatalf("新增 %d 期望 2", n)
+	}
+	src, found := e.st.GetByURL("http://a/1.json")
+	if !found {
+		t.Fatalf("子仓未入库")
+	}
+	if src.Name != "肥猫" {
+		t.Fatalf("子仓名称 = %q，期望「肥猫」（sourceName 键识别）", src.Name)
+	}
+	// spider jar 不应被当成源导入
+	if _, found := e.st.GetByURL("http://x/mix.jar"); found {
+		t.Fatalf("spider 不应被导入")
+	}
+}
+
+// 前后带杂文、中间嵌着地址列表数组：提取后照常导入
+func TestImportJunkWrappedList(t *testing.T) {
+	e := newEnv(t)
+	text := "更新时间 2026-10-28，接口如下：\n" +
+		`["http://a/1.json","http://b/2.json"]` + "\n" +
+		"以上内容转载自网络，仅供学习交流。"
+	code, body := e.doJSON("POST", "/api/sources/import/json", map[string]interface{}{
+		"text": text, "dryRun": true,
+	})
+	if code != 200 {
+		t.Fatalf("预览失败 code=%d body=%v", code, body)
+	}
+	if n := num(dataOf(t, body), "total"); n != 2 {
+		t.Fatalf("识别条数 %d 期望 2", n)
+	}
+}
+
+// 前后带杂文、中间嵌着单仓配置：同样能识别为 repo-single
+func TestImportJunkWrappedSingle(t *testing.T) {
+	e := newEnv(t)
+	text := "公告：接口更新\n" + `{"sites":[{"key":"a","name":"A站","type":1,"api":"http://x/api.php"}]}` + "\n完"
+	code, body := e.doJSON("POST", "/api/sources/import/json", map[string]interface{}{
+		"text": text, "dryRun": true,
+	})
+	if code != 200 {
+		t.Fatalf("预览失败 code=%d body=%v", code, body)
+	}
+	if k, _ := dataOf(t, body)["kind"].(string); k != "repo-single" {
+		t.Fatalf("应识别为 repo-single: %v", body)
+	}
+}
+
+// 探活对非标准 JSON（前后杂文）的兼容：mock 直接返回杂文包住的单仓
+func TestProbeToleratesJunkWrappedConfig(t *testing.T) {
+	e := newEnv(t)
+	// 起真实 HTTP 服务（否则托管地址的 Host 是假的，探活拉不到）
+	srv := httptest.NewServer(e.api)
+	t.Cleanup(srv.Close)
+
+	post := func(path string, v interface{}) (int, map[string]interface{}) {
+		b, _ := json.Marshal(v)
+		req, _ := http.NewRequest("POST", srv.URL+path, bytes.NewReader(b))
+		req.Header.Set("X-Token", e.token)
+		req.Header.Set("Content-Type", "application/json")
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer resp.Body.Close()
+		rb, _ := io.ReadAll(resp.Body)
+		var out map[string]interface{}
+		_ = json.Unmarshal(rb, &out)
+		return resp.StatusCode, out
+	}
+
+	// 托管一份前后带杂文的单仓配置
+	text := "公告文字\n" + `{"sites":[{"key":"a","name":"A站","type":1,"api":"` + e.mock.URL + `/api.php"}]}` + "\n尾注"
+	code, body := post("/api/sources/import/json", map[string]interface{}{"text": text})
+	if code != 200 {
+		t.Fatalf("托管失败: %v", body)
+	}
+	d := dataOf(t, body)
+	selfURL, _ := d["selfHosted"].(string)
+	srcID, _ := d["id"].(string)
+
+	// 已入库源预览（不做内网拦截）：杂文包着的单仓应被识别，且能看原始返回
+	req, _ := http.NewRequest("GET", srv.URL+"/api/sources/"+srcID+"/preview", nil)
+	req.Header.Set("X-Token", e.token)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	rb, _ := io.ReadAll(resp.Body)
+	var out map[string]interface{}
+	_ = json.Unmarshal(rb, &out)
+	pd := dataOf(t, out)
+	if k, _ := pd["type"].(string); k != "single" {
+		t.Fatalf("非标准单仓应被识别为 single: %v", pd)
+	}
+	rawBody, _ := pd["raw"].(string)
+	if !strings.Contains(rawBody, "sites") {
+		t.Fatalf("预览应包含原始返回内容: %v", pd)
+	}
+	_ = selfURL
 }

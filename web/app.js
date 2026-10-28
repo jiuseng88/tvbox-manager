@@ -642,7 +642,11 @@
           jsonResult.value = await api("POST", "/api/sources/import/json", {
             text, group: singleForm.group || "默认", enabled: true,
           });
-          toast(`已导入 ${jsonResult.value.added} 条，正在后台探活（确认是单仓/多仓后才进订阅）`, "ok");
+          if (jsonResult.value.selfHosted) {
+            toast(`已托管为本地源（${jsonResult.value.summary || "单仓配置"}），正在后台探活`, "ok");
+          } else {
+            toast(`已导入 ${jsonResult.value.added} 条，正在后台探活（确认是单仓/多仓后才进订阅）`, "ok");
+          }
           jsonText.value = "";
           jsonParsed.value = null;
           loadSources(); loadGroups(); loadKnownUrls();
