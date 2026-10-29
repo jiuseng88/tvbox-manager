@@ -643,22 +643,34 @@
       <template v-if="editSrc._isLocal">
         <div class="form-row">
           <label>配置内容</label>
-          <span class="muted">
-            JSON 粘贴导入的本地源，可在这里直接改原文。保存时会校验（注释、裸换行、缺引号等都能自动修），
+          <span class="muted" style="flex:1;min-width:220px">
+            JSON 粘贴 / 文件导入的单仓配置，可在这里直接改原文。保存时会校验（注释、裸换行、缺引号等都能自动修），
             必须能解析成<b>单仓</b>才会落盘；托管地址不变，客户端重新拉订阅即生效。
           </span>
+          <button class="btn xs" @click="formatContent" :disabled="editConfigLoading || !!editConfigError">格式化</button>
+        </div>
+        <div class="form-row" v-if="editConfigError">
+          <label></label>
+          <span style="color:#b91c1c;flex:1">托管配置读取失败：{{ editConfigError }}</span>
+          <button class="btn xs" @click="retryLoadConfig">重试</button>
         </div>
         <div class="form-row">
           <label></label>
-          <textarea v-model="editSrc.content" rows="16" spellcheck="false"
-                    :placeholder="editConfigLoading ? '正在读取托管配置…' : ''"
+          <textarea v-model="editSrc.content" @input="onContentInput" rows="16" spellcheck="false"
+                    :disabled="editConfigLoading || !!editConfigError"
+                    :placeholder="editConfigLoading ? '正在读取托管配置…' : (editConfigError ? '读取失败，请先点上面的「重试」' : '')"
                     style="font-family:Consolas,monospace;font-size:12px;line-height:1.5"></textarea>
         </div>
         <div class="form-row">
           <label></label>
           <span class="muted">
             {{ editSrc.content ? editSrc.content.length + ' 字符' : '（空）' }}
-            <template v-if="editSrc._sites"> · 当前解析：{{ editSrc._sites }} 站点</template>
+            <template v-if="editParsed">
+              <span v-if="editParsed.ok"> · 解析：{{ editParsed.msg }}</span>
+              <span v-else style="color:#b91c1c"> · {{ editParsed.msg }}</span>
+            </template>
+            <template v-else-if="editSrc._sites"> · 当前解析：{{ editSrc._sites }} 站点</template>
+            <span v-if="editContentDirty" style="color:#b45309"> · 已修改，保存后生效</span>
           </span>
         </div>
       </template>

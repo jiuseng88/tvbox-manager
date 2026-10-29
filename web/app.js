@@ -323,26 +323,87 @@
       // 只有 JSON 粘贴导入的本地源能改配置原文：内容托管在本服务的 /configs/xxx.json 上，
       // 其它源（普通地址、地址列表导入、多仓）没有可编辑的内容，弹窗里也就不显示该区块。
       const editConfigLoading = ref(false);
+      // 读取托管原文失败时把原因留在弹窗里：否则用户面对一个空白 textarea，
+      // 改完保存要么发空内容被拒，要么把原文整个覆盖掉。
+      const editConfigError = ref("");
+      // 内容改动的实时校验结果：{ok, msg}。用导入同一个 dryRun 接口，
+      // 让「改完能不能解析成单仓」当场可见，而不是等点保存才失败。
+      const editParsed = ref(null);
+      const editContentDirty = ref(false);
+      let parseTimer = null;
       function isLocalSource(s) { return !!s && s.type === "local"; }
+
       async function openEdit(s) {
         const local = isLocalSource(s);
+        editConfigError.value = "";
+        editParsed.value = null;
+        editContentDirty.value = false;
         editSrc.value = {
           ...s, _id: s.id, forceType: s.forceType || "",
           _isLocal: local, _origUrl: s.url, _sites: (s.detail && s.detail.sites) || 0,
           content: "",
         };
         if (!local) return;
+        await loadEditContent(s.id);
+      }
+
+      async function loadEditContent(id) {
         editConfigLoading.value = true;
+        editConfigError.value = "";
         try {
-          const d = await api("GET", "/api/sources/" + s.id + "/config");
-          if (editSrc.value && editSrc.value._id === s.id) {
+          const d = await api("GET", "/api/sources/" + id + "/config");
+          if (editSrc.value && editSrc.value._id === id) {
             editSrc.value.content = d.content || "";
             editSrc.value._sites = (d.detail && d.detail.sites) || 0;
+            editParsed.value = null;
+            editContentDirty.value = false;
           }
         } catch (err) {
-          toast(err.message, "error");
+          editConfigError.value = err.message;
         } finally {
           editConfigLoading.value = false;
+        }
+      }
+      function retryLoadConfig() {
+        if (editSrc.value) loadEditContent(editSrc.value._id);
+      }
+
+      function onContentInput() {
+        editContentDirty.value = true;
+        editParsed.value = null;
+        clearTimeout(parseTimer);
+        const text = (editSrc.value && editSrc.value.content) || "";
+        if (!text.trim()) return;
+        parseTimer = setTimeout(async () => {
+          const cur = editSrc.value;
+          if (!cur) return;
+          try {
+            const d = await api("POST", "/api/sources/import/json", { text, dryRun: true });
+            if (editSrc.value !== cur) return; // 期间换了源，结果作废
+            if (d.kind !== "repo-single") {
+              editParsed.value = { ok: false, msg: d.kind === "repo-multi"
+                ? "识别为多仓配置：本地源只能托管单仓"
+                : "不是单仓配置，保存会被拒绝" };
+            } else {
+              editParsed.value = { ok: true, msg: d.summary };
+            }
+          } catch (e) {
+            editParsed.value = { ok: false, msg: e.message };
+          }
+        }, 700);
+      }
+
+      // 格式化：把压成一行的 JSON 展开成缩进格式，方便手改。
+      // 宽松 JSON（注释/尾逗号/缺引号）过不了 JSON.parse，提示走保存让服务端修。
+      function formatContent() {
+        const t = (editSrc.value && editSrc.value.content) || "";
+        if (!t.trim()) return;
+        try {
+          editSrc.value.content = JSON.stringify(JSON.parse(t), null, 2);
+          onContentInput();
+          toast("已格式化", "ok");
+        } catch (e) {
+          toast("不是标准 JSON（可能含注释/尾逗号/缺引号），直接点保存由服务端自动修复", "error");
         }
       }
       // 手动定型：某些地址探活一直失败/内容抓不全，系统分不清单仓多仓就不下发。
@@ -360,18 +421,27 @@
           timeoutSeconds: Math.max(0, Math.min(120, Number(e0.timeoutSeconds) || 0)),
           forceType: e0.forceType || "",
         };
+        let contentChanged = false;
         if (e0._isLocal) {
           if (e0.url !== e0._origUrl) {
             // 换地址 = 脱离本地托管，旧托管文件会被清理，不可恢复
             if (!confirm("换地址后这条源会变成普通地址源，原托管配置将被删除且无法恢复。继续吗？")) return;
-          } else {
+          } else if (editContentDirty.value && !editConfigError.value) {
+            // 内容没动就不提交，省得白写一次文件
             body.content = e0.content;
+            contentChanged = true;
           }
         }
         try {
           const d = await api("PUT", "/api/sources/" + e0._id, body);
           const det = (d && d.detail) || null;
-          toast(det && det.sites ? `已保存（${det.sites} 站点 / ${det.lives} 直播）` : "已保存", "ok");
+          if (contentChanged) {
+            toast(det && det.sites
+              ? `配置已更新（${det.sites} 站点 / ${det.lives} 直播），托管地址不变`
+              : "配置已更新，托管地址不变", "ok");
+          } else {
+            toast(det && det.sites ? `已保存（${det.sites} 站点 / ${det.lives} 直播）` : "已保存", "ok");
+          }
           editSrc.value = null; loadSources(); loadGroups(); loadStats();
         } catch (err) { toast(err.message, "error"); }
       }
@@ -996,6 +1066,7 @@
         flatStatusText, flatStatusClass, toggleFlat, checkFlat, delFlat, flatBatchAction, batchCheckFlats,
         editFlat, openFlatEdit, saveFlatEdit, openFlatPreview,
         batchBar, batchAction, editSrc, openEdit, saveEdit, editConfigLoading,
+        editConfigError, editParsed, editContentDirty, onContentInput, formatContent, retryLoadConfig,
         preview, openPreview, retryPreview, siteNamesExpanded, rawExpanded, batchCheck,
         addTab, singleForm, singlePreview, singlePreviewing, previewUrl, addSingle,
         batchText, batchResult, batchParsed, submitBatch,
