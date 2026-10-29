@@ -514,6 +514,9 @@ func (a *API) importRepoSingle(w http.ResponseWriter, r *http.Request, cleaned s
 		Type: model.TypeLocal, Status: model.StatusOK,
 		LastCheckAt: &now, CheckMsg: "本地源，无需检测",
 		Remark: "粘贴内容本地托管",
+		// 内容就在本地，解析结果直接留着：列表「内容摘要」和编辑弹窗都要用，
+		// 本地源不参与探活，不会有别的地方回填它。
+		Detail: detail,
 	}
 	if err := a.st.Add(&src); err != nil {
 		a.cleanupPasted(url) // 建源失败不留孤儿文件

@@ -601,11 +601,15 @@
 
   <!-- ===== 编辑弹窗 ===== -->
   <div class="modal-mask" v-if="editSrc" @click.self="editSrc=null">
-    <div class="modal">
+    <div class="modal" :class="{ wide: editSrc._isLocal }">
       <div class="modal-title">编辑源<button class="close" @click="editSrc=null">✕</button></div>
       <div class="form-row"><label>名称</label><input v-model="editSrc.name"></div>
       <div class="form-row"><label>地址</label><input v-model="editSrc.url"></div>
-      <div class="form-row">
+      <div class="form-row" v-if="editSrc._isLocal && editSrc.url !== editSrc._origUrl">
+        <label></label>
+        <span class="muted" style="color:#b45309">⚠ 这是本地托管源，换地址后会变成普通地址源：原托管配置将被删除且无法恢复，且需要等下一轮探活才能定型。</span>
+      </div>
+      <div class="form-row" v-if="!editSrc._isLocal">
         <label>类型</label>
         <select v-model="editSrc.forceType">
           <option value="">自动判定（按探活结果）</option>
@@ -614,9 +618,31 @@
         </select>
         <span class="muted">探活一直失败、源列表有但仓源里没有时用它</span>
       </div>
-      <div class="form-row" v-if="forceTypeHint(editSrc)">
+      <div class="form-row" v-if="!editSrc._isLocal && forceTypeHint(editSrc)">
         <label></label><span class="muted">{{ forceTypeHint(editSrc) }}</span>
       </div>
+      <template v-if="editSrc._isLocal">
+        <div class="form-row">
+          <label>配置内容</label>
+          <span class="muted">
+            JSON 粘贴导入的本地源，可在这里直接改原文。保存时会校验（注释、裸换行、缺引号等都能自动修），
+            必须能解析成<b>单仓</b>才会落盘；托管地址不变，客户端重新拉订阅即生效。
+          </span>
+        </div>
+        <div class="form-row">
+          <label></label>
+          <textarea v-model="editSrc.content" rows="16" spellcheck="false"
+                    :placeholder="editConfigLoading ? '正在读取托管配置…' : ''"
+                    style="font-family:Consolas,monospace;font-size:12px;line-height:1.5"></textarea>
+        </div>
+        <div class="form-row">
+          <label></label>
+          <span class="muted">
+            {{ editSrc.content ? editSrc.content.length + ' 字符' : '（空）' }}
+            <template v-if="editSrc._sites"> · 当前解析：{{ editSrc._sites }} 站点</template>
+          </span>
+        </div>
+      </template>
       <div class="form-row"><label>分组</label><input v-model="editSrc.group" list="group-list"></div>
       <div class="form-row"><label>排序值</label><input type="number" v-model.number="editSrc.sort"><span class="muted">小的在前</span></div>
       <div class="form-row"><label>检测超时（秒）</label><input type="number" min="0" max="120" v-model.number="editSrc.timeoutSeconds" placeholder="0 = 用全局设置"><span class="muted">0=用全局；大仓库可放宽到 30-60</span></div>

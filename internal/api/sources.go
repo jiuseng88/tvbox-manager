@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"strings"
 	"sync"
+	"time"
 
 	"tvbox-manager/internal/checker"
 	"tvbox-manager/internal/model"
@@ -419,6 +420,9 @@ type updateSourceReq struct {
 	TimeoutSeconds *int    `json:"timeoutSeconds"` // 本条单独的探活超时，0=用全局
 	// ForceType 手动定型：""/"single"/"multi"。传 "" 表示恢复自动判定。
 	ForceType *string `json:"forceType"`
+	// Content 仅本地源（JSON 粘贴导入）可用：覆盖托管配置原文。
+	// 换地址不能与换内容同时提交——改地址等于脱离本地托管。
+	Content *string `json:"content"`
 }
 
 func (a *API) handleSourceUpdate(w http.ResponseWriter, r *http.Request) {
@@ -432,15 +436,60 @@ func (a *API) handleSourceUpdate(w http.ResponseWriter, r *http.Request) {
 	if !decodeJSON(w, r, &req) {
 		return
 	}
+	// 改地址与改内容不能一起提交：内容存在托管地址上，地址一换就得清理旧文件，
+	// 两边同时改会出现「内容写到了即将被删的文件里」这种半截状态。
+	if req.Content != nil {
+		if cur.Type != model.TypeLocal {
+			badRequest(w, "只有通过 JSON 粘贴导入的本地源才支持编辑配置内容")
+			return
+		}
+		if req.URL != nil {
+			if norm, err := parser.Normalize(*req.URL); err == nil && norm != cur.URL {
+				badRequest(w, "换地址与改配置内容不能同时提交：换地址后该源会脱离本地托管")
+				return
+			}
+		}
+	}
 	// 改地址前先查重：放行的话会出现两条同 URL 的源，站点源会被合成一条、
 	// 删掉其中一条又会把另一条的站点源一起摘掉
+	urlChanged := false
 	if req.URL != nil {
 		if norm, err := parser.Normalize(*req.URL); err == nil && norm != cur.URL {
+			urlChanged = true
 			if other, exists := a.st.GetByURL(norm); exists && other.ID != id {
 				writeErr(w, http.StatusConflict, 409, "该地址已存在（与另一个源重复）")
 				return
 			}
 		}
+	}
+	// 本地源编辑配置：先按导入同一套规则校验，通过了才覆盖托管文件。
+	// 严格校验（必须能解析成单仓）——订阅里不能出现客户端拉下来就报错的配置。
+	var newDetail *model.Detail
+	if req.Content != nil {
+		text := strings.TrimSpace(strings.TrimPrefix(*req.Content, "\ufeff"))
+		if text == "" {
+			badRequest(w, "配置内容为空")
+			return
+		}
+		if len(text) > maxJSONBody {
+			badRequest(w, fmt.Sprintf("内容超过 %dMB 上限", maxJSONBody>>20))
+			return
+		}
+		cleaned := string(parser.CleanJSON([]byte(text)))
+		typ, detail, perr := parser.Parse([]byte(cleaned))
+		if perr != nil {
+			badRequest(w, "配置内容无法解析："+perr.Error())
+			return
+		}
+		if typ != model.TypeSingle {
+			badRequest(w, "识别为多仓配置：本地源只能托管单仓配置（多仓请用「JSON 粘贴」新增一条源）")
+			return
+		}
+		if err := a.writePastedText(cur.URL, cleaned); err != nil {
+			serverError(w, fmt.Errorf("托管配置写入失败: %w", err))
+			return
+		}
+		newDetail = detail
 	}
 	err := a.st.Update(id, func(sp *model.Source) {
 		if req.Name != nil {
@@ -468,6 +517,8 @@ func (a *API) handleSourceUpdate(w http.ResponseWriter, r *http.Request) {
 				// 否则新地址第一次失败就可能撞上自动禁用阈值
 				sp.FailStreak = 0
 				sp.OKStreak = 0
+				// 本地源（JSON 粘贴导入）换地址 → 上面已回退为未定型，也就是变成
+				// 普通地址源，等下一轮探活定型；托管文件在 Update 之后清理。
 			}
 		}
 		if req.Group != nil {
@@ -504,10 +555,23 @@ func (a *API) handleSourceUpdate(w http.ResponseWriter, r *http.Request) {
 				sp.Type = model.TypeUnknown
 			}
 		}
+		// 编辑了托管配置：解析结果换成新的，列表摘要立即跟着变
+		// （站点源还是它自己的托管地址那一条，不受影响）
+		if newDetail != nil {
+			sp.Detail = newDetail
+			sp.Status = model.StatusOK
+			sp.CheckMsg = "本地源，无需检测"
+			now := time.Now()
+			sp.LastCheckAt = &now
+		}
 	})
 	if err != nil {
 		serverError(w, err)
 		return
+	}
+	// 本地源换了地址：原来的托管文件变成孤儿，顺手清掉
+	if urlChanged && cur.Type == model.TypeLocal && pastedNameOf(*req.URL) == "" {
+		a.cleanupPasted(cur.URL)
 	}
 	updated, _ := a.st.Get(id)
 	ok(w, updated)

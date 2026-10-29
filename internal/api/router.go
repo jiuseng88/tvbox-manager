@@ -57,6 +57,7 @@ func (a *API) Router() http.Handler {
 	apiMux.HandleFunc("POST /api/sources/{id}/toggle", a.handleSourceToggle)
 	apiMux.HandleFunc("POST /api/sources/{id}/restore", a.handleSourceRestore)
 	apiMux.HandleFunc("GET /api/sources/{id}/preview", a.handlePreviewStored)
+	apiMux.HandleFunc("GET /api/sources/{id}/config", a.handleSourceConfig)
 	apiMux.HandleFunc("POST /api/sources/{id}/check", a.handleCheckOne)
 	apiMux.HandleFunc("GET /api/groups", a.handleGroups)
 

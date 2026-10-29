@@ -289,7 +289,31 @@
 
       /* 编辑弹窗 */
       const editSrc = ref(null);
-      function openEdit(s) { editSrc.value = { ...s, _id: s.id, forceType: s.forceType || "" }; }
+      // 只有 JSON 粘贴导入的本地源能改配置原文：内容托管在本服务的 /configs/xxx.json 上，
+      // 其它源（普通地址、地址列表导入、多仓）没有可编辑的内容，弹窗里也就不显示该区块。
+      const editConfigLoading = ref(false);
+      function isLocalSource(s) { return !!s && s.type === "local"; }
+      async function openEdit(s) {
+        const local = isLocalSource(s);
+        editSrc.value = {
+          ...s, _id: s.id, forceType: s.forceType || "",
+          _isLocal: local, _origUrl: s.url, _sites: (s.detail && s.detail.sites) || 0,
+          content: "",
+        };
+        if (!local) return;
+        editConfigLoading.value = true;
+        try {
+          const d = await api("GET", "/api/sources/" + s.id + "/config");
+          if (editSrc.value && editSrc.value._id === s.id) {
+            editSrc.value.content = d.content || "";
+            editSrc.value._sites = (d.detail && d.detail.sites) || 0;
+          }
+        } catch (err) {
+          toast(err.message, "error");
+        } finally {
+          editConfigLoading.value = false;
+        }
+      }
       // 手动定型：某些地址探活一直失败/内容抓不全，系统分不清单仓多仓就不下发。
       // 用户确认了是什么，就在这里钉住，不必等探活成功。
       function forceTypeHint(e0) {
@@ -300,13 +324,24 @@
       }
       async function saveEdit() {
         const e0 = editSrc.value;
+        const body = {
+          name: e0.name, url: e0.url, group: e0.group, remark: e0.remark, sort: Number(e0.sort) || 0,
+          timeoutSeconds: Math.max(0, Math.min(120, Number(e0.timeoutSeconds) || 0)),
+          forceType: e0.forceType || "",
+        };
+        if (e0._isLocal) {
+          if (e0.url !== e0._origUrl) {
+            // 换地址 = 脱离本地托管，旧托管文件会被清理，不可恢复
+            if (!confirm("换地址后这条源会变成普通地址源，原托管配置将被删除且无法恢复。继续吗？")) return;
+          } else {
+            body.content = e0.content;
+          }
+        }
         try {
-          await api("PUT", "/api/sources/" + e0._id, {
-            name: e0.name, url: e0.url, group: e0.group, remark: e0.remark, sort: Number(e0.sort) || 0,
-            timeoutSeconds: Math.max(0, Math.min(120, Number(e0.timeoutSeconds) || 0)),
-            forceType: e0.forceType || "",
-          });
-          toast("已保存", "ok"); editSrc.value = null; loadSources(); loadGroups(); loadStats();
+          const d = await api("PUT", "/api/sources/" + e0._id, body);
+          const det = (d && d.detail) || null;
+          toast(det && det.sites ? `已保存（${det.sites} 站点 / ${det.lives} 直播）` : "已保存", "ok");
+          editSrc.value = null; loadSources(); loadGroups(); loadStats();
         } catch (err) { toast(err.message, "error"); }
       }
 
@@ -875,7 +910,7 @@
         flatSortArrow, toggleFlatSort,
         flatStatusText, flatStatusClass, toggleFlat, checkFlat, delFlat, flatBatchAction, batchCheckFlats,
         editFlat, openFlatEdit, saveFlatEdit, openFlatPreview,
-        batchBar, batchAction, editSrc, openEdit, saveEdit,
+        batchBar, batchAction, editSrc, openEdit, saveEdit, editConfigLoading,
         preview, openPreview, retryPreview, siteNamesExpanded, rawExpanded, batchCheck,
         addTab, singleForm, singlePreview, singlePreviewing, previewUrl, addSingle,
         batchText, batchResult, batchParsed, submitBatch,

@@ -58,6 +58,55 @@ func (a *API) cleanupPasted(srcURL string) {
 	_ = os.Remove(filepath.Join(a.PastedDir, name)) // 清理失败不打断删除流程
 }
 
+// pastedNameOf 从源地址反查托管文件名；不是托管地址（或名字不合规）返回空。
+// 托管地址形如 http://host:8080/configs/<16位hex>.json，除了文件名之外的部分
+// 由部署环境决定，不做前缀强校验，只认「路径最后一段是合法文件名」。
+func pastedNameOf(rawURL string) string {
+	i := strings.LastIndex(rawURL, pastedURLPrefix)
+	if i < 0 {
+		return ""
+	}
+	name := rawURL[i+len(pastedURLPrefix):]
+	if k := strings.IndexAny(name, "?#"); k >= 0 {
+		name = name[:k]
+	}
+	if !pastedNameRe.MatchString(name) {
+		return ""
+	}
+	return name
+}
+
+// readPastedText 读托管文件原文（供编辑弹窗回显）
+func (a *API) readPastedText(srcURL string) (string, error) {
+	name := pastedNameOf(srcURL)
+	if a.PastedDir == "" || name == "" {
+		return "", os.ErrNotExist
+	}
+	b, err := os.ReadFile(filepath.Join(a.PastedDir, name))
+	if err != nil {
+		return "", err
+	}
+	return string(b), nil
+}
+
+// writePastedText 原子覆盖托管文件：文件名不变 → 托管地址不变 →
+// 客户端的订阅地址不用改，重新拉一次就拿到新内容。
+func (a *API) writePastedText(srcURL, text string) error {
+	name := pastedNameOf(srcURL)
+	if a.PastedDir == "" || name == "" {
+		return os.ErrNotExist
+	}
+	if err := os.MkdirAll(a.PastedDir, 0o755); err != nil {
+		return err
+	}
+	dst := filepath.Join(a.PastedDir, name)
+	tmp := dst + ".tmp"
+	if err := os.WriteFile(tmp, []byte(text), 0o644); err != nil {
+		return err
+	}
+	return os.Rename(tmp, dst)
+}
+
 // isLocalURL 地址是否属于本地托管源（本地源不参与检测，始终可用）
 func (a *API) isLocalURL(rawURL string) bool {
 	norm, err := parser.Normalize(rawURL)
@@ -68,6 +117,30 @@ func (a *API) isLocalURL(rawURL string) bool {
 		return src.Type == model.TypeLocal
 	}
 	return false
+}
+
+// handleSourceConfig GET /api/sources/{id}/config：回显托管配置原文，供编辑弹窗用。
+// 只有「JSON 粘贴导入」的本地源才有可编辑的配置内容，其它源一律拒绝。
+func (a *API) handleSourceConfig(w http.ResponseWriter, r *http.Request) {
+	src, found := a.st.Get(r.PathValue("id"))
+	if !found {
+		notFound(w, "源不存在")
+		return
+	}
+	if src.Type != model.TypeLocal {
+		badRequest(w, "只有通过 JSON 粘贴导入的本地源才支持编辑配置内容")
+		return
+	}
+	text, err := a.readPastedText(src.URL)
+	if err != nil {
+		notFound(w, "托管配置不存在（文件可能已被清理）")
+		return
+	}
+	ok(w, map[string]interface{}{
+		"content": text,
+		"size":    len(text),
+		"detail":  src.Detail,
+	})
 }
 
 // handlePastedConfig GET /configs/{name}：对外提供托管配置（无鉴权，与订阅一致）。
