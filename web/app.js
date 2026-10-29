@@ -2,7 +2,7 @@
 (function () {
   "use strict";
 
-  const { createApp, ref, reactive, computed, onMounted, watch } = Vue;
+  const { createApp, ref, reactive, computed, onMounted, watch, nextTick } = Vue;
 
   /* ---------- 工具 ---------- */
 
@@ -116,11 +116,29 @@
           if (progress.value.running) return; // 还在跑，下个周期继续
           stopPolling();                      // 跑完了：停表并刷新一次真实数据
           loadStats();
-          loadSources();
-          loadFlats();
+          loadSources(true);                  // 强制：丢掉检测前在途的旧响应
+          loadFlats(true);
         }, 2000);
       }
       function stopPolling() { if (pollTimer) { clearInterval(pollTimer); pollTimer = null; } }
+
+      // 单条 / 批量检测是异步的：接口立刻返回，后端要等探测结束才落库状态。
+      // 以前只在 3 秒后刷一次列表，慢源（超时 20-60 秒）就一直卡在「检测中」，
+      // 用户以为没生效、或者看到的是检测前的旧状态。这里盯住 stats 的 checking
+      // 计数（含仓源层），归零就停，最多盯 5 分钟。
+      let watchTimer = null;
+      function watchChecking() {
+        stopWatching();
+        let ticks = 0;
+        watchTimer = setInterval(async () => {
+          ticks++;
+          const reload = view.value === "flats" ? loadFlats(true) : loadSources(true);
+          await Promise.all([reload, loadStats()]);
+          const pending = (stats.value.checking || 0) + (stats.value.flatChecking || 0);
+          if (pending === 0 || ticks >= 150) stopWatching();
+        }, 2000);
+      }
+      function stopWatching() { if (watchTimer) { clearInterval(watchTimer); watchTimer = null; } }
       async function runCheckAll() {
         try {
           await api("POST", "/api/check/run");
@@ -142,13 +160,18 @@
       let searchDebounce = null;
       let sourceReqSeq = 0; // 请求序号：翻页/轮询并发时只采纳最新响应，防止旧响应覆盖新页内容
       let sourceInflight = null; // 参数相同的并发请求合并成一次（{qs, p}）
+      const refreshingSources = ref(false);
+      const sourcesSyncedAt = ref(0); // 列表最后一次成功同步的时间戳（展示「更新于」）
 
-      async function loadSources() {
+      // force=true：不吃在途合并、并推进序号让在途旧响应作废。
+      // 手动刷新和「检测后自愈」都必须走这条路 —— 否则刚检测完点刷新，
+      // 拿回来的还是检测前那次请求的结果，看起来就是「列表状态对不上」。
+      async function loadSources(force = false) {
         const q = new URLSearchParams();
         Object.keys(filters).forEach(k => { if (filters[k] !== "" && filters[k] != null) q.set(k, filters[k]); });
         const qs = q.toString();
         // 同一次操作可能同时触发「筛选变化」和「切换视图」两个 watch，参数一样就等前一个的结果
-        if (sourceInflight && sourceInflight.qs === qs) return sourceInflight.p;
+        if (!force && sourceInflight && sourceInflight.qs === qs) return sourceInflight.p;
         const p = (async () => {
           const seq = ++sourceReqSeq;
           try {
@@ -156,6 +179,7 @@
             if (seq !== sourceReqSeq) return; // 已有更新的请求在途，丢弃本次旧响应
             list.value = data.list || [];
             total.value = data.total || 0;
+            sourcesSyncedAt.value = Date.now();
             checked.value = checked.value.filter(id => list.value.some(s => s.id === id));
             // 数据变少导致当前页越界时，自动回到最后一页重载
             const maxPage = Math.max(1, Math.ceil(total.value / filters.size));
@@ -167,6 +191,13 @@
         })();
         sourceInflight = { qs, p };
         try { await p; } finally { if (sourceInflight && sourceInflight.p === p) sourceInflight = null; }
+      }
+      // 刷新按钮：列表 + 概览数字一起重拉，按钮期间显示「刷新中…」给个反馈
+      async function refreshSources() {
+        if (refreshingSources.value) return;
+        refreshingSources.value = true;
+        try { await Promise.all([loadSources(true), loadStats(), loadGroups()]); }
+        finally { refreshingSources.value = false; }
       }
       async function loadGroups() {
         try { groups.value = await api("GET", "/api/groups"); } catch (e) { /* 忽略 */ }
@@ -250,7 +281,7 @@
           await api("POST", "/api/sources/" + s.id + "/check");
           s.status = "checking";
           toast("正在检测 " + s.name, "info");
-          setTimeout(loadSources, 2500);
+          watchChecking(); // 盯到后端落库为止，不再靠一次 2.5 秒后的刷新碰运气
         } catch (e) { toast(e.message, "error"); }
       }
       function delSource(s) {
@@ -371,19 +402,66 @@
         }
         toast(`已发起 ${ids.length} 条检测`, "ok");
         checked.value = [];
-        setTimeout(loadSources, 3000);
+        watchChecking();
       }
       const siteNamesExpanded = ref(false);
       const rawExpanded = ref(false);
 
-      function copyText(text) {
-        navigator.clipboard.writeText(text).then(
-          () => toast("已复制", "ok"),
-          () => {
-            const ta = document.createElement("textarea");
-            ta.value = text; document.body.appendChild(ta); ta.select();
-            document.execCommand("copy"); ta.remove(); toast("已复制", "ok");
-          });
+      // 复制到剪贴板：三步走，任一步成功就提示「已复制」。
+      //  1) Clipboard API —— 只在安全上下文（https / localhost）可用
+      //  2) execCommand('copy') 兜底 —— 用 http + IP 访问时只能靠它
+      //  3) 都失败 → 弹出手动复制框，内容已全选，按 Ctrl+C 即可
+      // 老实现的坑：① navigator.clipboard 在 http+IP 下是 undefined，直接抛
+      // TypeError 连兜底都不执行（点了完全没反应，也没有提示）；② 兜底分支
+      // 不看 execCommand 的返回值，失败照样提示「已复制」（说复制了其实没复制）。
+      const manualCopy = ref("");
+      function legacyCopy(text) {
+        const ta = document.createElement("textarea");
+        ta.value = text;
+        ta.setAttribute("readonly", "");
+        // 留在视口内、透明度 0：iOS/Safari 对 display:none 或移出视口的元素拒绝选中
+        ta.style.position = "fixed";
+        ta.style.top = "0";
+        ta.style.left = "-9999px";
+        ta.style.opacity = "0";
+        document.body.appendChild(ta);
+        ta.focus();
+        ta.select();
+        ta.setSelectionRange(0, text.length);
+        let ok = false;
+        try { ok = document.execCommand("copy"); } catch (e) { ok = false; }
+        ta.remove();
+        return ok;
+      }
+      async function copyText(text) {
+        const s = text == null ? "" : String(text);
+        if (!s) { toast("没有可复制的内容", "warn"); return; }
+        if (window.isSecureContext && navigator.clipboard && navigator.clipboard.writeText) {
+          try {
+            await navigator.clipboard.writeText(s);
+            toast("已复制", "ok");
+            return;
+          } catch (e) { /* 权限被拒 / 文档失焦 → 走兜底 */ }
+        }
+        if (legacyCopy(s)) { toast("已复制", "ok"); return; }
+        manualCopy.value = s; // 最后兜底：给个全选的框让用户自己按 Ctrl+C
+        toast("浏览器拦住了自动复制，请在弹出的框里按 Ctrl+C", "warn");
+      }
+      function closeManualCopy() { manualCopy.value = ""; }
+      // 手动复制兜底框弹出后自动聚焦并全选，用户按 Ctrl+C / ⌘C 即可
+      watch(manualCopy, (v) => {
+        if (!v) return;
+        nextTick(() => {
+          const el = document.getElementById("manual-copy-ta");
+          if (el) { el.focus(); el.select(); }
+        });
+      });
+      // 列表「更新于 HH:MM:SS」：让人一眼看出数据是不是新鲜的
+      function clockTime(ts) {
+        if (!ts) return "";
+        const d = new Date(ts);
+        const p = n => String(n).padStart(2, "0");
+        return `${p(d.getHours())}:${p(d.getMinutes())}:${p(d.getSeconds())}`;
       }
 
       /* ---- 站点源（平铺层，订阅数据源） ---- */
@@ -395,14 +473,16 @@
       let flatSearchDebounce = null;
       let flatReqSeq = 0; // 请求序号：同 loadSources，防止旧响应覆盖新页内容
       let flatInflight = null; // 参数相同的并发请求合并成一次（{qs, p}）
+      const refreshingFlats = ref(false);
+      const flatsSyncedAt = ref(0);
 
-      async function loadFlats() {
+      async function loadFlats(force = false) {
         const q = new URLSearchParams();
         Object.keys(flatFilters).forEach(k => { if (flatFilters[k] !== "" && flatFilters[k] != null) q.set(k, flatFilters[k]); });
         const qs = q.toString();
         // 同一次操作可能同时触发「筛选变化」和「切换视图」两个 watch，
-        // 参数一样就直接等前一个的结果，不再发一遍。
-        if (flatInflight && flatInflight.qs === qs) return flatInflight.p;
+        // 参数一样就直接等前一个的结果，不再发一遍（force 时不吃这个合并）。
+        if (!force && flatInflight && flatInflight.qs === qs) return flatInflight.p;
         const p = (async () => {
           const seq = ++flatReqSeq;
           try {
@@ -410,6 +490,7 @@
             if (seq !== flatReqSeq) return; // 已有更新的请求在途，丢弃本次旧响应
             flatList.value = data.list || [];
             flatsTotal.value = data.total || 0;
+            flatsSyncedAt.value = Date.now();
             flatChecked.value = flatChecked.value.filter(id => flatList.value.some(f => f.id === id));
             // 数据变少导致当前页越界时，自动回到最后一页重载
             const maxPage = Math.max(1, Math.ceil(flatsTotal.value / flatFilters.size));
@@ -421,6 +502,12 @@
         })();
         flatInflight = { qs, p };
         try { await p; } finally { if (flatInflight && flatInflight.p === p) flatInflight = null; }
+      }
+      async function refreshFlats() {
+        if (refreshingFlats.value) return;
+        refreshingFlats.value = true;
+        try { await Promise.all([loadFlats(true), loadStats(), loadFlatGroups()]); }
+        finally { refreshingFlats.value = false; }
       }
       async function loadFlatGroups() {
         try { flatGroups.value = await api("GET", "/api/flats/groups"); } catch (e) { /* 忽略 */ }
@@ -815,13 +902,8 @@
         } catch (e) { toast(e.message, "error"); }
       }
       async function copyBackup() {
-        try { await navigator.clipboard.writeText(backupJson.value || ""); toast("已复制到剪贴板", "ok"); }
-        catch (e) {
-          // 剪贴板 API 不可用时降级：选中文本提示手动复制
-          const ta = document.querySelector(".modal textarea");
-          if (ta) { ta.focus(); ta.select(); toast("已全选，请按 Ctrl+C 复制", "info"); }
-          else toast("复制失败", "error");
-        }
+        // 统一走 copyText：http+IP 访问时 navigator.clipboard 根本不存在，只能靠兜底
+        await copyText(backupJson.value || "");
       }
       function downloadBackup() {
         const blob = new Blob([backupJson.value || ""], { type: "application/json" });
@@ -903,9 +985,12 @@
         view, needLogin, tokenInput, toasts, toast, relTime, absTime, fmtBytes, copyText,
         stats, progress, groupDist, runCheckAll, loadStats,
         list, total, filters, groups, checked, summary, pages, loadSources, loadGroups, applyFilter,
+        refreshSources, refreshingSources, sourcesSyncedAt,
         sortArrow, toggleSort,
         toggleSource, checkOne, delSource,
         flatList, flatsTotal, flatFilters, flatGroups, flatChecked, flatPages, loadFlats, loadFlatGroups, applyFlatFilter, gotoSource, gotoFlat,
+        refreshFlats, refreshingFlats, flatsSyncedAt,
+        manualCopy, closeManualCopy, clockTime,
         gotoNotInSub, subHint, restoreSource, restoreAllMissing, forceTypeHint,
         flatSortArrow, toggleFlatSort,
         flatStatusText, flatStatusClass, toggleFlat, checkFlat, delFlat, flatBatchAction, batchCheckFlats,

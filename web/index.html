@@ -124,8 +124,13 @@
       <!-- ===== 源列表 ===== -->
       <section v-if="view==='sources'">
         <div class="list-head">
-          <h2>源列表 <span class="muted">（{{ total }} 条）</span></h2>
-          <button class="btn primary" @click="openAddModal">➕ 添加源</button>
+          <h2>源列表 <span class="muted">（{{ total }} 条）<template v-if="sourcesSyncedAt">· 更新于 {{ clockTime(sourcesSyncedAt) }}</template></span></h2>
+          <div style="display:flex;gap:8px">
+            <button class="btn" @click="refreshSources" :disabled="refreshingSources" title="重新拉取列表与统计（检测是异步的，状态可能延后落库）">
+              {{ refreshingSources ? '刷新中…' : '↻ 刷新' }}
+            </button>
+            <button class="btn primary" @click="openAddModal">➕ 添加源</button>
+          </div>
         </div>
         <div class="toolbar">
           <input v-model="filters.keyword" placeholder="搜索名称 / 地址 / 备注" class="grow">
@@ -245,8 +250,8 @@
       <!-- ===== 所有仓源（平铺层，订阅数据源） ===== -->
       <section v-if="view==='flats'">
         <div class="list-head">
-          <h2>所有仓源 <span class="muted">（{{ flatsTotal }} 条）</span></h2>
-          <button class="btn" @click="loadFlats(); loadFlatGroups()">刷新</button>
+          <h2>所有仓源 <span class="muted">（{{ flatsTotal }} 条）<template v-if="flatsSyncedAt">· 更新于 {{ clockTime(flatsSyncedAt) }}</template></span></h2>
+          <button class="btn" @click="refreshFlats" :disabled="refreshingFlats">{{ refreshingFlats ? '刷新中…' : '↻ 刷新' }}</button>
         </div>
         <div class="muted" style="margin-bottom:8px">
           由源列表自动平铺生成：多仓拆为子仓、单仓并入自身；订阅接口输出这里「生效启用」的条目。
@@ -595,6 +600,20 @@
       <div class="form-actions">
         <button class="btn" @click="copyBackup">复制内容</button>
         <button class="btn primary" @click="downloadBackup">下载文件</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- ===== 手动复制兜底弹窗（浏览器拒绝自动写剪贴板时） ===== -->
+  <div class="modal-mask" v-if="manualCopy" @click.self="closeManualCopy">
+    <div class="modal wide">
+      <div class="modal-title">手动复制<button class="close" @click="closeManualCopy">✕</button></div>
+      <div class="muted" style="margin-bottom:8px">
+        浏览器拒绝了自动复制（常见于用 http + IP 访问后台）。下面内容已全选，按 <b>Ctrl+C</b>（Mac：⌘C）即可。
+      </div>
+      <textarea id="manual-copy-ta" readonly rows="6" :value="manualCopy" style="font-family:Consolas,monospace;font-size:12px"></textarea>
+      <div class="form-actions">
+        <button class="btn primary" @click="closeManualCopy">关闭</button>
       </div>
     </div>
   </div>
