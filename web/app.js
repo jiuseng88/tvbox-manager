@@ -132,7 +132,10 @@
         let ticks = 0;
         watchTimer = setInterval(async () => {
           ticks++;
-          const reload = view.value === "flats" ? loadFlats(true) : loadSources(true);
+          const reload = view.value === "flats" ? loadFlats(true)
+            : view.value === "live" ? loadLives(true)
+            : loadSources(true);
+          if (view.value === "live") loadLiveGroups();
           await Promise.all([reload, loadStats()]);
           const pending = (stats.value.checking || 0) + (stats.value.flatChecking || 0);
           if (pending === 0 || ticks >= 150) stopWatching();
@@ -716,6 +719,182 @@
           setTimeout(loadFlats, 3000);
         } catch (e) { toast(e.message, "error"); }
       }
+
+      /* ---- 直播源（独立维护，/tv 直播页的频道来源） ---- */
+      const liveList = ref([]);
+      const liveTotal = ref(0);
+      const liveLoading = ref(false);
+      const liveFilters = reactive({ keyword: "", status: "", group: "", origin: "", enabled: "", page: 1, size: 50 });
+      const liveGroups = ref([]);
+      const liveChecked = ref([]);
+      let liveSearchDebounce = null;
+      let liveReqSeq = 0;
+      let liveWatchTimer = null;
+
+      async function loadLives(force) {
+        if (liveLoading.value && !force) return;
+        liveLoading.value = true;
+        const q = new URLSearchParams();
+        Object.keys(liveFilters).forEach(k => {
+          if (liveFilters[k] !== "" && liveFilters[k] != null) q.set(k, liveFilters[k]);
+        });
+        const seq = ++liveReqSeq;
+        try {
+          const data = await api("GET", "/api/live/sources?" + q.toString());
+          if (seq !== liveReqSeq) return; // 有更新的请求在途，丢弃旧响应
+          liveList.value = data.list || [];
+          liveTotal.value = data.total || 0;
+          liveChecked.value = liveChecked.value.filter(id => liveList.value.some(x => x.id === id));
+          const maxPage = Math.max(1, Math.ceil(liveTotal.value / liveFilters.size));
+          if (!liveList.value.length && liveFilters.page > maxPage) {
+            liveFilters.page = maxPage;
+            return loadLives(true);
+          }
+        } catch (e) {
+          if (seq === liveReqSeq) toast(e.message, "error");
+        } finally {
+          if (seq === liveReqSeq) liveLoading.value = false;
+        }
+      }
+      async function loadLiveGroups() {
+        try { liveGroups.value = await api("GET", "/api/live/groups"); } catch (e) { /* 忽略 */ }
+      }
+      function applyLiveFilter() { liveFilters.page = 1; if (view.value === "live") loadLives(true); }
+      watch(() => liveFilters.keyword, () => {
+        clearTimeout(liveSearchDebounce);
+        liveSearchDebounce = setTimeout(applyLiveFilter, 300);
+      });
+      watch(() => [liveFilters.status, liveFilters.group, liveFilters.origin, liveFilters.enabled], applyLiveFilter);
+      function livePages() { return Math.max(1, Math.ceil(liveTotal.value / liveFilters.size)); }
+      function liveStatusText(x) {
+        if (!x.enabled) return "已禁用";
+        return { ok: "可用", fail: "不可用", checking: "检测中" }[x.status] || "未检测";
+      }
+      function liveStatusClass(x) { return x.enabled ? (x.status || "") : "off"; }
+
+      // 检测是异步的（拉列表 + 抽样 20 个频道，慢源要十几秒），盯着 checking 消失再停
+      function watchLiveChecking() {
+        if (liveWatchTimer) clearInterval(liveWatchTimer);
+        let ticks = 0;
+        liveWatchTimer = setInterval(async () => {
+          ticks++;
+          await loadLives(true);
+          const pending = liveList.value.some(x => x.status === "checking");
+          if (!pending || ticks >= 80) { clearInterval(liveWatchTimer); liveWatchTimer = null; }
+        }, 3000);
+      }
+      async function toggleLive(x) {
+        try {
+          await api("POST", "/api/live/sources/" + x.id + "/toggle");
+          x.enabled = !x.enabled;
+        } catch (e) { toast(e.message, "error"); }
+      }
+      async function checkLive(x) {
+        try {
+          await api("POST", "/api/live/sources/" + x.id + "/check");
+          x.status = "checking";
+          toast("正在检测「" + x.name + "」：拉列表 + 抽样 20 个频道", "info");
+          watchLiveChecking();
+        } catch (e) { toast(e.message, "error"); }
+      }
+      function delLive(x) {
+        const tip = x.origin === "auto" ? "\n\n这是自动同步的条目：删除后父源再次同步也不会加回来。" : "";
+        if (!confirm("确认删除直播源「" + x.name + "」？" + tip)) return;
+        api("DELETE", "/api/live/sources/" + x.id).then(() => {
+          toast("已删除", "ok"); loadLives(true); loadLiveGroups();
+        }).catch(e => toast(e.message, "error"));
+      }
+      async function liveBatchAction(action) {
+        let group = "";
+        if (action === "group") { group = prompt("移入分组名称：", "新分组"); if (!group) return; }
+        if (action === "delete" && !confirm("确认删除选中的 " + liveChecked.value.length + " 个直播源？")) return;
+        const ids = [...liveChecked.value];
+        try {
+          const r = await api("POST", "/api/live/sources/batch-action", { ids, action, group });
+          const label = { enable: "启用", disable: "禁用", group: "移组", delete: "删除" }[action] || action;
+          toast("批量" + label + "完成：" + r.affected + " 条", "ok");
+          liveChecked.value = [];
+          loadLives(true); loadLiveGroups();
+        } catch (e) { toast(e.message, "error"); }
+      }
+      async function batchCheckLives() {
+        const ids = [...liveChecked.value];
+        if (!ids.length) { toast("先勾选要检测的直播源", "warn"); return; }
+        try {
+          const r = await api("POST", "/api/live/sources/batch-check", { ids });
+          toast("已发起 " + r.started + " 条检测", "ok");
+          liveList.value.forEach(x => { if (ids.includes(x.id)) x.status = "checking"; });
+          liveChecked.value = [];
+          watchLiveChecking();
+        } catch (e) { toast(e.message, "error"); }
+      }
+
+      /* ---- 添加直播源弹窗 ---- */
+      const liveAdd = reactive({
+        open: false, tab: "batch", text: "", name: "", url: "", group: "", remark: "",
+        check: true, saving: false, parsing: false, lines: [], valid: 0, invalid: 0,
+      });
+      function openLiveAdd() {
+        Object.assign(liveAdd, {
+          open: true, tab: "batch", text: "", name: "", url: "", group: "", remark: "",
+          check: true, saving: false, parsing: false, lines: [], valid: 0, invalid: 0,
+        });
+        loadLiveGroups();
+      }
+      async function previewLiveBatch() {
+        if (!liveAdd.text.trim()) { toast("先粘贴内容", "warn"); return; }
+        liveAdd.parsing = true;
+        try {
+          const r = await api("POST", "/api/live/sources/batch", { text: liveAdd.text, dryRun: true });
+          liveAdd.lines = r.lines || [];
+          liveAdd.valid = r.valid || 0;
+          liveAdd.invalid = (r.total || 0) - (r.valid || 0);
+        } catch (e) { toast(e.message, "error"); }
+        finally { liveAdd.parsing = false; }
+      }
+      async function submitLiveAdd() {
+        liveAdd.saving = true;
+        try {
+          if (liveAdd.tab === "batch") {
+            if (!liveAdd.text.trim()) { toast("先粘贴内容", "warn"); return; }
+            const r = await api("POST", "/api/live/sources/batch", {
+              text: liveAdd.text, group: liveAdd.group, check: liveAdd.check,
+            });
+            const skip = (r.skipped || []).length;
+            toast("已添加 " + r.added + " 条" + (skip ? "，跳过 " + skip + " 条（地址重复）" : ""), "ok");
+          } else {
+            if (!liveAdd.url.trim()) { toast("地址不能为空", "warn"); return; }
+            await api("POST", "/api/live/sources", {
+              name: liveAdd.name, url: liveAdd.url, group: liveAdd.group,
+              remark: liveAdd.remark, check: liveAdd.check,
+            });
+            toast("已添加", "ok");
+          }
+          liveAdd.open = false;
+          liveFilters.page = 1;
+          loadLives(true); loadLiveGroups();
+          if (liveAdd.check) watchLiveChecking();
+        } catch (e) { toast(e.message, "error"); }
+        finally { liveAdd.saving = false; }
+      }
+
+      /* ---- 编辑直播源弹窗 ---- */
+      const liveEdit = ref(null);
+      function openLiveEdit(x) { liveEdit.value = { ...x }; }
+      async function saveLiveEdit() {
+        const x = liveEdit.value;
+        try {
+          await api("PUT", "/api/live/sources/" + x.id, {
+            name: x.name, url: x.url, group: x.group, remark: x.remark,
+            sort: Number(x.sort) || 0,
+            timeoutSeconds: Math.max(0, Math.min(120, Number(x.timeoutSeconds) || 0)),
+          });
+          toast("已保存", "ok");
+          liveEdit.value = null;
+          loadLives(true); loadLiveGroups();
+        } catch (e) { toast(e.message, "error"); }
+      }
+
       const editFlat = ref(null);
       function openFlatEdit(f) { editFlat.value = { ...f, _id: f.id }; }
       async function saveFlatEdit() {
@@ -1050,6 +1229,7 @@
         }
         if (v === "sources") { loadSources(); loadGroups(); }
         if (v === "flats") { loadFlats(); loadFlatGroups(); }
+        if (v === "live") { loadLives(true); loadLiveGroups(); }
         if (v === "settings") loadConfig();
       });
       // api() 的 401 门控指向本组件
@@ -1067,6 +1247,9 @@
         gotoNotInSub, subHint, restoreSource, restoreAllMissing, forceTypeHint,
         flatSortArrow, toggleFlatSort,
         flatStatusText, flatStatusClass, toggleFlat, checkFlat, delFlat, flatBatchAction, batchCheckFlats,
+        liveList, liveTotal, liveLoading, liveFilters, liveGroups, liveChecked, livePages, loadLives, loadLiveGroups,
+        applyLiveFilter, liveStatusText, liveStatusClass, toggleLive, checkLive, delLive, liveBatchAction, batchCheckLives,
+        liveAdd, openLiveAdd, previewLiveBatch, submitLiveAdd, liveEdit, openLiveEdit, saveLiveEdit,
         editFlat, openFlatEdit, saveFlatEdit, openFlatPreview,
         batchBar, batchAction, editSrc, openEdit, saveEdit, editConfigLoading,
         editConfigError, editParsed, editContentDirty, onContentInput, formatContent, retryLoadConfig,

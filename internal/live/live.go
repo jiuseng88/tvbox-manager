@@ -184,7 +184,12 @@ func parseM3U(text string, base *url.URL, source string) []Channel {
 		}
 		name := pendingName
 		if name == "" {
-			name = guessNameFromURL(u)
+			// 没有 #EXTINF 的媒体清单（直接贴一个 m3u8 地址）拿不到频道名，
+			// 用源名称兜底，否则频道列表里会显示成一串主机名
+			name = source
+			if name == "" {
+				name = guessNameFromURL(u)
+			}
 		}
 		group := pendingGroup
 		if group == "" {
@@ -296,7 +301,10 @@ func parseJSON(text string, base *url.URL, source string) []Channel {
 			}
 			name := strings.TrimSpace(it.Name)
 			if name == "" {
-				name = guessNameFromURL(u)
+				name = source
+				if name == "" {
+					name = guessNameFromURL(u)
+				}
 			}
 			out = append(out, Channel{Group: group, Name: name, URLs: []string{u}, Logo: it.Logo, Source: source})
 		}

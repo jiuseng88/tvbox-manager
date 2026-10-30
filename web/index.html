@@ -33,6 +33,7 @@
         <div class="nav-item" :class="{active: view==='dashboard'}" @click="view='dashboard'">📊 概览</div>
         <div class="nav-item" :class="{active: view==='sources'}" @click="view='sources'">📋 源列表</div>
         <div class="nav-item" :class="{active: view==='flats'}" @click="view='flats'">🔗 所有仓源</div>
+        <div class="nav-item" :class="{active: view==='live'}" @click="view='live'">📺 直播源</div>
         <div class="nav-item" @click="openTv">🎬 看片（/tv）</div>
         <div class="nav-item" :class="{active: view==='settings'}" @click="view='settings'">⚙️ 设置</div>
       </nav>
@@ -356,6 +357,128 @@
           <button class="btn xs danger" @click="flatBatchAction('delete')">批量删除</button>
           <span class="grow"></span>
           <button class="btn xs ghost" @click="flatChecked=[]">取消</button>
+        </div>
+      </section>
+
+
+      <!-- ===== 直播源 ===== -->
+      <section v-if="view==='live'">
+        <div class="list-head">
+          <h2>直播源 <span class="muted">（{{ liveTotal }} 条）</span></h2>
+          <div class="row">
+            <button class="btn primary" @click="openLiveAdd">＋ 添加直播源</button>
+            <button class="btn" @click="loadLives(true)" :disabled="liveLoading">{{ liveLoading ? '加载中…' : '↻ 刷新' }}</button>
+          </div>
+        </div>
+        <div class="muted" style="margin-bottom:8px">
+          直播频道来自这里的 m3u / txt / json 播放列表。标记「自动」的条目由源列表里的
+          <code>lives</code> 配置解析同步生成，也可以手动添加；只有「启用」且检测未失效的条目会进入
+          <a @click="openTv" class="link">/tv 直播页</a>。
+          检测 = 拉取播放列表 + 按分组抽样 20 个频道验证可用性。
+        </div>
+        <div class="toolbar">
+          <input v-model="liveFilters.keyword" placeholder="搜索名称 / 地址 / 备注" class="grow">
+          <select v-model="liveFilters.status">
+            <option value="">全部状态</option><option value="ok">可用</option>
+            <option value="fail">失效</option><option value="checking">检测中</option>
+            <option value="unknown">未检测</option>
+          </select>
+          <select v-model="liveFilters.group">
+            <option value="">全部分组</option>
+            <option v-for="g in liveGroups" :key="g" :value="g">{{ g }}</option>
+          </select>
+          <select v-model="liveFilters.origin">
+            <option value="">全部来源</option><option value="auto">自动同步</option><option value="manual">手动添加</option>
+          </select>
+          <select v-model="liveFilters.enabled">
+            <option value="">生效+禁用</option><option value="true">仅生效</option><option value="false">仅禁用</option>
+          </select>
+        </div>
+
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th class="w-check"><input type="checkbox" :checked="liveList.length && liveChecked.length===liveList.length"
+                  @change="liveChecked = $event.target.checked ? liveList.map(x=>x.id) : []"></th>
+                <th class="w-num">#</th>
+                <th>状态</th>
+                <th>名称</th>
+                <th class="grow">地址</th>
+                <th>来源</th>
+                <th>分组</th>
+                <th>频道</th>
+                <th>抽样可用</th>
+                <th>最后检测</th>
+                <th>延迟</th>
+                <th>启用</th>
+                <th>操作</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr v-for="(x, i) in liveList" :key="x.id" :class="{disabled: !x.enabled}">
+                <td><input type="checkbox" :value="x.id" v-model="liveChecked"></td>
+                <td class="muted w-num">{{ (liveFilters.page-1)*liveFilters.size + i + 1 }}</td>
+                <td>
+                  <span class="dot" :class="x.enabled ? x.status : ''" :title="x.checkMsg + '｜' + (x.latencyMs||0) + 'ms'"></span>
+                  <span class="st-text" :class="liveStatusClass(x)">{{ liveStatusText(x) }}</span>
+                  <span v-if="x.status==='checking' && x.enabled" class="spinner"></span>
+                </td>
+                <td><a @click="openLiveEdit(x)" class="link">{{ x.name }}</a></td>
+                <td class="url-cell" :title="x.url" @click="copyText(x.url)">{{ x.url }}</td>
+                <td>
+                  <span class="tag from" v-if="x.origin==='auto'"
+                    :title="'来自：' + ((x.parentNames||[]).join('、') || '父源已删除（孤儿条目）')">
+                    自动<template v-if="(x.parentNames||[]).length">·{{ x.parentNames.length }}</template>
+                  </span>
+                  <span class="tag" v-else>手动</span>
+                </td>
+                <td><span class="tag group">{{ x.group }}</span></td>
+                <td class="muted" :title="'分组数 ' + (x.groupCount||0)">{{ x.channelCount || '—' }}</td>
+                <td :class="{failnum: x.sampleCount && !x.aliveCount}" :title="x.checkMsg">
+                  <template v-if="x.sampleCount">{{ x.aliveCount }}/{{ x.sampleCount }}</template>
+                  <span v-else class="muted">—</span>
+                </td>
+                <td :title="absTime(x.lastCheckAt)">{{ relTime(x.lastCheckAt) }}</td>
+                <td :class="{slow: x.latencyMs > 3000}">{{ x.status==='ok' ? x.latencyMs + 'ms' : '—' }}</td>
+                <td><switch-box :on="x.enabled" @toggle="toggleLive(x)"></switch-box></td>
+                <td class="ops">
+                  <button class="btn xs" @click="checkLive(x)">检测</button>
+                  <button class="btn xs" @click="openLiveEdit(x)">编辑</button>
+                  <button class="btn xs danger" @click="delLive(x)">删除</button>
+                </td>
+              </tr>
+              <tr v-if="!liveList.length">
+                <td colspan="13" class="empty">
+                  还没有直播源 —— 点右上「＋ 添加直播源」手动添加，或到源列表跑一轮检测，自动从 <code>lives</code> 配置同步
+                </td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+
+        <div class="pager" v-if="liveTotal > 0">
+          <button class="btn xs" :disabled="liveFilters.page<=1" @click="liveFilters.page--; loadLives(true)">上一页</button>
+          <span class="pager-total">共 {{ liveTotal }} 条</span>
+          <span>{{ liveFilters.page }} / {{ livePages() }}</span>
+          <button class="btn xs" :disabled="liveFilters.page>=livePages()" @click="liveFilters.page++; loadLives(true)">下一页</button>
+          <select v-model.number="liveFilters.size" @change="applyLiveFilter" title="每页条数">
+            <option :value="20">20 条/页</option>
+            <option :value="50">50 条/页</option>
+            <option :value="100">100 条/页</option>
+            <option :value="200">200 条/页</option>
+          </select>
+        </div>
+
+        <div class="batch-bar" v-if="liveChecked.length">
+          已选 {{ liveChecked.length }} 条
+          <button class="btn xs" @click="liveBatchAction('enable')">批量启用</button>
+          <button class="btn xs" @click="liveBatchAction('disable')">批量禁用</button>
+          <button class="btn xs" @click="liveBatchAction('group')">批量移组</button>
+          <button class="btn xs primary" @click="batchCheckLives()">批量检测</button>
+          <button class="btn xs danger" @click="liveBatchAction('delete')">批量删除</button>
+          <span class="grow"></span>
+          <button class="btn xs ghost" @click="liveChecked=[]">取消</button>
         </div>
       </section>
 
@@ -701,6 +824,105 @@
       <div class="form-actions">
         <button class="btn" @click="editFlat=null">取消</button>
         <button class="btn primary" @click="saveFlatEdit">保存</button>
+      </div>
+    </div>
+  </div>
+
+
+  <!-- ===== 添加直播源 ===== -->
+  <div class="modal-mask" v-if="liveAdd.open" @click.self="liveAdd.open=false">
+    <div class="modal wide">
+      <div class="modal-title">添加直播源<button class="close" @click="liveAdd.open=false">✕</button></div>
+      <div class="tabs">
+        <div class="tab" :class="{active: liveAdd.tab==='batch'}" @click="liveAdd.tab='batch'">多行添加</div>
+        <div class="tab" :class="{active: liveAdd.tab==='single'}" @click="liveAdd.tab='single'">单个添加</div>
+      </div>
+
+      <div class="panel" v-if="liveAdd.tab==='batch'">
+        <div class="form-row" style="display:block">
+          <label style="display:block;margin-bottom:6px">每行一条，三种写法可混排：</label>
+          <textarea v-model="liveAdd.text" rows="8" spellcheck="false" placeholder="名称,http://example.com/live.m3u8&#10;名称 http://example.com/live.txt&#10;http://example.com/live.m3u8"></textarea>
+          <div class="muted" style="margin-top:6px">
+            支持 <code>名称,地址</code> / <code>名称|地址</code> / <code>名称 地址</code> / 纯地址（名称自动取域名）。
+            地址可以带 <code>|User-Agent=..&amp;Referer=..</code> 防盗链参数。空行与 # 注释会被忽略。
+          </div>
+        </div>
+        <div class="form-row"><label>分组</label>
+          <input v-model="liveAdd.group" list="live-group-datalist" placeholder="留空为「默认」">
+          <datalist id="live-group-datalist"><option v-for="g in liveGroups" :key="g" :value="g"></option></datalist>
+        </div>
+        <div class="form-row">
+          <label>选项</label>
+          <label class="row" style="gap:6px;cursor:pointer;white-space:nowrap"><input type="checkbox" v-model="liveAdd.check"> 添加后立即检测</label>
+          <span class="grow"></span>
+          <button class="btn" @click="previewLiveBatch" :disabled="liveAdd.parsing">{{ liveAdd.parsing ? '解析中…' : '解析预览' }}</button>
+        </div>
+        <div class="preview-inline" v-if="liveAdd.lines.length">
+          共 <b>{{ liveAdd.lines.length }}</b> 行，有效 <b>{{ liveAdd.valid }}</b> 条
+          <span v-if="liveAdd.invalid" class="err">，无效 {{ liveAdd.invalid }} 条</span>
+        </div>
+        <div class="table-wrap" style="max-height:220px" v-if="liveAdd.lines.length">
+          <table>
+            <thead><tr><th class="w-num">行</th><th>名称</th><th class="grow">地址</th><th>结果</th></tr></thead>
+            <tbody>
+              <tr v-for="ln in liveAdd.lines" :key="ln.line" :class="{disabled: !ln.ok}">
+                <td class="muted w-num">{{ ln.line }}</td>
+                <td>{{ ln.name || '（自动取名）' }}</td>
+                <td class="url-cell" :title="ln.url || ln.raw">{{ ln.url || ln.raw }}</td>
+                <td>
+                  <span v-if="ln.ok" class="tag ok">有效</span>
+                  <span v-else class="err">{{ ln.reason }}</span>
+                </td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+      </div>
+
+      <div class="panel" v-if="liveAdd.tab==='single'">
+        <div class="form-row"><label>地址 *</label>
+          <input v-model="liveAdd.url" class="grow" placeholder="http://example.com/live.m3u8（可带 |User-Agent=.. 防盗链参数）">
+        </div>
+        <div class="form-row"><label>名称</label><input v-model="liveAdd.name" placeholder="留空自动取域名"></div>
+        <div class="form-row"><label>分组</label>
+          <input v-model="liveAdd.group" list="live-group-datalist2" placeholder="留空为「默认」">
+          <datalist id="live-group-datalist2"><option v-for="g in liveGroups" :key="g" :value="g"></option></datalist>
+        </div>
+        <div class="form-row"><label>备注</label><input v-model="liveAdd.remark"></div>
+        <div class="form-row"><label>选项</label>
+          <label class="row" style="gap:6px;cursor:pointer;white-space:nowrap"><input type="checkbox" v-model="liveAdd.check"> 添加后立即检测</label>
+        </div>
+      </div>
+
+      <div class="form-actions">
+        <button class="btn" @click="liveAdd.open=false">取消</button>
+        <button class="btn primary" @click="submitLiveAdd" :disabled="liveAdd.saving">{{ liveAdd.saving ? '提交中…' : '添加' }}</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- ===== 编辑直播源 ===== -->
+  <div class="modal-mask" v-if="liveEdit" @click.self="liveEdit=null">
+    <div class="modal">
+      <div class="modal-title">编辑直播源<button class="close" @click="liveEdit=null">✕</button></div>
+      <div class="form-row"><label>名称</label><input v-model="liveEdit.name"></div>
+      <div class="form-row"><label>地址</label><input v-model="liveEdit.url"></div>
+      <div class="form-row"><label>分组</label>
+        <input v-model="liveEdit.group" list="live-group-datalist3">
+        <datalist id="live-group-datalist3"><option v-for="g in liveGroups" :key="g" :value="g"></option></datalist>
+      </div>
+      <div class="form-row"><label>排序值</label><input type="number" v-model.number="liveEdit.sort"><span class="muted">小的在前</span></div>
+      <div class="form-row"><label>检测超时（秒）</label>
+        <input type="number" min="0" max="120" v-model.number="liveEdit.timeoutSeconds" placeholder="0 = 默认 12 秒">
+      </div>
+      <div class="form-row"><label>备注</label><input v-model="liveEdit.remark"></div>
+      <div class="form-row" v-if="liveEdit.origin==='auto'">
+        <label></label>
+        <span class="muted">自动同步的条目：改名/改组后不再被父源覆盖；删除后父源再同步也不会复活。</span>
+      </div>
+      <div class="form-actions">
+        <button class="btn" @click="liveEdit=null">取消</button>
+        <button class="btn primary" @click="saveLiveEdit">保存</button>
       </div>
     </div>
   </div>

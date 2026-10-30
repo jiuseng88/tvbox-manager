@@ -2,15 +2,12 @@ package api
 
 import (
 	"context"
-	"io"
 	"net/http"
-	"net/url"
 	"sort"
 	"strings"
 	"sync"
 	"time"
 
-	"tvbox-manager/internal/checker"
 	"tvbox-manager/internal/live"
 	"tvbox-manager/internal/model"
 	"tvbox-manager/internal/parser"
@@ -95,7 +92,7 @@ func (a *API) tvLive(ctx context.Context) *tvLivePayload {
 			defer wg.Done()
 			sem <- struct{}{}
 			defer func() { <-sem }()
-			chans, err := fetchLivePlaylist(ctx, it)
+			chans, _, err := fetchLivePlaylistCtx(ctx, it.URL, it.Name, tvLiveDoor)
 			results[i].channels = chans
 			results[i].err = err
 		}(i, it)
@@ -153,6 +150,20 @@ func (a *API) tvLive(ctx context.Context) *tvLivePayload {
 // tvLiveSites 收集直播源：优先用探活时已入库的 Detail.LiveSites，
 // 一条都没有时（旧数据还没重检）现场拉几个单仓补一遍，只读不写库。
 func (a *API) tvLiveSites(ctx context.Context) []model.LiveSiteEntry {
+	// 首选独立维护的直播源表：管理端可增删改、可停用，是唯一权威来源
+	if list := a.st.EnabledLiveSources(); len(list) > 0 {
+		out := make([]model.LiveSiteEntry, 0, len(list))
+		for _, ls := range list {
+			if len(out) >= tvLiveMaxSources {
+				break
+			}
+			out = append(out, model.LiveSiteEntry{Name: ls.Name, URL: ls.URL, Group: ls.Group})
+		}
+		return out
+	}
+
+	// 表为空（刚升级、还没跑过一轮探活同步）→ 退回从各源的 Detail.LiveSites 现取，
+	// 保证升级后第一屏就有内容，不用等下次探活。
 	seen := make(map[string]bool, 32)
 	out := make([]model.LiveSiteEntry, 0, 32)
 
@@ -204,40 +215,13 @@ func (a *API) tvLiveSites(ctx context.Context) []model.LiveSiteEntry {
 	return out
 }
 
-// fetchLivePlaylist 拉取并解析一份直播播放列表。
-func fetchLivePlaylist(ctx context.Context, it model.LiveSiteEntry) ([]live.Channel, error) {
-	stem, hdr := live.SplitHeader(it.URL)
-	u, err := url.Parse(stem)
-	if err != nil || u.Host == "" || (u.Scheme != "http" && u.Scheme != "https") {
-		return nil, errBadLiveURL
-	}
-	if err := checker.RejectPrivateHost(u.Hostname()); err != nil {
-		return nil, err
-	}
-
-	fctx, cancel := context.WithTimeout(ctx, tvLiveDoor)
-	defer cancel()
-	req, err := http.NewRequestWithContext(fctx, http.MethodGet, stem, nil)
-	if err != nil {
-		return nil, err
-	}
-	req.Header.Set("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36")
-	applyProxyHeaders(req, hdr)
-
-	resp, err := tvLiveClient.Do(req)
-	if err != nil {
-		return nil, err
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode >= 400 {
-		return nil, &httpStatusError{code: resp.StatusCode}
-	}
-
-	body, err := io.ReadAll(io.LimitReader(resp.Body, tvLiveMaxBody))
-	if err != nil && len(body) == 0 {
-		return nil, err
-	}
-	return live.Parse(body, resp.Request.URL, it.Name), nil
+// invalidateLiveCache 直播源增删改 / 启停 / 检测完成后立即让频道表缓存失效，
+// 否则用户改完还得等 10 分钟才看到变化。
+func (a *API) invalidateLiveCache() {
+	tvLiveMu.Lock()
+	tvLiveCache = nil
+	tvLiveAt = time.Time{}
+	tvLiveMu.Unlock()
 }
 
 type httpStatusError struct{ code int }

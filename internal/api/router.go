@@ -71,6 +71,18 @@ func (a *API) Router() http.Handler {
 	apiMux.HandleFunc("POST /api/flats/batch-action", a.handleFlatBatchAction)
 	apiMux.HandleFunc("POST /api/flats/batch-check", a.handleFlatCheckBatch)
 
+	// 直播源（独立维护，/tv 直播页的频道来源）
+	apiMux.HandleFunc("GET /api/live/sources", a.handleLiveSourceList)
+	apiMux.HandleFunc("POST /api/live/sources", a.handleLiveSourceAdd)
+	apiMux.HandleFunc("POST /api/live/sources/batch", a.handleLiveSourceBatchAdd)
+	apiMux.HandleFunc("POST /api/live/sources/batch-action", a.handleLiveSourceBatchAction)
+	apiMux.HandleFunc("POST /api/live/sources/batch-check", a.handleLiveSourceBatchCheck)
+	apiMux.HandleFunc("GET /api/live/groups", a.handleLiveSourceGroups)
+	apiMux.HandleFunc("PUT /api/live/sources/{id}", a.handleLiveSourceUpdate)
+	apiMux.HandleFunc("DELETE /api/live/sources/{id}", a.handleLiveSourceDelete)
+	apiMux.HandleFunc("POST /api/live/sources/{id}/toggle", a.handleLiveSourceToggle)
+	apiMux.HandleFunc("POST /api/live/sources/{id}/check", a.handleLiveSourceCheck)
+
 	// 预览与探活
 	apiMux.HandleFunc("GET /api/preview", a.handlePreviewURL)
 	apiMux.HandleFunc("POST /api/check/run", a.handleCheckRun)

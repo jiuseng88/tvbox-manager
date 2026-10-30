@@ -147,9 +147,10 @@ type FlatSource struct {
 
 // Data 持久化根对象（data.json）
 type Data struct {
-	Version int          `json:"version"`
-	Sources []Source     `json:"sources"`
-	Flats   []FlatSource `json:"flats,omitempty"` // 平铺站点源（由 Sources 自动同步生成）
+	Version     int          `json:"version"`
+	Sources     []Source     `json:"sources"`
+	Flats       []FlatSource `json:"flats,omitempty"`       // 平铺站点源（由 Sources 自动同步生成）
+	LiveSources []LiveSource `json:"liveSources,omitempty"` // 直播源（auto 由 lives[] 同步 / manual 手动添加）
 }
 
 // Config 系统配置（config.json），全部可通过环境变量覆盖初值
@@ -233,4 +234,60 @@ func DefaultConfig() Config {
 		AutoDisableAfterFails: 5, InsecureSkipVerify: true,
 		CheckSubURLs: false,
 	}
+}
+
+// 直播源来源
+const (
+	LiveOriginAuto   = "auto"   // 由平铺源的 lives[] 自动同步
+	LiveOriginManual = "manual" // 用户手动添加
+)
+
+// LiveSource 一条直播播放列表（m3u / txt / json）。
+//
+// 与 FlatSource 的区别：站点源是「一个个 CMS 接口」，直播源是「一份频道清单」，
+// 拉下来会展开成成百上千个频道，所以检测指标也不同（频道数、分组数、抽样可用数）。
+// auto 源随父源探活同步，manual 源完全独立；两者在同一个列表里统一管理。
+type LiveSource struct {
+	ID        string   `json:"id"`
+	Name      string   `json:"name"`
+	URL       string   `json:"url"` // 可带 |User-Agent=..&Referer=.. 请求头参数
+	Group     string   `json:"group"`
+	Remark    string   `json:"remark"`
+	Sort      int      `json:"sort"`
+	Enabled   bool     `json:"enabled"`
+	Hidden    bool     `json:"hidden,omitempty"` // 已删除（墓碑）：auto 源父源再同步也不复活
+	Origin    string   `json:"origin"`           // auto / manual
+	ParentIDs []string `json:"parentIds,omitempty"`
+
+	// NameAuto / GroupAuto：auto 源的名称/分组是否随父源同步。
+	// 用户手动改过就置 false，后续同步不再覆盖（与站点源同口径）。
+	NameAuto  bool `json:"nameAuto"`
+	GroupAuto bool `json:"groupAuto"`
+
+	// 本条单独的检测超时（秒），0 = 用全局 checkTimeoutSeconds
+	TimeoutSeconds int `json:"timeoutSeconds,omitempty"`
+
+	CreatedAt time.Time `json:"createdAt"`
+	UpdatedAt time.Time `json:"updatedAt"`
+
+	// —— 检测结果 ——
+	LastCheckAt *time.Time `json:"lastCheckAt,omitempty"`
+	Status      string     `json:"status"` // ok / fail / unknown / checking
+	HTTPCode    int        `json:"httpCode"`
+	LatencyMs   int64      `json:"latencyMs"`
+	CheckMsg    string     `json:"checkMsg"`
+	CheckCount  int        `json:"checkCount"`
+	FailCount   int        `json:"failCount"`
+	FailStreak  int        `json:"failStreak"`
+	OKStreak    int        `json:"okStreak"`
+	LastOKAt    *time.Time `json:"lastOkAt,omitempty"`
+
+	// —— 解析结果（检测时回填）——
+	ChannelCount int `json:"channelCount"` // 解析出的频道数
+	GroupCount   int `json:"groupCount"`   // 分组数
+	AliveCount   int `json:"aliveCount"`   // 抽样中可播放的频道数
+	SampleCount  int `json:"sampleCount"`  // 抽样总数（0 = 未做频道抽样）
+
+	// —— 运行时字段（列表查询回填，不落盘）——
+	ParentNames []string `json:"parentNames,omitempty"` // auto 源来自哪些父源（名称）
 }

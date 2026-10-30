@@ -606,6 +606,12 @@ func (s *Store) Delete(ids []string) int {
 		s.data.Sources = kept
 		for _, id := range ids {
 			s.removeSourceFlatRefsLocked(id) // 摘除站点源上的父引用，无父则删
+			// 直播源同理：父源删了，auto 源只剩孤儿身份，用户可在直播源页清理
+			for i := range s.data.LiveSources {
+				if containsStr(s.data.LiveSources[i].ParentIDs, id) {
+					s.data.LiveSources[i].ParentIDs = removeStr(s.data.LiveSources[i].ParentIDs, id)
+				}
+			}
 		}
 		if err := s.flush(); err != nil {
 			fmt.Printf("[store] 删除后落盘失败: %v\n", err)
@@ -674,6 +680,7 @@ func (s *Store) updateCheckResultLocked(id string, r CheckResult) bool {
 		s.autoDisableLocked(&sp.Enabled, &sp.FailStreak, &sp.CheckMsg)
 		s.data.Sources[i] = sp
 		s.syncFlatsForSourceLocked(sp) // 多仓子仓列表变化同步到站点源
+		s.syncLiveSourcesLocked(sp)    // lives[] 变化同步到直播源
 		return true
 	}
 	return false
