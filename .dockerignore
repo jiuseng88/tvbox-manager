@@ -1,5 +1,6 @@
 .git
 .gitignore
+.gitattributes
 data/
 .smoke-data/
 .smoke.log
@@ -8,8 +9,16 @@ data/
 Dockerfile
 docker-compose.yml
 web/node_modules
+node_modules/
 .vscode
 .idea
+.workbuddy
 tvbox-manager.exe
 tvbox-manager
 bin/
+# 本地交叉编译产物与构建缓存（二进制几十 MB，没必要进构建上下文）
+build/
+.tmp/
+.gocache/
+.gotmp/
+scripts/
