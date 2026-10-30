@@ -3,7 +3,8 @@
 FROM golang:1.27-alpine AS builder
 
 WORKDIR /src
-ENV CGO_ENABLED=0 GOOS=linux GOFLAGS=-trimpath
+ENV CGO_ENABLED=0 GOOS=linux GOFLAGS=-trimpath \
+    GOPROXY=https://goproxy.cn,direct
 
 # 先拷 go.mod 利用层缓存
 COPY go.mod go.sum* ./
@@ -15,7 +16,9 @@ RUN go build -trimpath -ldflags="-s -w" -o /out/tvbox-manager .
 # ---------- 运行阶段 ----------
 FROM alpine:3.20
 
-RUN apk add --no-cache ca-certificates tzdata wget \
+# 换成国内源，避免 dl-cdn 慢导致构建卡住（该配置会固化进镜像）
+RUN sed -i 's|dl-cdn.alpinelinux.org|mirrors.aliyun.com|g' /etc/apk/repositories \
+    && apk add --no-cache ca-certificates tzdata wget \
     && addgroup -S app && adduser -S app -G app \
     && mkdir -p /data && chown -R app:app /data
 
