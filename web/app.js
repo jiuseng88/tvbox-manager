@@ -727,6 +727,62 @@
       const liveFilters = reactive({ keyword: "", status: "", group: "", origin: "", enabled: "", page: 1, size: 50 });
       const liveGroups = ref([]);
       const liveChecked = ref([]);
+      /* ---- 一键解析：重新从源列表拉 lives[] 同步进直播源表 ---- */
+      // 后台任务 + 轮询：几十个源串行要一两分钟，前端不能一直挂着等。
+      const resync = reactive({
+        running: false, total: 0, done: 0, ok: 0, failed: 0, noLive: 0,
+        liveSites: 0, added: 0, linked: 0, detached: 0, existed: 0, errors: [],
+      });
+      let resyncTimer = null;
+
+      async function startResync(fromSources) {
+        if (resync.running) return;
+        // 源列表页：勾了就只解析勾选的；没勾则全部启用源
+        const ids = fromSources ? [...checked.value] : [];
+        try {
+          const r = await api("POST", "/api/live/resync", { ids });
+          Object.assign(resync, r.state || {});
+          resync.running = true;
+          if (!r.started) toast("已有解析任务在跑，跟着看进度即可", "warn");
+          else toast("已开始解析 " + resync.total + " 个源，可在右上角看进度", "info");
+          pollResync();
+        } catch (e) { toast(e.message, "error"); }
+      }
+
+      function pollResync() {
+        if (resyncTimer) clearTimeout(resyncTimer);
+        const tick = async () => {
+          try {
+            const st = await api("GET", "/api/live/resync/status");
+            if (st) Object.assign(resync, st);
+          } catch (e) { /* 单次失败不影响，下次再取 */ }
+          if (resync.running) {
+            resyncTimer = setTimeout(tick, 1200);
+          } else {
+            resyncTimer = null;
+            finishResync();
+          }
+        };
+        resyncTimer = setTimeout(tick, 800);
+      }
+
+      function finishResync() {
+        const s = resync;
+        if (!s.total) return;
+        const parts = ["成功 " + s.ok + " 个源"];
+        if (s.noLive) parts.push(s.noLive + " 个无 lives 配置");
+        parts.push("新增 " + s.added + " 条直播源");
+        if (s.existed) parts.push("地址重复忽略 " + s.existed + " 条");
+        if (s.detached) parts.push("解除失效关联 " + s.detached + " 条");
+        if (s.failed) parts.push("失败 " + s.failed + " 个源");
+        toast("解析完成：" + parts.join("，"), s.failed ? "warn" : "ok");
+        if ((s.errors || []).length) {
+          console.warn("[一键解析] 失败源：\n" + s.errors.map(e => e.name + " — " + e.error).join("\n"));
+        }
+        loadLives(true);
+        loadLiveGroups();
+      }
+
       let liveSearchDebounce = null;
       let liveReqSeq = 0;
       let liveWatchTimer = null;
@@ -1221,7 +1277,16 @@
         // 只在检测真的在跑时续上进度轮询，否则一次都不打
         loadProgress().then(() => { if (progress.value.running) startPolling(); });
       }
+      // 刷新页面后若后台还在跑一键解析，接着显示进度
+      async function resumeResync() {
+        if (!store.token) return;
+        try {
+          const st = await api("GET", "/api/live/resync/status");
+          if (st && st.running) { Object.assign(resync, st); pollResync(); }
+        } catch (e) { /* 忽略 */ }
+      }
       onMounted(boot);
+      onMounted(resumeResync);
       watch(view, (v) => {
         if (v === "dashboard") {
           loadStats();
@@ -1250,6 +1315,7 @@
         liveList, liveTotal, liveLoading, liveFilters, liveGroups, liveChecked, livePages, loadLives, loadLiveGroups,
         applyLiveFilter, liveStatusText, liveStatusClass, toggleLive, checkLive, delLive, liveBatchAction, batchCheckLives,
         liveAdd, openLiveAdd, previewLiveBatch, submitLiveAdd, liveEdit, openLiveEdit, saveLiveEdit,
+        resync, startResync,
         editFlat, openFlatEdit, saveFlatEdit, openFlatPreview,
         batchBar, batchAction, editSrc, openEdit, saveEdit, editConfigLoading,
         editConfigError, editParsed, editContentDirty, onContentInput, formatContent, retryLoadConfig,

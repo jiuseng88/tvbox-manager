@@ -6,6 +6,7 @@ import (
 	"io/fs"
 	"net/http"
 	"strings"
+	"sync"
 	"sync/atomic"
 
 	"tvbox-manager/internal/scheduler"
@@ -23,6 +24,10 @@ type API struct {
 
 	// PastedDir 粘贴单仓配置的本地托管目录（main 注入 data/pasted；空 = 托管未启用）
 	PastedDir string
+
+	// 一键解析直播源的后台任务状态（同一时刻只允许一个，避免重复去打上游）
+	resyncMu sync.Mutex
+	resync   *liveResyncState
 }
 
 // maxPageSize 列表接口单页上限（sources 与 flats 统一，避免口径不一致）
@@ -78,6 +83,8 @@ func (a *API) Router() http.Handler {
 	apiMux.HandleFunc("POST /api/live/sources/batch-action", a.handleLiveSourceBatchAction)
 	apiMux.HandleFunc("POST /api/live/sources/batch-check", a.handleLiveSourceBatchCheck)
 	apiMux.HandleFunc("GET /api/live/groups", a.handleLiveSourceGroups)
+	apiMux.HandleFunc("POST /api/live/resync", a.handleLiveResync)
+	apiMux.HandleFunc("GET /api/live/resync/status", a.handleLiveResyncStatus)
 	apiMux.HandleFunc("PUT /api/live/sources/{id}", a.handleLiveSourceUpdate)
 	apiMux.HandleFunc("DELETE /api/live/sources/{id}", a.handleLiveSourceDelete)
 	apiMux.HandleFunc("POST /api/live/sources/{id}/toggle", a.handleLiveSourceToggle)

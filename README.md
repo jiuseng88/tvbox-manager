@@ -228,6 +228,8 @@ Windows 下用 `tvbox-manager.exe`，环境变量写法 `set DATA_DIR=...` 或 P
 | PUT/DELETE | `/api/live/sources/{id}` | 编辑（改名/改组后不再随父源同步，改地址清检测结论）/ 删除（自动同步条目留墓碑，父源再同步不复活） |
 | POST | `/api/live/sources/{id}/toggle` · `/{id}/check` | 启停 · 检测（拉取列表 + 按分组抽样 20 个频道验证可用率，异步） |
 | POST | `/api/live/sources/batch-action` · `/api/live/sources/batch-check` | 批量启用/禁用/移组/删除 · 批量检测（源间并发 3） |
+| POST | `/api/live/resync` | 一键解析：重新拉取源列表各源的 `lives` 配置，提取直播地址同步进直播源表（后台任务，`{ids:[]}` 空 = 全部启用源；地址判重，已存在的只补关联） |
+| GET | `/api/live/resync/status` | 一键解析进度：`{running,total,done,ok,failed,noLive,added,linked,detached,existed,errors}` |
 | GET | `/api/live/groups` | 直播源分组列表 |
 | GET | `/tvapi/live` | `/tv` 直播频道表（免鉴权）：聚合平铺源 `lives` 的播放列表，解析合并去重，10 分钟缓存 |
 
@@ -346,6 +348,7 @@ PORT=18080 DATA_DIR=./data go run . -web ./web
 
 | 版本 | 要点 |
 |---|---|
+| 1.4.6 | 一键解析：直播源页 / 源列表页均可一键重新拉取各源 `lives` 配置并同步（源列表勾选则只解析选中项）；后台任务 + 实时进度，按地址判重（剥掉 `\|` 请求头参数后归一化），重复直接忽略、已删除的不复活；解析只覆盖 `lives`，不重跑站点探活 |
 | 1.4.5 | 直播源独立维护页：手动添加（多行混排 / 单个表单）、批量启用/禁用/移组/检测/删除；自动同步条目完全可管（改名/改组后不被覆盖、删除留墓碑不复活）；双层检测（源级 + 按分组抽样 20 频道算可用率）；检测失效的源自动退出直播页；增删改启停即时生效 |
 | 1.4.4 | `/tv` 新增**电视直播**：频道自动取自平铺源 `lives` 配置（m3u/txt/json 全格式、GBK 自动识别、`proxy://`/rtmp 自动剔除）；分组侧栏 + 频道搜索 + 多线路切换；HLS 复用媒体代理、FLV 用 mpegts.js（本地内嵌，无 CDN 依赖）；媒体代理支持 `|User-Agent=` 防盗链头并透传到清单每一跳；改长连超时（FLV 直播不再 5 分钟被掐断）；断流静默重连、失败自动换线 |
 | 1.4.3 | 点播播放体验：先重试后报错（延迟确认制），不再「先提示失败再播出来」；`/tv/` 尾斜杠 404 修复 |

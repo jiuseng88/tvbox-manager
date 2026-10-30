@@ -131,6 +131,10 @@
             <button class="btn" @click="refreshSources" :disabled="refreshingSources" title="重新拉取列表与统计（检测是异步的，状态可能延后落库）">
               {{ refreshingSources ? '刷新中…' : '↻ 刷新' }}
             </button>
+            <button class="btn" @click="startResync(true)" :disabled="resync.running"
+              :title="'重新拉取源的 lives 配置，解析出直播地址后同步到「直播源」页；地址重复的自动忽略。' + (checked.length ? '当前只解析勾选的 ' + checked.length + ' 个源' : '当前解析全部已启用的源')">
+              {{ resync.running ? '解析中 ' + resync.done + '/' + resync.total : '⚡ 一键解析' }}
+            </button>
             <button class="btn primary" @click="openAddModal">➕ 添加源</button>
           </div>
         </div>
@@ -366,6 +370,10 @@
         <div class="list-head">
           <h2>直播源 <span class="muted">（{{ liveTotal }} 条）</span></h2>
           <div class="row">
+            <button class="btn" @click="startResync(false)" :disabled="resync.running"
+              title="重新拉取所有已启用源的 lives 配置，解析出直播地址后同步进来（地址重复的自动忽略，已删除的不复活）">
+              {{ resync.running ? '解析中 ' + resync.done + '/' + resync.total : '⚡ 一键解析' }}
+            </button>
             <button class="btn primary" @click="openLiveAdd">＋ 添加直播源</button>
             <button class="btn" @click="loadLives(true)" :disabled="liveLoading">{{ liveLoading ? '加载中…' : '↻ 刷新' }}</button>
           </div>
@@ -375,6 +383,7 @@
           <code>lives</code> 配置解析同步生成，也可以手动添加；只有「启用」且检测未失效的条目会进入
           <a @click="openTv" class="link">/tv 直播页</a>。
           检测 = 拉取播放列表 + 按分组抽样 20 个频道验证可用性。
+          「⚡ 一键解析」= 不跑探活，只重新拉取各源的 <code>lives</code> 配置并同步；同地址只留一条。
         </div>
         <div class="toolbar">
           <input v-model="liveFilters.keyword" placeholder="搜索名称 / 地址 / 备注" class="grow">

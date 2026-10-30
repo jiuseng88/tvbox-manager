@@ -588,17 +588,69 @@ func (s *Store) BatchLiveSources(ids []string, action, group string) (int, error
 
 // ---------- 与平铺源同步 ----------
 
+// LiveSyncStat 一次 lives 对账的统计，用于「一键解析」给用户交代结果。
+type LiveSyncStat struct {
+	Added    int `json:"added"`    // 新增的直播源
+	Linked   int `json:"linked"`   // 已存在、本次补上了父源关联
+	Detached int `json:"detached"` // 已存在、但父源里已没有该地址，解除关联
+	Existed  int `json:"existed"`  // 已存在且无变化（地址判重命中，直接忽略）
+	Total    int `json:"total"`    // 本次解析出的直播源地址数
+}
+
 // SyncLiveSourcesForSource 父源探活成功后，把 Detail.LiveSites 对账进直播源表。
 // 调用方需保证 src 已是最新值（updateCheckResultLocked 内部调用即满足）。
 func (s *Store) SyncLiveSourcesForSource(src model.Source) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if s.syncLiveSourcesLocked(src) {
+	if _, changed := s.syncLiveSourcesLocked(src); changed {
 		_ = s.flush()
 	}
 }
 
-func (s *Store) syncLiveSourcesLocked(src model.Source) bool {
+// SyncLiveSites 用「重新解析」得到的 lives[] 覆盖源详情并同步进直播源表。
+// 与探活解耦：只关心直播地址，不重跑站点解析。
+//
+// 详情只在原本就非空时才写回——从未探活成功的源（Detail == nil）如果被塞一个
+// 只含 LiveSites 的详情，订阅平铺那边会把它当成多仓/单仓配置读，语义就错了。
+// 这种情况下只同步直播源表，详情留给下一次探活。
+func (s *Store) SyncLiveSites(sourceID string, sites []model.LiveSiteEntry) (LiveSyncStat, bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	idx := -1
+	for i := range s.data.Sources {
+		if s.data.Sources[i].ID == sourceID {
+			idx = i
+			break
+		}
+	}
+	if idx < 0 {
+		return LiveSyncStat{Total: len(sites)}, false
+	}
+
+	detailUpdated := false
+	if s.data.Sources[idx].Detail != nil {
+		sp := clone(s.data.Sources[idx])
+		d := *sp.Detail
+		d.LiveSites = sites
+		sp.Detail = &d
+		sp.UpdatedAt = time.Now()
+		s.data.Sources[idx] = sp
+		detailUpdated = true
+	}
+
+	// 对账用副本：Detail 为空时也要按本次解析结果挂父源关联
+	sp := clone(s.data.Sources[idx])
+	sp.Detail = &model.Detail{LiveSites: sites}
+	stat, changed := s.syncLiveSourcesLocked(sp)
+	if changed || detailUpdated {
+		_ = s.flush()
+	}
+	return stat, detailUpdated
+}
+
+func (s *Store) syncLiveSourcesLocked(src model.Source) (LiveSyncStat, bool) {
+	stat := LiveSyncStat{}
 	changed := false
 	want := make(map[string]model.LiveSiteEntry, 8)
 	if src.Detail != nil {
@@ -611,6 +663,7 @@ func (s *Store) syncLiveSourcesLocked(src model.Source) bool {
 	}
 
 	// 1) 新增 / 更新
+	stat.Total = len(want)
 	for key, e := range want {
 		idx := s.findLiveByKeyLocked(key)
 		if idx < 0 {
@@ -635,17 +688,20 @@ func (s *Store) syncLiveSourcesLocked(src model.Source) bool {
 				UpdatedAt: now,
 			})
 			changed = true
+			stat.Added++
 			continue
 		}
 
 		ls := s.data.LiveSources[idx]
 		if ls.Hidden {
-			continue // 用户删过，不复活
+			stat.Existed++ // 用户删过，不复活，也不重复添加
+			continue
 		}
 		dirty := false
 		if !containsStr(ls.ParentIDs, src.ID) {
 			ls.ParentIDs = append(ls.ParentIDs, src.ID)
 			dirty = true
+			stat.Linked++
 		}
 		// manual 源被父源也引用到时，保留用户起的名字
 		if ls.Origin == model.LiveOriginAuto {
@@ -666,6 +722,8 @@ func (s *Store) syncLiveSourcesLocked(src model.Source) bool {
 			ls.UpdatedAt = time.Now()
 			s.data.LiveSources[idx] = ls
 			changed = true
+		} else {
+			stat.Existed++ // 地址判重命中：已在表里、无需任何变更
 		}
 	}
 
@@ -686,8 +744,9 @@ func (s *Store) syncLiveSourcesLocked(src model.Source) bool {
 		ls.ParentIDs = removeStr(ls.ParentIDs, src.ID)
 		ls.UpdatedAt = time.Now()
 		changed = true
+		stat.Detached++
 	}
-	return changed
+	return stat, changed
 }
 
 // DetachLiveSourceParent 父源被删除/地址变更时调用：从所有 auto 源解除关联。
