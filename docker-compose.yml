@@ -7,7 +7,7 @@ services:
     container_name: tvbox-manager
     restart: unless-stopped
     ports:
-      # 左边是宿主机端口，需与下面的 PORT 保持一致；改了 PORT 记得同步改这里
+      # 冒号左边是宿主机端口（对外访问用，随意改）；右边是容器内端口，必须等于下面的 PORT
       - "8080:8080"
     environment:
       TZ: Asia/Shanghai
@@ -31,17 +31,23 @@ services:
       # ENV_OVERRIDE: "1"   # 打开后环境变量重新变为最高优先级
     volumes:
       # 命名卷：首次挂载自动继承镜像内 /data 的属主（app 用户，uid=100），
-      # 不存在 bind 挂载的属主/SELinux 问题。数据落在
-      # /var/lib/docker/volumes/<项目名>_tvbox-data/_data
+      # 不存在 bind 挂载的属主/SELinux 问题。
+      # 卷名已在文件末尾用 name 固定，实际落在 /var/lib/docker/volumes/tvbox-data/_data
       # 想改回明文目录挂载用：- ./data:/data
       # （需先 mkdir -p ./data && chown -R 100:101 ./data，CentOS 还可能要加 :z）
       - tvbox-data:/data
     healthcheck:
-      # 用 CMD-SHELL 让容器内的 PORT 生效，改端口后健康检查不会误报
-      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:${PORT:-8080}/healthz || exit 1"]
+      # $$ 是 compose 的转义，交给容器内的 sh 展开，这样改 PORT 后健康检查跟着走。
+      # 若写成单个 $ 会被 compose 在启动时插值（只看 .env / 宿主环境，不看下面的 environment），
+      # 结果永远是 8080，改了 PORT 就会误报 unhealthy。
+      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:$${PORT:-8080}/healthz || exit 1"]
       interval: 30s
       timeout: 5s
       retries: 3
 
 volumes:
-  tvbox-data: {}
+  # 显式固定卷名，避免 docker compose 自动加项目名前缀
+  # （默认会变成 <所在目录名>_tvbox-data，与手工创建的 tvbox-data 不是同一个卷，
+  #   迁移过数据时会出现「容器起来了但读空卷」的现象）
+  tvbox-data:
+    name: tvbox-data
