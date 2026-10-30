@@ -136,19 +136,33 @@ async function handleApiRequest(url) {
                 if (videoDetail.vod_play_url) {
                     // 分割不同播放源
                     const playSources = videoDetail.vod_play_url.split('$$$');
-                    
-                    // 提取第一个播放源的集数（通常为主要源）
-                    if (playSources.length > 0) {
-                        const mainSource = playSources[0];
-                        const episodeList = mainSource.split('#');
-                        
-                        // 从每个集数中提取URL
-                        episodes = episodeList.map(ep => {
-                            const parts = ep.split('$');
-                            // 返回URL部分(通常是第二部分，如果有的话)
-                            return parts.length > 1 ? parts[1] : '';
-                        }).filter(url => url && (url.startsWith('http://') || url.startsWith('https://')));
+
+                    // 多组播放源时优先选「直链组」：量子等源第一组是网页播放页(/share/xxx)，
+                    // 真正的 m3u8 在后面的组。按直链(m3u8/mp4/mkv)数量打分，分数相同取靠前的组。
+                    let mainSource = playSources[0];
+                    let bestScore = -1;
+                    for (const src of playSources) {
+                        const urls = src.split('#').map(ep => {
+                            const p = ep.split('$');
+                            return p.length > 1 ? p[1] : '';
+                        }).filter(u => u.startsWith('http://') || u.startsWith('https://'));
+                        if (urls.length === 0) continue;
+                        const direct = urls.filter(u => /\.(m3u8|mp4|mkv)([?#]|$)/i.test(u)).length;
+                        const score = direct * 2 + urls.length;
+                        if (score > bestScore) {
+                            bestScore = score;
+                            mainSource = src;
+                        }
                     }
+
+                    const episodeList = mainSource.split('#');
+
+                    // 从每个集数中提取URL
+                    episodes = episodeList.map(ep => {
+                        const parts = ep.split('$');
+                        // 返回URL部分(通常是第二部分，如果有的话)
+                        return parts.length > 1 ? parts[1] : '';
+                    }).filter(url => url && (url.startsWith('http://') || url.startsWith('https://')));
                 }
                 
                 // 如果没有找到播放地址，尝试使用正则表达式查找m3u8链接
