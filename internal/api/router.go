@@ -102,6 +102,13 @@ func (a *API) Router() http.Handler {
 	// 粘贴单仓的本地托管配置（无鉴权，与订阅一致）
 	root.HandleFunc("GET /configs/{name}", a.handlePastedConfig)
 
+	// /tv 看片页（内嵌 LibreTV 谱系前端，无鉴权，与订阅一致）
+	root.HandleFunc("GET /tv", func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, "/tv/", http.StatusTemporaryRedirect)
+	})
+	root.HandleFunc("GET /tvapi/sources", a.handleTVSources)
+	root.HandleFunc("GET /tvapi/proxy", a.handleTVProxy)
+
 	// 静态资源（前端 SPA，go:embed 注入）；不限定方法，避免与 /api/ 子树模式冲突
 	root.Handle("/", a.spaHandler())
 
@@ -154,7 +161,7 @@ func (a *API) spaHandler() http.Handler {
 	sub := a.web
 	fileServer := http.FileServer(http.FS(sub))
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		p := strings.TrimPrefix(r.URL.Path, "/")
+		p := strings.Trim(strings.TrimPrefix(r.URL.Path, "/"), "/")
 		if p == "" {
 			p = "index.html"
 		}

@@ -1019,6 +1019,9 @@
         needLogin.value = true;
         toast("已退出登录", "info");
       }
+      function openTv() {
+        window.open("/tv/", "_blank");
+      }
 
       /* ---- 生命周期 ---- */
       // authRequired：后台是否设置了令牌。false = 无鉴权模式（/api/* 不校验），前端提示尽快设置。
@@ -1075,7 +1078,7 @@
         fileRows, fileResult, handleFile, submitFileRows,
         config, subUrls, loadConfig, saveConfig, newToken, changeToken, authRequired,
         backupJson, openBackupModal, copyBackup, downloadBackup, importBackup,
-        login, logout,
+        login, logout, openTv,
       };
     },
   });

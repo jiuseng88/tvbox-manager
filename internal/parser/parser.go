@@ -159,6 +159,7 @@ func Parse(body []byte) (string, *model.Detail, error) {
 	d.Spider = decodeStringish(raw.Spider)
 	d.SiteNames = extractNames(raw.Sites, 50)
 	d.LiveNames = extractNames(raw.Lives, 20)
+	d.CmsSites = extractCmsSites(raw.Sites, 100)
 
 	// 多仓优先
 	if subs := parseSubURLs(raw.URLs); len(subs) > 0 {
@@ -169,6 +170,80 @@ func Parse(body []byte) (string, *model.Detail, error) {
 		return model.TypeSingle, d, nil
 	}
 	return model.TypeUnknown, nil, errors.New("仓库结构不完整（缺少 sites/lives/urls）")
+}
+
+// extractCmsSites 从 sites 数组提取可直连的苹果CMS接口条目（/tv 看片页数据源）。
+// 规则对齐 LibreTV 的 TVBox 兼容逻辑：Spider（csp_ 前缀 / type 3 / jar/js/py）、
+// XML 通道、searchable=0 跳过；api 含 /api.php/provide/vod 时截断为基础地址，
+// 其余仅接受纯域名（无路径）形态——前端会自行拼接 /api.php/provide/vod 路径。
+func extractCmsSites(items []json.RawMessage, limit int) []model.SiteEntry {
+	out := make([]model.SiteEntry, 0, len(items))
+	for _, it := range items {
+		if len(out) >= limit {
+			break
+		}
+		var o struct {
+			Name       string          `json:"name"`
+			API        string          `json:"api"`
+			Type       json.RawMessage `json:"type"`
+			Searchable json.RawMessage `json:"searchable"`
+			Adult      bool            `json:"adult"`
+		}
+		if json.Unmarshal(it, &o) != nil || o.API == "" {
+			continue
+		}
+		if strings.HasPrefix(o.API, "csp_") {
+			continue
+		}
+		if t, ok := rawJSONInt(o.Type); ok && t == 3 {
+			continue
+		}
+		if s, ok := rawJSONInt(o.Searchable); ok && s == 0 {
+			continue
+		}
+		lower := strings.ToLower(o.API)
+		if strings.HasSuffix(lower, ".jar") || strings.HasSuffix(lower, ".js") || strings.HasSuffix(lower, ".py") {
+			continue
+		}
+		var base string
+		if idx := strings.Index(lower, "/api.php/provide/vod"); idx >= 0 {
+			if strings.Contains(lower[idx:], "/at/xml") {
+				continue // XML 输出通道，浏览器端无法按 JSON 解析
+			}
+			base = o.API[:idx]
+		} else {
+			u, err := url.Parse(o.API)
+			if err != nil || u.Host == "" || u.RawQuery != "" {
+				continue
+			}
+			if p := strings.Trim(u.Path, "/"); p != "" {
+				continue // 非标准路径形态，前端拼接后必然失败
+			}
+			base = o.API
+		}
+		base = strings.TrimRight(base, "/")
+		if base == "" {
+			continue
+		}
+		name := strings.TrimSpace(o.Name)
+		if name == "" {
+			name = HostOf(base)
+		}
+		out = append(out, model.SiteEntry{Name: name, API: base, Host: HostOf(base), Adult: o.Adult})
+	}
+	return out
+}
+
+// rawJSONInt 宽松读取 JSON 数字字段（number 直解；其余形态视为缺失）
+func rawJSONInt(raw json.RawMessage) (int, bool) {
+	if len(raw) == 0 {
+		return 0, false
+	}
+	var n int
+	if err := json.Unmarshal(raw, &n); err != nil {
+		return 0, false
+	}
+	return n, true
 }
 
 // extractNames sites/lives 数组提取 name 字段

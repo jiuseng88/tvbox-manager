@@ -72,6 +72,19 @@ type Detail struct {
 	Wallpaper string   `json:"wallpaper"`
 	SubURLs   []SubURL `json:"subUrls"` // 多仓时的子仓列表
 	RawSize   int      `json:"rawSize"` // 原始 JSON 字节数
+
+	// CmsSites 可直接用于浏览器聚合搜索的苹果CMS站点接口（/tv 看片页的数据来源）。
+	// 仅保留 type 支持 HTTP 直连的条目，单仓最多 100 条。
+	CmsSites []SiteEntry `json:"cmsSites,omitempty"`
+}
+
+// SiteEntry 单个 CMS 站点接口条目（已归一化为「基础地址」形态，
+// 前端会自行拼接 /api.php/provide/vod 路径）
+type SiteEntry struct {
+	Name  string `json:"name"`
+	API   string `json:"api"`             // 基础地址（不含 /api.php 路径）
+	Host  string `json:"host"`            // 展示与去重用
+	Adult bool   `json:"adult,omitempty"` // 源配置标记的成人内容
 }
 
 // SubURL 多仓中的子仓条目
