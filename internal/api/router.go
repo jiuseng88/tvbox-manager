@@ -101,6 +101,8 @@ func (a *API) Router() http.Handler {
 
 	// 粘贴单仓的本地托管配置（无鉴权，与订阅一致）
 	root.HandleFunc("GET /configs/{name}", a.handlePastedConfig)
+	// /tv 看片页：聚合源下发 + CMS 接口代理 + 播放媒体代理（m3u8 改写/分片透传）
+	root.HandleFunc("GET /tvapi/media", a.handleTVMedia)
 
 	// /tv 看片页（内嵌 LibreTV 谱系前端，无鉴权，与订阅一致）
 	root.HandleFunc("GET /tv", func(w http.ResponseWriter, r *http.Request) {

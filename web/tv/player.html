@@ -412,8 +412,14 @@
         }
 
         // 初始化播放器
-        function initPlayer(videoUrl) {
-            if (!videoUrl) return;
+        function initPlayer(rawUrl) {
+            if (!rawUrl) return;
+
+            // m3u8 一律走服务端媒体代理（清单改写+分片透传）：
+            // CMS 的 m3u8 普遍无 CORS 头且有 Referer 防盗链，浏览器直连必然致命 HLS 错误
+            const videoUrl = /\.m3u8([?#]|$)/i.test(rawUrl)
+                ? '/tvapi/media?url=' + encodeURIComponent(rawUrl)
+                : rawUrl;
 
             // 配置HLS.js选项
             const hlsConfig = {
