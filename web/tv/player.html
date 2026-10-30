@@ -504,18 +504,23 @@
                             let playbackStarted = false;
                             // 跟踪视频是否出现bufferAppendError
                             let bufferAppendErrorCount = 0;
-                            
+                            // 网络/媒体错误的重试计数（防止无限重试）
+                            let networkRetryCount = 0;
+                            let mediaRetryCount = 0;
+
                             // 监听视频播放事件
                             video.addEventListener('playing', function() {
                                 playbackStarted = true;
+                                cancelPlayerError();
                                 document.getElementById('loading').style.display = 'none';
                                 document.getElementById('error').style.display = 'none';
                             });
-                            
+
                             // 监听视频进度事件
                             video.addEventListener('timeupdate', function() {
                                 if (video.currentTime > 1) {
                                     // 视频进度超过1秒，隐藏错误（如果存在）
+                                    cancelPlayerError();
                                     document.getElementById('error').style.display = 'none';
                                 }
                             });
@@ -555,22 +560,36 @@
                                 // 如果是致命错误，且视频未播放
                                 if (data.fatal && !playbackStarted) {
                                     console.error('致命HLS错误:', data);
-                                    
-                                    // 尝试恢复错误
+
+                                    // 尝试恢复错误（带重试上限与退避，超限才报错）
                                     switch(data.type) {
                                         case Hls.ErrorTypes.NETWORK_ERROR:
-                                            console.log("尝试恢复网络错误");
-                                            hls.startLoad();
+                                            networkRetryCount++;
+                                            console.log('网络错误，第', networkRetryCount, '次恢复');
+                                            if (networkRetryCount <= 6) {
+                                                // 首次失败起挂起一个延迟提示：10 秒内恢复则自动取消
+                                                schedulePlayerError('视频加载失败，源不可用或网络受限', 10000);
+                                                setTimeout(function() { hls.startLoad(); }, 500 * networkRetryCount);
+                                            } else {
+                                                errorDisplayed = true;
+                                                showError('视频加载失败，源不可用或网络受限');
+                                            }
                                             break;
                                         case Hls.ErrorTypes.MEDIA_ERROR:
-                                            console.log("尝试恢复媒体错误");
-                                            hls.recoverMediaError();
-                                            break;
-                                        default:
-                                            // 仅在多次恢复尝试后显示错误
-                                            if (errorCount > 3 && !errorDisplayed) {
+                                            mediaRetryCount++;
+                                            console.log('媒体错误，第', mediaRetryCount, '次恢复');
+                                            if (mediaRetryCount <= 5) {
+                                                schedulePlayerError('视频加载失败，可能是格式不兼容', 8000);
+                                                hls.recoverMediaError();
+                                            } else {
                                                 errorDisplayed = true;
                                                 showError('视频加载失败，可能是格式不兼容或源不可用');
+                                            }
+                                            break;
+                                        default:
+                                            // 多次出错仍未起播时，延迟确认后再提示
+                                            if (errorCount > 3 && !errorDisplayed) {
+                                                schedulePlayerError('视频加载失败，可能是格式不兼容或源不可用', 4000);
                                             }
                                             break;
                                     }
@@ -613,6 +632,7 @@
             });
             
             dp.on('loadedmetadata', function() {
+                cancelPlayerError();
                 document.getElementById('loading').style.display = 'none';
                 videoHasEnded = false; // 视频加载时重置结束标志
                 
@@ -632,7 +652,8 @@
                     console.log('发生错误，但视频已在播放中，忽略');
                     return;
                 }
-                showError('视频播放失败，请检查视频源或网络连接');
+                // 延迟 6 秒确认：期间 hls 恢复成功起播的话，本提示会被自动取消
+                schedulePlayerError('视频播放失败，请检查视频源或网络连接', 6000);
             });
             
             // 添加seeking和seeked事件监听器，以检测用户是否在拖动进度条
@@ -778,10 +799,23 @@
                 console.log('忽略错误:', message);
                 return;
             }
-            
+
             document.getElementById('loading').style.display = 'none';
             document.getElementById('error').style.display = 'flex';
             document.getElementById('error-message').textContent = message;
+        }
+
+        // 延迟确认制报错：先别急着宣布失败，等一小段时间；
+        // 若期间真正起播（playing/进度>1s）就取消提示，避免"先报失败再播放"的糟糕体验
+        let playerErrorTimer = null;
+        function schedulePlayerError(message, delay) {
+            clearTimeout(playerErrorTimer);
+            playerErrorTimer = setTimeout(function() {
+                showError(message);
+            }, delay || 5000);
+        }
+        function cancelPlayerError() {
+            clearTimeout(playerErrorTimer);
         }
 
         // 更新集数信息
