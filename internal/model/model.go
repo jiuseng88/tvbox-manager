@@ -76,6 +76,19 @@ type Detail struct {
 	// CmsSites 可直接用于浏览器聚合搜索的苹果CMS站点接口（/tv 看片页的数据来源）。
 	// 仅保留 type 支持 HTTP 直连的条目，单仓最多 100 条。
 	CmsSites []SiteEntry `json:"cmsSites,omitempty"`
+
+	// LiveSites 直播源地址（/tv 直播页的数据来源）：TVBox 配置 lives[] 里
+	// 可直接 HTTP 拉取的 m3u/txt/json 播放列表。依赖 jar / proxy:// 的条目已剔除，
+	// 单仓最多 50 条。
+	LiveSites []LiveSiteEntry `json:"liveSites,omitempty"`
+}
+
+// LiveSiteEntry 一份直播播放列表：整份文件里包含若干分组与频道。
+// 与 SiteEntry 不同，直播源不是「接口」，拉下来就是完整的频道表。
+type LiveSiteEntry struct {
+	Name  string `json:"name"`
+	URL   string `json:"url"`
+	Group string `json:"group,omitempty"` // TVBox 里 live 条目自带的分组标记
 }
 
 // SiteEntry 单个 CMS 站点接口条目（已归一化为「基础地址」形态，
@@ -207,17 +220,17 @@ type Stats struct {
 // DefaultConfig 内置默认值
 func DefaultConfig() Config {
 	return Config{
-		Token:                 "",
-		Port:                  8080,
-		SubPath:               "/sub",
-		CheckIntervalMinutes:  360,
-		CheckTimeoutSeconds:   10,
-		CheckConcurrency:      10,
-		StartupCheck:          false,
+		Token:                "",
+		Port:                 8080,
+		SubPath:              "/sub",
+		CheckIntervalMinutes: 360,
+		CheckTimeoutSeconds:  10,
+		CheckConcurrency:     10,
+		StartupCheck:         false,
 		// 连续失败自动禁用的默认阈值。曾经默认 0（关闭），大量用户从未进设置页
 		// 打开过它，误以为功能坏了——现在默认给一个保守值：5 轮连续失败才禁用。
 		// 已在 config.json 里显式保存过该键的不受影响（含主动填 0 关闭的）。
-		AutoDisableAfterFails: 5,		InsecureSkipVerify:    true,
-		CheckSubURLs:          false,
+		AutoDisableAfterFails: 5, InsecureSkipVerify: true,
+		CheckSubURLs: false,
 	}
 }

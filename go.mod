@@ -2,6 +2,7 @@ module tvbox-manager
 
 go 1.27.0
 
-require golang.org/x/net v0.61.0
-
-require golang.org/x/text v0.43.0 // indirect
+require (
+	golang.org/x/net v0.61.0
+	golang.org/x/text v0.43.0
+)

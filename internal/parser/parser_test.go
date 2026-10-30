@@ -163,16 +163,16 @@ func TestNormalizeEmptyHost(t *testing.T) {
 // DedupKey 要能把「同一条线路的不同写法」归到一起，但不能误伤真不同的地址。
 func TestDedupKey(t *testing.T) {
 	same := [][2]string{
-		{"https://a.com/tv", "https://a.com/tv/"},                    // 尾斜杠
-		{"https://a.com/tv/", "https://a.com/tv//"},                  // 多个尾斜杠
-		{"https://a.com", "https://a.com/"},                          // 根路径
-		{"http://a.com/tv", "http://a.com:80/tv"},                    // 默认端口
-		{"https://a.com/tv", "https://a.com:443/tv"},                 // 默认端口
-		{"https://a.com/tv", "https://a.com/tv#anchor"},              // fragment
-		{"https://a.com/x?b=2&a=1", "https://a.com/x?a=1&b=2"},       // 参数顺序
-		{"HTTPS://A.COM/TV", "https://a.com/TV"},                     // 协议/主机大小写
-		{"a.com/tv", "http://a.com/tv"},                              // 补协议
-		{"https://a.com/tv/?x=1", "https://a.com/tv?x=1"},            // 斜杠+参数
+		{"https://a.com/tv", "https://a.com/tv/"},              // 尾斜杠
+		{"https://a.com/tv/", "https://a.com/tv//"},            // 多个尾斜杠
+		{"https://a.com", "https://a.com/"},                    // 根路径
+		{"http://a.com/tv", "http://a.com:80/tv"},              // 默认端口
+		{"https://a.com/tv", "https://a.com:443/tv"},           // 默认端口
+		{"https://a.com/tv", "https://a.com/tv#anchor"},        // fragment
+		{"https://a.com/x?b=2&a=1", "https://a.com/x?a=1&b=2"}, // 参数顺序
+		{"HTTPS://A.COM/TV", "https://a.com/TV"},               // 协议/主机大小写
+		{"a.com/tv", "http://a.com/tv"},                        // 补协议
+		{"https://a.com/tv/?x=1", "https://a.com/tv?x=1"},      // 斜杠+参数
 	}
 	for _, c := range same {
 		if got, want := DedupKey(c[0]), DedupKey(c[1]); got != want {
@@ -182,12 +182,12 @@ func TestDedupKey(t *testing.T) {
 
 	// 这些必须保持区分，否则会把真线路并掉
 	diff := [][2]string{
-		{"https://a.com/tv", "https://a.com/TV"},              // 路径大小写
-		{"https://a.com/tv", "https://a.com/tv2"},             // 不同路径
-		{"https://a.com/tv", "http://a.com/tv"},               // 协议不同（服务端可能行为不同）
-		{"https://a.com/tv", "https://b.com/tv"},              // 不同主机
-		{"https://a.com/x?a=1", "https://a.com/x?a=2"},        // 参数值不同
-		{"https://a.com:8443/tv", "https://a.com/tv"},         // 非默认端口
+		{"https://a.com/tv", "https://a.com/TV"},       // 路径大小写
+		{"https://a.com/tv", "https://a.com/tv2"},      // 不同路径
+		{"https://a.com/tv", "http://a.com/tv"},        // 协议不同（服务端可能行为不同）
+		{"https://a.com/tv", "https://b.com/tv"},       // 不同主机
+		{"https://a.com/x?a=1", "https://a.com/x?a=2"}, // 参数值不同
+		{"https://a.com:8443/tv", "https://a.com/tv"},  // 非默认端口
 	}
 	for _, c := range diff {
 		if DedupKey(c[0]) == DedupKey(c[1]) {
@@ -197,5 +197,47 @@ func TestDedupKey(t *testing.T) {
 
 	if DedupKey("  ") != "" {
 		t.Errorf("空地址的去重键应为空串，得到 %q", DedupKey("  "))
+	}
+}
+
+// TestExtractLiveSites lives[] 提取：url 直连收下、urls 多线路逐条收、
+// proxy:// 与内嵌 channels（需 jar）剔除、同地址去重
+func TestExtractLiveSites(t *testing.T) {
+	body := `{
+  "sites": [],
+  "lives": [
+    {"name": "综合直播", "type": 0, "url": "http://a.example/live.txt"},
+    {"name": "多线路", "urls": ["http://b.example/live.m3u", "http://c.example/live.m3u"]},
+    {"name": "带头的", "url": "http://d.example/live.m3u8|User-Agent=Mozilla"},
+    {"name": "需jar", "url": "proxy://do=live&type=txt&ext=http://e.example/live.txt"},
+    {"group": "redirect", "channels": [{"name": "虎牙", "urls": ["proxy://do=live"]}]},
+    {"name": "重复的", "url": "http://a.example/live.txt"},
+    {"name": "相对路径", "url": "./live.txt"},
+    {"name": "脚本", "url": "http://f.example/spider.js"}
+  ]
+}`
+	typ, d, err := Parse([]byte(body))
+	if err != nil || typ != "single" {
+		t.Fatalf("解析失败: typ=%s err=%v", typ, err)
+	}
+	if len(d.LiveSites) != 4 {
+		t.Fatalf("应提取 4 条直播源，实际 %d: %+v", len(d.LiveSites), d.LiveSites)
+	}
+	want := []string{
+		"http://a.example/live.txt",
+		"http://b.example/live.m3u",
+		"http://c.example/live.m3u",
+		"http://d.example/live.m3u8|User-Agent=Mozilla",
+	}
+	for i, w := range want {
+		if d.LiveSites[i].URL != w {
+			t.Errorf("第 %d 条应为 %s，实际 %s", i, w, d.LiveSites[i].URL)
+		}
+	}
+	if d.LiveSites[0].Name != "综合直播" {
+		t.Errorf("名称错误: %s", d.LiveSites[0].Name)
+	}
+	if d.LiveSites[3].Name != "带头的" {
+		t.Errorf("带 | 头的名称错误: %s", d.LiveSites[3].Name)
 	}
 }

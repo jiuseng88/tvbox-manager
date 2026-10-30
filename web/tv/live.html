@@ -1,0 +1,276 @@
+<!DOCTYPE html>
+<html lang="zh">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>电视直播 - tvbox-manager</title>
+    <meta name="description" content="tvbox-manager 内嵌的直播频道页，频道由平铺源的 lives 配置自动聚合。">
+    <meta name="robots" content="noindex, nofollow">
+    <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='%2300ccff'%3E%3Cpath d='M21 6h-7.6l3.3-3.3-1.4-1.4L12 4.6 8.7 1.3 7.3 2.7 10.6 6H3a2 2 0 00-2 2v11a2 2 0 002 2h18a2 2 0 002-2V8a2 2 0 00-2-2z'/%3E%3C/svg%3E">
+    <link rel="stylesheet" href="css/styles.css">
+    <style>
+        :root {
+            --pane-bg: rgba(18, 27, 41, 0.88);
+            --pane-bg-solid: #121b29;
+        }
+        * { box-sizing: border-box; }
+        html, body { height: 100%; }
+        body {
+            margin: 0;
+            color: var(--text-color);
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "Microsoft YaHei", sans-serif;
+            overflow: hidden;
+        }
+
+        /* ---- 顶栏 ---- */
+        .live-header {
+            display: flex;
+            align-items: center;
+            gap: 12px;
+            padding: 9px 16px;
+            background: rgba(15, 22, 34, 0.94);
+            border-bottom: 1px solid var(--border-color);
+        }
+        .back-btn {
+            display: inline-flex;
+            align-items: center;
+            gap: 6px;
+            padding: 6px 12px;
+            font-size: 13px;
+            color: var(--text-color);
+            text-decoration: none;
+            background: #1a2433;
+            border: 1px solid var(--border-color);
+            border-radius: 8px;
+            transition: all .2s;
+        }
+        .back-btn:hover { border-color: var(--primary-color); color: #fff; }
+        .live-title { font-size: 15px; font-weight: 600; letter-spacing: .5px; }
+        .live-title span { color: var(--primary-color); }
+        .live-stat { font-size: 12px; color: var(--text-muted); }
+        .ch-search {
+            margin-left: auto;
+            width: 200px;
+            padding: 7px 12px;
+            font-size: 13px;
+            color: #fff;
+            background: #0e1622;
+            border: 1px solid var(--border-color);
+            border-radius: 8px;
+            outline: none;
+        }
+        .ch-search:focus { border-color: var(--primary-color); }
+
+        /* ---- 主区：分组 / 播放器 / 频道 ---- */
+        .live-main {
+            display: grid;
+            grid-template-columns: 184px minmax(0, 1fr) 320px;
+            gap: 12px;
+            padding: 12px;
+            height: calc(100vh - 53px);
+        }
+        .pane {
+            display: flex;
+            flex-direction: column;
+            min-height: 0;
+            background: var(--pane-bg);
+            border: 1px solid var(--border-color);
+            border-radius: 12px;
+            overflow: hidden;
+        }
+        .pane-title {
+            padding: 9px 12px;
+            font-size: 12px;
+            color: var(--text-muted);
+            border-bottom: 1px solid var(--border-color);
+            display: flex;
+            justify-content: space-between;
+        }
+        .scroll { flex: 1; min-height: 0; overflow-y: auto; }
+        .scroll::-webkit-scrollbar { width: 6px; }
+        .scroll::-webkit-scrollbar-thumb { background: #2a3748; border-radius: 3px; }
+
+        .group-item {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            gap: 6px;
+            padding: 9px 12px;
+            font-size: 13px;
+            color: #c4d2e3;
+            cursor: pointer;
+            border-left: 2px solid transparent;
+        }
+        .group-item:hover { background: rgba(255, 255, 255, .04); }
+        .group-item.active {
+            background: rgba(0, 204, 255, .12);
+            border-left-color: var(--primary-color);
+            color: #fff;
+        }
+        .group-item .gname { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+        .group-item .gcount { flex: none; font-size: 11px; color: var(--text-muted); }
+
+        .stage { display: flex; flex-direction: column; gap: 10px; min-width: 0; }
+        .player-box {
+            position: relative;
+            background: #000;
+            border: 1px solid var(--border-color);
+            border-radius: 12px;
+            overflow: hidden;
+            aspect-ratio: 16 / 9;
+            max-height: calc(100vh - 190px);
+            margin: 0 auto;
+            width: 100%;
+        }
+        .player-box video { width: 100%; height: 100%; display: block; background: #000; }
+        .player-tip {
+            position: absolute;
+            inset: 0;
+            display: none;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            gap: 10px;
+            padding: 20px;
+            text-align: center;
+            font-size: 13px;
+            line-height: 1.7;
+            color: #cfd8e3;
+            background: rgba(0, 0, 0, .66);
+        }
+        .player-tip.show { display: flex; }
+        .player-tip .spin {
+            width: 22px;
+            height: 22px;
+            border: 2px solid rgba(0, 204, 255, .25);
+            border-top-color: var(--primary-color);
+            border-radius: 50%;
+            animation: spin .9s linear infinite;
+        }
+        @keyframes spin { to { transform: rotate(360deg); } }
+
+        .now-bar {
+            display: flex;
+            align-items: center;
+            flex-wrap: wrap;
+            gap: 8px;
+            padding: 9px 14px;
+            background: var(--pane-bg);
+            border: 1px solid var(--border-color);
+            border-radius: 12px;
+        }
+        .now-name { font-size: 15px; font-weight: 600; }
+        .now-src { font-size: 11px; color: var(--text-muted); }
+        .line-group { display: flex; gap: 6px; margin-left: auto; flex-wrap: wrap; }
+        .line-btn {
+            padding: 4px 11px;
+            font-size: 12px;
+            color: #cfe0f5;
+            background: #1a2433;
+            border: 1px solid var(--border-color);
+            border-radius: 999px;
+            cursor: pointer;
+        }
+        .line-btn:hover { border-color: var(--primary-color); }
+        .line-btn.active {
+            color: #fff;
+            background: rgba(0, 204, 255, .18);
+            border-color: var(--primary-color);
+        }
+
+        .chan-item {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            padding: 8px 12px;
+            font-size: 13px;
+            color: #c4d2e3;
+            cursor: pointer;
+            border-left: 2px solid transparent;
+        }
+        .chan-item:hover { background: rgba(255, 255, 255, .04); }
+        .chan-item.active {
+            background: rgba(0, 204, 255, .12);
+            border-left-color: var(--primary-color);
+            color: #fff;
+        }
+        .chan-logo {
+            flex: none;
+            width: 22px;
+            height: 22px;
+            object-fit: contain;
+            border-radius: 4px;
+            background: #0e1622;
+        }
+        .chan-logo.ph {
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-size: 10px;
+            color: var(--text-muted);
+            border: 1px solid #22303f;
+        }
+        .chan-name { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+        .chan-lines { flex: none; font-size: 10px; color: var(--text-muted); }
+        .empty { padding: 26px 16px; text-align: center; font-size: 13px; line-height: 1.9; color: var(--text-muted); }
+
+        @media (max-width: 1000px) {
+            body { overflow: auto; }
+            .live-main {
+                grid-template-columns: 1fr;
+                height: auto;
+                padding: 10px;
+            }
+            .player-box { max-height: none; }
+            .chan-pane { max-height: 46vh; }
+            .group-pane { order: 2; max-height: 32vh; }
+            .chan-pane { order: 3; }
+            .ch-search { width: 130px; }
+            .live-stat { display: none; }
+        }
+    </style>
+</head>
+<body class="page-bg">
+    <header class="live-header">
+        <a class="back-btn" href="./" title="返回影视搜索">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" aria-hidden="true">
+                <path d="M15 18l-6-6 6-6" stroke-linecap="round" stroke-linejoin="round"/>
+            </svg>
+            影视
+        </a>
+        <div class="live-title">电视<span>直播</span></div>
+        <div class="live-stat" id="liveStat"></div>
+        <input class="ch-search" id="chSearch" type="search" placeholder="搜索频道" autocomplete="off">
+    </header>
+
+    <main class="live-main">
+        <aside class="pane group-pane">
+            <div class="pane-title"><span>频道分组</span></div>
+            <div class="scroll" id="groupList"></div>
+        </aside>
+
+        <section class="stage">
+            <div class="player-box">
+                <video id="liveVideo" controls playsinline preload="none"></video>
+                <div class="player-tip" id="playerTip"></div>
+            </div>
+            <div class="now-bar">
+                <div>
+                    <div class="now-name" id="nowName">选择一个频道开始观看</div>
+                    <div class="now-src" id="nowSrc"></div>
+                </div>
+                <div class="line-group" id="lineGroup"></div>
+            </div>
+        </section>
+
+        <aside class="pane chan-pane">
+            <div class="pane-title"><span id="chanPaneTitle">频道</span><span id="chanCount"></span></div>
+            <div class="scroll" id="chanList"></div>
+        </aside>
+    </main>
+
+    <script src="js/vendor/hls.min.js"></script>
+    <script src="js/vendor/mpegts.min.js"></script>
+    <script src="js/live.js"></script>
+</body>
+</html>

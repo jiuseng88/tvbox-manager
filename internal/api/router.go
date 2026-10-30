@@ -110,6 +110,8 @@ func (a *API) Router() http.Handler {
 	})
 	root.HandleFunc("GET /tvapi/sources", a.handleTVSources)
 	root.HandleFunc("GET /tvapi/proxy", a.handleTVProxy)
+	// 直播频道表：从平铺源 lives[] 聚合 m3u/txt 播放列表，解析合并后下发
+	root.HandleFunc("GET /tvapi/live", a.handleTVLive)
 
 	// 静态资源（前端 SPA，go:embed 注入）；不限定方法，避免与 /api/ 子树模式冲突
 	root.Handle("/", a.spaHandler())

@@ -160,6 +160,7 @@ func Parse(body []byte) (string, *model.Detail, error) {
 	d.SiteNames = extractNames(raw.Sites, 50)
 	d.LiveNames = extractNames(raw.Lives, 20)
 	d.CmsSites = extractCmsSites(raw.Sites, 100)
+	d.LiveSites = extractLiveSites(raw.Lives, 50)
 
 	// 多仓优先
 	if subs := parseSubURLs(raw.URLs); len(subs) > 0 {
@@ -232,6 +233,92 @@ func extractCmsSites(items []json.RawMessage, limit int) []model.SiteEntry {
 		out = append(out, model.SiteEntry{Name: name, API: base, Host: HostOf(base), Adult: o.Adult})
 	}
 	return out
+}
+
+// extractLiveSites 从 lives 数组提取可直接拉取的直播播放列表（/tv 直播页数据源）。
+// TVBox 的 lives 条目有三种形态：
+//
+//	{"name":"x","url":"http://a/live.m3u","type":0}   ← 首选，直接可拉
+//	{"name":"x","urls":["http://a/live.m3u", ...]}    ← 多线路，逐条收
+//	{"group":"redirect","channels":[...]}             ← 内嵌频道，多为 proxy:// 需 jar，跳过
+//
+// 只有 http/https 能进结果：proxy:// 依赖 jar 解析，p2p/rtmp/rtsp 浏览器直连不了，
+// 相对路径（./live.txt）缺仓地址做基准也无从拉取。同一地址在多仓重复出现只保留一条。
+func extractLiveSites(items []json.RawMessage, limit int) []model.LiveSiteEntry {
+	seen := make(map[string]bool, len(items))
+	out := make([]model.LiveSiteEntry, 0, len(items))
+	for _, it := range items {
+		if len(out) >= limit {
+			break
+		}
+		var o struct {
+			Name  string   `json:"name"`
+			Group string   `json:"group"`
+			URL   string   `json:"url"`
+			URLs  []string `json:"urls"`
+		}
+		if json.Unmarshal(it, &o) != nil {
+			continue
+		}
+		cands := make([]string, 0, len(o.URLs)+1)
+		if o.URL != "" {
+			cands = append(cands, o.URL)
+		}
+		cands = append(cands, o.URLs...)
+
+		for _, raw := range cands {
+			if len(out) >= limit {
+				break
+			}
+			raw = strings.TrimSpace(raw)
+			if !isPullableLiveURL(raw) {
+				continue
+			}
+			key := liveDedupKey(raw)
+			if seen[key] {
+				continue
+			}
+			seen[key] = true
+			name := strings.TrimSpace(o.Name)
+			if name == "" {
+				name = strings.TrimSpace(o.Group)
+			}
+			if name == "" {
+				name = HostOf(raw)
+			}
+			out = append(out, model.LiveSiteEntry{Name: name, URL: raw, Group: o.Group})
+		}
+	}
+	return out
+}
+
+// isPullableLiveURL 判断一条 live 地址是否值得交给服务端去拉。
+func isPullableLiveURL(raw string) bool {
+	low := strings.ToLower(raw)
+	if !strings.HasPrefix(low, "http://") && !strings.HasPrefix(low, "https://") {
+		return false
+	}
+	for _, bad := range []string{".jar", ".js", ".py", ".apk", ".exe"} {
+		if strings.HasSuffix(strings.SplitN(low, "|", 2)[0], bad) {
+			return false
+		}
+	}
+	return true
+}
+
+// liveDedupKey 直播地址去重键：先剥掉 | 之后的请求头参数，再按 DedupKey 归一化。
+// 不带这步会把「同一地址、不同 UA」当成两个源，白拉一遍。
+func liveDedupKey(raw string) string {
+	stem, _ := splitLiveHeader(raw)
+	return DedupKey(stem)
+}
+
+// splitLiveHeader 拆分直播地址里的 | 请求头参数（如 http://a/b.m3u8|User-Agent=xx&Referer=yy）。
+func splitLiveHeader(raw string) (string, string) {
+	if i := strings.Index(raw, "|"); i >= 0 {
+		return strings.TrimSpace(raw[:i]), strings.TrimSpace(raw[i+1:])
+	}
+	return strings.TrimSpace(raw), ""
 }
 
 // rawJSONInt 宽松读取 JSON 数字字段（number 直解；其余形态视为缺失）
