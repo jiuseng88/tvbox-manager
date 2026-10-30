@@ -302,16 +302,30 @@ docker compose down && rm -rf ./data/config.json && docker compose up -d
 
 ## 多架构构建（NAS 常为 arm64）
 
+推荐用脚本，一条命令搞定多架构构建 + 推送（在任意有 Docker 的机器上执行）：
+
 ```bash
-docker buildx build --platform linux/amd64,linux/arm64,linux/arm/v7 \
-  -t yourname/tvbox-manager:latest --push .
+./scripts/build-image.sh                    # 构建 amd64/arm64/armv7 并推送到默认仓库
+TAG=1.4.7 ./scripts/build-image.sh          # 指定 tag（默认读 main.go 的 version）
+./scripts/build-image.sh --load             # 只构建本机架构并载入 docker，用于本地验证
+PLATFORMS=linux/amd64 ./scripts/build-image.sh   # 只构建单架构
 ```
 
-本机没有 Docker 也能编译（宿主只需 Docker）：
+脚本会同时打 `:版本号` 与 `:latest`，并默认关闭 attestation（部分个人版镜像仓库不接受
+manifest list 里的 provenance 层，会报 `invalid manifest`）。
+
+手工等价命令：
 
 ```bash
-docker run --rm -v "$PWD":/src -w /src -e CGO_ENABLED=0 \
-  golang:1.27-alpine sh -c "go mod download && go build -ldflags='-s -w' -o bin/tvbox-manager ."
+docker buildx build --platform linux/amd64,linux/arm64,linux/arm/v7 \
+  -t registry.cn-hangzhou.aliyuncs.com/qdjzw/jiuseng:latest --push .
+```
+
+只想拿**二进制**、不需要镜像时，可在任意装了 Go 的机器上交叉编译（无需 Docker）：
+
+```bash
+CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath -ldflags="-s -w" -o tvbox-manager .
+# NAS/树莓派：GOARCH=arm64（或 arm GOARM=7）
 ```
 
 ## 开发

@@ -1,0 +1,3 @@
+# 脚本必须用 LF：在 Windows 上编辑后推到 Linux 服务器执行时，CRLF 会导致
+# "/bin/bash^M: bad interpreter" 或 "syntax error near unexpected token $'\r'"
+*.sh text eol=lf
