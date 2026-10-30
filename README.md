@@ -2,6 +2,7 @@
 
 > **许可证**：[AGPL-3.0](LICENSE) —— 可自由使用、修改、分发，**商用也可，但必须开源**（含对外提供服务时公开源码）。
 > 需要**闭源商用**请购买商业授权 → [COMMERCIAL.md](COMMERCIAL.md)。参与贡献请先阅读 [CONTRIBUTING.md](CONTRIBUTING.md)（含 CLA）。
+> **联系**：QQ `1343314118` · 邮箱 `1343314118@qq.com`
 
 自托管的 TVBox 类仓库源管理系统：录入源地址、实时预览、定时探活、启停管理，
 对外只暴露**一个订阅地址**，三方客户端（TVBox / OK影视 / 影视仓 / 猫影视等）填入即可获得当前启用的多仓源。
@@ -415,6 +416,19 @@ PORT=18080 DATA_DIR=./data go run . -web ./web
 
 - `/tv` 看片页基于 [LibreTV](https://github.com/LibreSpark/LibreTV)（**Apache-2.0**），原始许可见 `web/tv/LICENSE`；Apache-2.0 与 AGPL-3.0 兼容，本项目整体按 AGPL-3.0 分发
 - 前端 `web/tv/js/vendor/` 内的 hls.js、mpegts.js（Apache-2.0）与 Vue 3（MIT）遵循各自原许可证
+
+## 联系与反馈
+
+| 用途 | 方式 |
+|---|---|
+| 问题反馈 / 功能建议 | [GitHub Issues](https://github.com/jiuseng88/tvbox-manager/issues)（推荐，便于他人检索） |
+| 即时沟通 | QQ **1343314118** |
+| 邮件 / 商业授权 | **1343314118@qq.com** |
+
+提交 Issue 时请附上版本号（后台概览页或 `./tvbox-manager -version`）、部署方式（Docker / 二进制）、
+报错日志与复现步骤。涉及具体源地址的，请先确认该源可以公开讨论。
+
+**商业授权**请在邮件标题注明 `[商业授权]`，并简要说明：是否闭源、部署规模、是否对外分发，见 [COMMERCIAL.md](COMMERCIAL.md)。
 
 ## 法律提示
 

@@ -80,3 +80,13 @@ Date: <YYYY-MM-DD>
 - 提交 `data/`、密钥、个人配置或构建产物
 - 大面积格式化/无关重构混在功能改动里
 - 声称修复但没有任何验证说明
+
+## 6. 联系方式
+
+| 方式 | 地址 |
+|---|---|
+| 邮箱 | **1343314118@qq.com** |
+| QQ | **1343314118** |
+| GitHub Issue | [jiuseng88/tvbox-manager/issues](https://github.com/jiuseng88/tvbox-manager/issues) |
+
+CLA 之外的事项（商业授权、私有部署支持）请走邮箱，见 [COMMERCIAL.md](COMMERCIAL.md)。
