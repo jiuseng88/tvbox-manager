@@ -1,0 +1,39 @@
+# ---------- 离线构建：仅运行阶段 ----------
+# 与仓库 Dockerfile 的最终阶段完全等价，区别是不在容器里编译 Go：
+# 二进制由**同版本 Go** 交叉编译好再 COPY 进来
+#   CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath -ldflags="-s -w" -o dist/tvbox-manager .
+#
+# 适用场景：
+#   1. 宿主机内存很小（<512MB），容器内跑 Go 编译会 swap 甚至被 OOM kill
+#   2. 拉不到 golang:1.27-alpine 基础镜像，但本地有 alpine
+#   3. 只想快速重打镜像（秒级完成，不需要重新编译）
+#
+# 需要「从源码一步构建」时仍用仓库根目录的 Dockerfile（多阶段）。
+# 用法：docker build -f Dockerfile.offline -t <repo>/tvbox-manager:<ver> .
+FROM alpine:3.20
+
+# 换成国内源，避免 dl-cdn 慢导致构建卡住
+RUN sed -i 's|dl-cdn.alpinelinux.org|mirrors.aliyun.com|g' /etc/apk/repositories \
+    && apk add --no-cache ca-certificates tzdata wget \
+    && addgroup -S app && adduser -S app -G app \
+    && mkdir -p /data && chown -R app:app /data
+
+WORKDIR /app
+COPY dist/tvbox-manager ./tvbox-manager
+RUN chmod +x ./tvbox-manager
+
+# 这三项只是容器内的默认值，首次启动时写入 config.json；
+# 之后以后台「设置」/ config.json 为准，环境变量不再覆盖（ENV_OVERRIDE=1 可强制覆盖）
+ENV TZ=Asia/Shanghai \
+    DATA_DIR=/data \
+    PORT=8080 \
+    SUB_PATH=/sub
+
+USER app
+EXPOSE 8080
+VOLUME ["/data"]
+
+HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
+  CMD wget -qO- "http://127.0.0.1:${PORT:-8080}/healthz" || exit 1
+
+ENTRYPOINT ["./tvbox-manager"]

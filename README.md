@@ -328,6 +328,19 @@ CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath -ldflags="-s -w" -o tvb
 # NAS/树莓派：GOARCH=arm64（或 arm GOARM=7）
 ```
 
+### 内存受限 / 拉不到 golang 镜像时（离线构建）
+
+容器内跑 Go 编译需要几百 MB 内存，小内存 VPS（<512MB）会 swap 甚至被 OOM kill。
+改成「本地交叉编译 + 只打运行层」，秒级完成，产物与多阶段构建一致：
+
+```bash
+CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath -ldflags="-s -w" -o dist/tvbox-manager .
+docker build -f Dockerfile.offline -t registry.cn-hangzhou.aliyuncs.com/qdjzw/jiuseng:1.4.7 .
+```
+
+`Dockerfile.offline` 与根目录 `Dockerfile` 的最终阶段完全等价，只把「编译」这一步移到宿主侧，
+因此**二进制必须用与 `go.mod` 相同版本的 Go 编译**，否则行为可能与预期不同。
+
 ## 开发
 
 ```bash

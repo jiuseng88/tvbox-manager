@@ -8,6 +8,7 @@ web/node_modules/
 /tvbox-manager.exe~
 /bin/
 /build/
+/dist/
 *.test
 *.out
 
