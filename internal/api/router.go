@@ -1,6 +1,7 @@
 package api
 
 import (
+	"context"
 	"crypto/subtle"
 	"encoding/json"
 	"io/fs"
@@ -36,7 +37,10 @@ const maxPageSize = 500
 
 // New webFS 必须是「以 web 目录为根」的文件系统（prod: embed 子目录，dev: os.DirFS）。
 func New(st *store.Store, sch *scheduler.Scheduler, version string, webFS fs.FS) *API {
-	return &API{st: st, sch: sch, ver: version, web: webFS}
+	a := &API{st: st, sch: sch, ver: version, web: webFS}
+	// 定时刮削（L3 档）：scheduler 到点回调本实例的同步链路，与手动「同步全部种子」完全一致
+	sch.SetScrapeSync(func(ctx context.Context) { a.runScrapeSync(ctx) })
+	return a
 }
 
 // DevMode 开发模式：前端资源不走缓存，便于改完刷新浏览器立即看到效果。

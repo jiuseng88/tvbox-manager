@@ -57,6 +57,10 @@ func (a *API) handleConfigPut(w http.ResponseWriter, r *http.Request) {
 		badRequest(w, "并发数需在 1-100 之间")
 		return
 	}
+	if req.ScrapeIntervalHours < 0 || req.ScrapeIntervalHours > 8760 {
+		badRequest(w, "刮削同步间隔需在 0-8760 小时之间（0 = 关闭）")
+		return
+	}
 	if req.Port <= 0 || req.Port > 65535 {
 		badRequest(w, "端口非法")
 		return

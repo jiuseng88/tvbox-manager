@@ -234,16 +234,27 @@ type scrapeSyncStat struct {
 }
 
 // handleScrapeSync POST /api/scrape/sync
-// 遍历启用的种子，逐个拉取 → 识别条目 → 归一化去重 → 写入候选区（不自动入库）。
+// 手动触发一轮种子同步（与定时刮削共用 runScrapeSync）。
 func (a *API) handleScrapeSync(w http.ResponseWriter, r *http.Request) {
-	if !scrapeSyncMu.TryLock() {
+	stat := a.runScrapeSync(r.Context())
+	if stat == nil {
 		writeJSON(w, http.StatusConflict, envelope{Code: 409, Msg: "已有同步任务在运行"})
 		return
+	}
+	ok(w, stat)
+}
+
+// runScrapeSync 遍历启用的种子，逐个拉取 → 识别条目 → 归一化去重 → 写入候选区（不自动入库）。
+// HTTP 手动触发与定时调度（scheduler.SetScrapeSync）共用；同一时刻只允许一个同步任务，
+// 被占用时返回 nil。调用方应基于返回的统计展示/记录。
+func (a *API) runScrapeSync(ctx context.Context) *scrapeSyncStat {
+	if !scrapeSyncMu.TryLock() {
+		return nil
 	}
 	defer scrapeSyncMu.Unlock()
 
 	seeds := a.st.ListScrapeSeeds()
-	stat := scrapeSyncStat{}
+	stat := &scrapeSyncStat{}
 	now := time.Now()
 
 	for i := range seeds {
@@ -252,7 +263,7 @@ func (a *API) handleScrapeSync(w http.ResponseWriter, r *http.Request) {
 			continue
 		}
 		stat.Seeds++
-		res, body := a.sch.Checker().Fetch(r.Context(), sd.URL, true) // SSRF 强制
+		res, body := a.sch.Checker().Fetch(ctx, sd.URL, true) // SSRF 强制
 		if res.Status != model.StatusOK {
 			msg := "同步失败: " + res.Msg
 			stat.Errors = append(stat.Errors, fmt.Sprintf("%s：%s", sd.Name, msg))
@@ -335,7 +346,7 @@ func (a *API) handleScrapeSync(w http.ResponseWriter, r *http.Request) {
 	if err := a.st.Save(); err != nil {
 		log.Printf("[scrape] 同步后落盘失败: %v", err)
 	}
-	ok(w, stat)
+	return stat
 }
 
 // extractScrapeEntries 把拉取到的内容转成候选条目（JSON 智能识别 + txt 行列表兜底）。

@@ -705,6 +705,7 @@
               <span class="muted">大量源用自签/过期证书，默认跳过才能判断源本身可用性</span>
             </div>
             <div class="form-row"><label>监听端口 <span class="muted">(重启生效)</span></label><input type="number" v-model.number="config.port"></div>
+            <div class="form-row"><label>定时刮削同步（小时，0=关闭）<span class="muted">到点自动拉取种子进候选区，不自动入库；与「同步全部种子」同链路</span></label><input type="number" v-model.number="config.scrapeIntervalHours" min="0" max="8760"></div>
             <div class="form-row"><label>订阅路径 <span class="muted">(重启生效)</span></label><input v-model="config.subPath"></div>
             <div class="form-row"><label>开放看片页 <span class="muted">/tv 及 /tvapi/*</span></label>
               <switch-box :on="config.showTv" @toggle="config.showTv = !config.showTv"></switch-box>

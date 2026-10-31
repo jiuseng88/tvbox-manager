@@ -174,6 +174,9 @@ type Config struct {
 	// 关闭后菜单项隐藏，且直接访问路径返回 404——不是"隐藏入口"，是真的关掉。
 	// 注意零值为 false，默认值必须由 DefaultConfig 显式给 true，缺字段的老配置才能保持开启。
 	ShowTV bool `json:"showTv"`
+	// ScrapeIntervalHours 自动刮削定时同步间隔（小时）：0 = 关闭；>0 = 每隔 N 小时同步一次种子。
+	// 定时同步与手动「同步全部种子」同一条链路：拉取 → 识别 → 候选区（不自动入库）。
+	ScrapeIntervalHours int `json:"scrapeIntervalHours,omitempty"`
 }
 
 // CheckProgress 探活任务进度

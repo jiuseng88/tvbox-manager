@@ -1186,6 +1186,7 @@
             insecureSkipVerify: !!c.insecureSkipVerify,
             checkSubUrls: !!c.checkSubUrls,
             showTv: !!c.showTv,
+            scrapeIntervalHours: Number(c.scrapeIntervalHours) || 0,
           });
           tvEnabled.value = !!c.showTv; // 导航项跟着配置立即变
           toast("配置已保存（探活设置立即生效）", "ok");
