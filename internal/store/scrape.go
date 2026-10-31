@@ -5,6 +5,7 @@ import (
 	"encoding/hex"
 	"fmt"
 	"sort"
+	"strings"
 	"time"
 
 	"tvbox-manager/internal/model"
@@ -171,4 +172,12 @@ func (s *Store) TouchScrapeSeedSync(id, msg string, at time.Time) {
 			return
 		}
 	}
+}
+
+// LiveSourceExists 是否存在同 key 的直播源（直播刮削同步时标记 dup 用）。
+// 复用 AddLiveSources 同一套 liveKey 去重口径，避免同步标记与导入判断不一致。
+func (s *Store) LiveSourceExists(rawURL string) bool {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.findLiveByKeyLocked(liveKey(strings.TrimSpace(rawURL))) >= 0
 }

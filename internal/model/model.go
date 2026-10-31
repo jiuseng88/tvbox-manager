@@ -306,9 +306,12 @@ type LiveSource struct {
 // ScrapeSeed 自动刮削种子：一条可定期同步的公开订阅源地址。
 // 来源仅限用户主动添加（源集合站点 / 公开仓库直链），不做全网自动发现。
 type ScrapeSeed struct {
-	ID      string `json:"id"`
-	Name    string `json:"name"`
-	URL     string `json:"url"` // 归一化后唯一
+	ID   string `json:"id"`
+	Name string `json:"name"`
+	URL  string `json:"url"` // 归一化后唯一
+	// Type 种子类型：tvbox（源地址刮削，默认）/ live（直播播放列表刮削）。
+	// 空值 = tvbox，兼容已有旧数据。
+	Type    string `json:"type,omitempty"`
 	Group   string `json:"group"`
 	Enabled bool   `json:"enabled"` // 是否参与同步
 	Remark  string `json:"remark,omitempty"`
@@ -323,13 +326,15 @@ type ScrapeSeed struct {
 // ScrapeCandidate 刮削候选：同步后等待用户确认的条目。
 // 语义：先候选后确认——候选不自动入库；apply 后按结果标记 applied/skipped。
 type ScrapeCandidate struct {
-	ID        string    `json:"id"`
-	SeedID    string    `json:"seedId,omitempty"`
-	SeedName  string    `json:"seedName,omitempty"`
-	Name      string    `json:"name"`
-	URL       string    `json:"url"` // 归一化后
-	Kind      string    `json:"kind,omitempty"` // repo-single / repo-multi / urls / array / txt
-	Dup       bool      `json:"dup"`            // 已存在于现有源（同步时标记，不重复入库）
-	Status    string    `json:"status"`         // pending / applied / skipped
+	ID       string `json:"id"`
+	SeedID   string `json:"seedId,omitempty"`
+	SeedName string `json:"seedName,omitempty"`
+	Name     string `json:"name"`
+	URL      string `json:"url"` // 归一化后
+	// Target 候选去向：source（导入源列表）/ live（导入直播源列表）。空 = source。
+	Target  string `json:"target,omitempty"`
+	Kind    string `json:"kind,omitempty"` // repo-single / repo-multi / urls / array / txt / playlist / live-json / live-txt
+	Dup     bool   `json:"dup"`            // 已存在于现有源（同步时标记，不重复入库）
+	Status  string `json:"status"`         // pending / applied / skipped
 	FetchedAt time.Time `json:"fetchedAt"`
 }

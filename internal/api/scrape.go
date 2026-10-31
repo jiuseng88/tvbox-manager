@@ -1,6 +1,8 @@
 package api
 
 import (
+	"context"
+	"encoding/json"
 	"fmt"
 	"log"
 	"net/http"
@@ -97,6 +99,7 @@ func (a *API) handleScrapeImport(w http.ResponseWriter, r *http.Request) {
 type scrapeSeedReq struct {
 	Name    string `json:"name"`
 	URL     string `json:"url"`
+	Type    string `json:"type"` // tvbox（源地址刮削）/ live（直播播放列表刮削），空 = tvbox
 	Group   string `json:"group"`
 	Enabled *bool  `json:"enabled"`
 	Remark  string `json:"remark"`
@@ -130,12 +133,20 @@ func (a *API) handleScrapeSeedAdd(w http.ResponseWriter, r *http.Request) {
 	if group == "" {
 		group = "默认"
 	}
+	stype := strings.TrimSpace(req.Type)
+	if stype == "" {
+		stype = "tvbox"
+	}
+	if stype != "tvbox" && stype != "live" {
+		badRequest(w, "type 仅支持 tvbox / live")
+		return
+	}
 	en := true
 	if req.Enabled != nil {
 		en = *req.Enabled
 	}
 	created, err := a.st.AddScrapeSeed(&model.ScrapeSeed{
-		Name: name, URL: norm, Group: group, Enabled: en, Remark: strings.TrimSpace(req.Remark),
+		Name: name, URL: norm, Type: stype, Group: group, Enabled: en, Remark: strings.TrimSpace(req.Remark),
 	})
 	if err != nil {
 		serverError(w, err)
@@ -147,6 +158,7 @@ func (a *API) handleScrapeSeedAdd(w http.ResponseWriter, r *http.Request) {
 type scrapeSeedUpdateReq struct {
 	Name    *string `json:"name"`
 	URL     *string `json:"url"`
+	Type    *string `json:"type"` // tvbox / live，空 = 不改
 	Group   *string `json:"group"`
 	Enabled *bool   `json:"enabled"`
 	Remark  *string `json:"remark"`
@@ -162,6 +174,13 @@ func (a *API) handleScrapeSeedUpdate(w http.ResponseWriter, r *http.Request) {
 	if !decodeJSON(w, r, &req) {
 		return
 	}
+	if req.Type != nil {
+		st := strings.TrimSpace(*req.Type)
+		if st != "tvbox" && st != "live" {
+			badRequest(w, "type 仅支持 tvbox / live")
+			return
+		}
+	}
 	err := a.st.UpdateScrapeSeed(id, func(sp *model.ScrapeSeed) {
 		if req.Name != nil {
 			sp.Name = strings.TrimSpace(*req.Name)
@@ -170,6 +189,9 @@ func (a *API) handleScrapeSeedUpdate(w http.ResponseWriter, r *http.Request) {
 			if norm, nerr := parser.Normalize(*req.URL); nerr == nil {
 				sp.URL = norm
 			}
+		}
+		if req.Type != nil {
+			sp.Type = strings.TrimSpace(*req.Type)
 		}
 		if req.Group != nil {
 			sp.Group = strings.TrimSpace(*req.Group)
@@ -237,7 +259,18 @@ func (a *API) handleScrapeSync(w http.ResponseWriter, r *http.Request) {
 			a.st.TouchScrapeSeedSync(sd.ID, msg, now)
 			continue
 		}
-		entries, kind := extractScrapeEntries(string(body), sd.Name, sd.URL)
+		// 按种子类型分流：tvbox 刮源地址（候选导入源列表）；
+		// live 刮直播播放列表（候选导入直播源列表）。
+		var entries []jsonEntry
+		kind := ""
+		target := "source"
+		switch sd.Type {
+		case "live":
+			entries, kind = extractLiveSeedEntries(string(body), sd.Name, sd.URL)
+			target = "live"
+		default: // "" / tvbox
+			entries, kind = extractScrapeEntries(string(body), sd.Name, sd.URL)
+		}
 		if len(entries) == 0 {
 			msg := "同步完成，未识别到任何源地址"
 			stat.Errors = append(stat.Errors, fmt.Sprintf("%s：%s", sd.Name, msg))
@@ -249,12 +282,22 @@ func (a *API) handleScrapeSync(w http.ResponseWriter, r *http.Request) {
 		seen := map[string]bool{}
 		dup := 0
 		for _, e := range entries {
-			norm, err := parser.Normalize(e.URL)
-			if err != nil || seen[norm] {
+			// 直播 URL 可带 | 请求头参数（如 |User-Agent=xx），不做 URL 归一化，按原样判重入库
+			storeURL := strings.TrimSpace(e.URL)
+			norm, nerr := parser.Normalize(storeURL)
+			if nerr == nil {
+				storeURL = norm
+			}
+			if storeURL == "" || seen[strings.ToLower(storeURL)] {
 				continue
 			}
-			seen[norm] = true
-			_, exists := a.st.GetByURL(norm)
+			seen[strings.ToLower(storeURL)] = true
+			exists := false
+			if target == "live" {
+				exists = a.st.LiveSourceExists(e.URL)
+			} else {
+				_, exists = a.st.GetByURL(storeURL)
+			}
 			if exists {
 				dup++
 			}
@@ -263,7 +306,8 @@ func (a *API) handleScrapeSync(w http.ResponseWriter, r *http.Request) {
 				SeedID:    sd.ID,
 				SeedName:  sd.Name,
 				Name:      e.Name,
-				URL:       norm,
+				URL:       storeURL,
+				Target:    target,
 				Kind:      kind,
 				Dup:       exists,
 				Status:    "pending",
@@ -358,8 +402,9 @@ type scrapeApplyReq struct {
 }
 
 // handleScrapeApply POST /api/scrape/apply
-// 把选中的 pending 候选导入为源（复用批量导入语义：归一化 + 查重 + 自动探活）。
-// 导入结果回写候选状态：成功 → applied；已存在/非法 → skipped。
+// 把选中的 pending 候选导入：source 候选 → 源列表；live 候选 → 直播源列表。
+// 复用批量导入语义（归一化 + 查重 + 自动探活）；导入结果回写候选状态：
+// 成功 → applied；已存在/非法 → skipped。
 func (a *API) handleScrapeApply(w http.ResponseWriter, r *http.Request) {
 	var req scrapeApplyReq
 	if !decodeJSON(w, r, &req) {
@@ -390,7 +435,8 @@ func (a *API) handleScrapeApply(w http.ResponseWriter, r *http.Request) {
 	type applyItem struct {
 		cand model.ScrapeCandidate
 	}
-	var items []applyItem
+	var sourceItems []applyItem
+	var liveItems []applyItem
 	updates := map[string]string{}
 	for _, c := range a.st.ListScrapeCandidates() {
 		if !want[c.ID] {
@@ -404,14 +450,22 @@ func (a *API) handleScrapeApply(w http.ResponseWriter, r *http.Request) {
 			updates[c.ID] = "skipped" // 已存在：标记跳过，不重复入库
 			continue
 		}
-		items = append(items, applyItem{cand: c})
+		it := applyItem{cand: c}
+		if c.Target == "live" {
+			liveItems = append(liveItems, it)
+		} else {
+			sourceItems = append(sourceItems, it)
+		}
 	}
 
 	addedCount := 0
 	skippedCount := len(updates)
-	var added []model.Source
 	var skipped []map[string]string
-	for _, it := range items {
+	var addedSrcs []model.Source
+	var addedLiveIDs []string
+
+	// —— TVBox 源候选：导入源列表（逐条：归一化 + 查重 + Add）——
+	for _, it := range sourceItems {
 		c := it.cand
 		norm, err := parser.Normalize(c.URL)
 		if err != nil {
@@ -443,14 +497,42 @@ func (a *API) handleScrapeApply(w http.ResponseWriter, r *http.Request) {
 		}
 		updates[c.ID] = "applied"
 		addedCount++
-		added = append(added, src)
+		addedSrcs = append(addedSrcs, src)
 	}
+
+	// —— 直播源候选：导入直播源列表（URL 可带 | 请求头参数，按原样入库；store 内去重 + 墓碑恢复）——
+	for _, it := range liveItems {
+		c := it.cand
+		raw := strings.TrimSpace(c.URL)
+		if raw == "" {
+			updates[c.ID] = "skipped"
+			skippedCount++
+			continue
+		}
+		nm := strings.TrimSpace(c.Name)
+		ls, err := a.st.AddLiveSource(nm, raw, group, "自动刮削导入", enabled, 0)
+		if err != nil {
+			updates[c.ID] = "skipped"
+			skippedCount++
+			skipped = append(skipped, map[string]string{"url": raw, "reason": err.Error()})
+			continue
+		}
+		updates[c.ID] = "applied"
+		addedCount++
+		addedLiveIDs = append(addedLiveIDs, ls.ID)
+	}
+
 	if len(updates) > 0 {
 		_ = a.st.UpdateScrapeCandidates(updates)
 	}
 	// 与批量导入同口径：新增的源立即异步探活，定型后站点源进订阅
-	if len(added) > 0 {
-		go a.asyncCheckSources(added)
+	if len(addedSrcs) > 0 {
+		go a.asyncCheckSources(addedSrcs)
+	}
+	// 直播源同理：清失效缓存 + 异步检测
+	if len(addedLiveIDs) > 0 {
+		a.invalidateLiveCache()
+		go a.checkLiveBatch(context.Background(), addedLiveIDs, true)
 	}
 	if skipped == nil {
 		skipped = []map[string]string{}
@@ -458,4 +540,166 @@ func (a *API) handleScrapeApply(w http.ResponseWriter, r *http.Request) {
 	ok(w, map[string]interface{}{
 		"applied": addedCount, "skipped": skippedCount, "skippedDetail": skipped,
 	})
+}
+
+// ---- 直播源刮削（A-07 / E-04）----
+
+// looksLikeLivePlaylist 判断内容是否是一整份直播播放列表（m3u / txt 频道表）。
+// 特征：以 #EXTM3U 开头；或非 JSON 文本中 http(s) 行数达到阈值（频道表，而非直链清单）。
+func looksLikeLivePlaylist(text string) bool {
+	t := strings.TrimSpace(strings.TrimPrefix(text, "\ufeff"))
+	if t == "" {
+		return false
+	}
+	if strings.HasPrefix(strings.ToLower(t), "#extm3u") {
+		return true
+	}
+	if t[0] == '{' || t[0] == '[' {
+		return false
+	}
+	n := 0
+	for _, line := range strings.Split(t, "\n") {
+		s := strings.TrimSpace(line)
+		if strings.Contains(s, "http://") || strings.Contains(s, "https://") {
+			n++
+			if n >= 8 {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// extractLiveSeedEntries 直播种子内容 → 播放列表级候选条目。
+//   - 整份播放列表（m3u/txt 频道表）→ 候选为种子自身（导入后作为一条直播源）；
+//   - JSON（聚合/清单/lives/urls 等结构）→ 提取其中的播放列表直链；
+//   - 少量 URL 行的 txt 清单 → 逐条候选。
+func extractLiveSeedEntries(text, seedName, seedURL string) ([]jsonEntry, string) {
+	text = strings.TrimSpace(strings.TrimPrefix(text, "\ufeff"))
+	if text == "" {
+		return nil, ""
+	}
+	if looksLikeLivePlaylist(text) {
+		return []jsonEntry{{Name: seedName, URL: seedURL}}, "playlist"
+	}
+	if jsonLooksLike(text) {
+		if entries := extractLiveURLsFromJSON(text); len(entries) > 0 {
+			return entries, "live-json"
+		}
+	}
+	var out []jsonEntry
+	seen := map[string]bool{}
+	for _, line := range strings.Split(text, "\n") {
+		n, u := splitNameURL(line)
+		if u == "" || !looksLikeURL(u) || seen[strings.ToLower(u)] {
+			continue
+		}
+		seen[strings.ToLower(u)] = true
+		out = append(out, jsonEntry{Name: n, URL: u})
+	}
+	if len(out) > 0 {
+		return out, "live-txt"
+	}
+	return nil, ""
+}
+
+// isPlausibleLiveURL 播放列表直链粗筛：http(s)、非 jar/js/py 等可执行/脚本、非 CMS 接口。
+func isPlausibleLiveURL(u string) bool {
+	stem, _ := splitLiveHeaderParam(u)
+	low := strings.ToLower(stem)
+	if !strings.HasPrefix(low, "http://") && !strings.HasPrefix(low, "https://") {
+		return false
+	}
+	for _, bad := range []string{".jar", ".js", ".py", ".apk", ".exe"} {
+		if strings.HasSuffix(low, bad) {
+			return false
+		}
+	}
+	if strings.Contains(low, "/api.php/") {
+		return false
+	}
+	return true
+}
+
+// splitLiveHeaderParam 拆掉 | 之后的请求头参数（与 internal/live.SplitHeader 语义一致）
+func splitLiveHeaderParam(raw string) (string, string) {
+	if i := strings.Index(raw, "|"); i >= 0 {
+		return strings.TrimSpace(raw[:i]), strings.TrimSpace(raw[i+1:])
+	}
+	return strings.TrimSpace(raw), ""
+}
+
+// liveURLScanner JSON 扫描器：只收集 {name,url} 形态的 http(s) 直链。
+// 不做 jsonSkipKeys 黑名单——直播 JSON 常见 lives 键；深度 ≤ 8。
+type liveURLScanner struct {
+	entries []jsonEntry
+	seen    map[string]bool
+}
+
+func (sc *liveURLScanner) add(name, rawURL string) {
+	rawURL = strings.TrimSpace(rawURL)
+	if rawURL == "" || !isPlausibleLiveURL(rawURL) {
+		return
+	}
+	key := strings.ToLower(rawURL)
+	if sc.seen[key] {
+		return
+	}
+	sc.seen[key] = true
+	sc.entries = append(sc.entries, jsonEntry{Name: strings.TrimSpace(name), URL: rawURL})
+}
+
+func (sc *liveURLScanner) walk(v interface{}, depth int) {
+	if depth > 8 {
+		return
+	}
+	switch t := v.(type) {
+	case string:
+		if isPlausibleLiveURL(t) {
+			sc.add("", t)
+		}
+	case []interface{}:
+		for _, x := range t {
+			sc.walk(x, depth+1)
+		}
+	case map[string]interface{}:
+		// 1. 自身即条目（含 url 字段）
+		if u, ok := t["url"].(string); ok && strings.TrimSpace(u) != "" {
+			name := ""
+			for _, k := range []string{"name", "title", "remark", "group", "channel"} {
+				if n, ok := t[k].(string); ok && strings.TrimSpace(n) != "" {
+					name = n
+					break
+				}
+			}
+			sc.add(name, u)
+			return // 有 url 的对象不再下钻，避免抓取深层无关地址
+		}
+		// 2. 常见包装键下钻（lives 不过滤）
+		for _, k := range []string{"urls", "lives", "data", "list", "items", "result", "rows", "content", "playlist", "channels"} {
+			if child, ok := t[k]; ok {
+				sc.walk(child, depth+1)
+				return
+			}
+		}
+		// 3. 兜底：扫所有子值（字符串直链由 string 分支收集）
+		for _, child := range t {
+			sc.walk(child, depth+1)
+		}
+	}
+}
+
+// extractLiveURLsFromJSON 从 JSON 文本提取播放列表直链（清洗 JSONC 后扫描）
+func extractLiveURLsFromJSON(text string) []jsonEntry {
+	cleaned := string(parser.CleanJSON([]byte(text)))
+	if !json.Valid([]byte(cleaned)) {
+		return nil
+	}
+	var root interface{}
+	if err := json.Unmarshal([]byte(cleaned), &root); err != nil {
+		return nil
+	}
+	sc := &liveURLScanner{seen: map[string]bool{}}
+	sc.walk(root, 0)
+	return sc.entries
 }

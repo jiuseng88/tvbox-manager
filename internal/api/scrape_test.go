@@ -1,6 +1,8 @@
 package api
 
 import (
+	"fmt"
+	"strings"
 	"testing"
 	"time"
 
@@ -150,6 +152,129 @@ func TestScrapeApplyFlow(t *testing.T) {
 
 	// 6. 二次 apply 同一候选不再新增（已处理过）
 	code, body = e.doJSON("POST", "/api/scrape/apply", map[string]interface{}{"ids": []string{c1.ID}})
+	if code != 200 {
+		t.Fatalf("二次 apply 失败 %d: %v", code, body)
+	}
+	d = dataOf(t, body)
+	if n, _ := d["applied"].(float64); n != 0 {
+		t.Fatalf("二次 apply 不应新增，实际 %v", body)
+	}
+}
+
+// ---- 直播源刮削（A-07/E-04）----
+
+func TestExtractLiveSeedEntries(t *testing.T) {
+	seedName, seedURL := "直播聚合", "https://live.agg.example/all.m3u"
+
+	// 1. 整份 m3u → 种子自身一条候选（playlist）
+	entries, kind := extractLiveSeedEntries("#EXTM3U\n#EXTINF:-1,央视综合\nhttp://x.example/cctv1.m3u8\n", seedName, seedURL)
+	if len(entries) != 1 || kind != "playlist" || entries[0].URL != seedURL {
+		t.Fatalf("m3u 应整份为 1 条 playlist 候选，实际 %d/%q/%v", len(entries), kind, entries)
+	}
+
+	// 2. txt 频道表（≥8 行 http）→ 整份
+	var sb strings.Builder
+	for i := 0; i < 10; i++ {
+		sb.WriteString(fmt.Sprintf("频道%d,http://x.example/ch%d.m3u8\n", i, i))
+	}
+	entries, kind = extractLiveSeedEntries(sb.String(), seedName, seedURL)
+	if len(entries) != 1 || kind != "playlist" || entries[0].URL != seedURL {
+		t.Fatalf("txt 频道表应整份为 1 条 playlist，实际 %d/%q/%v", len(entries), kind, entries)
+	}
+
+	// 3. JSON lives 结构 → 提取播放列表直链（lives 键不过滤）
+	entries, kind = extractLiveSeedEntries(`{"lives":[{"name":"A站","url":"http://a.example/x.m3u"},{"name":"B站","url":"http://b.example/y.txt"}]}`, seedName, seedURL)
+	if len(entries) != 2 || kind != "live-json" {
+		t.Fatalf("JSON lives 应提取 2 条，实际 %d/%q/%v", len(entries), kind, entries)
+	}
+	if entries[0].Name != "A站" {
+		t.Fatalf("条目名称应为 A站，实际 %q", entries[0].Name)
+	}
+
+	// 4. JSON urls 混合，脚本/接口直链应被过滤
+	entries, kind = extractLiveSeedEntries(`{"urls":[{"name":"脚本","url":"http://a.example/spider.js"},{"name":"播放","url":"http://c.example/live.m3u"},{"name":"CMS","url":"http://d.example/api.php/xx?y=1"}]}`, seedName, seedURL)
+	if len(entries) != 1 || kind != "live-json" || entries[0].URL != "http://c.example/live.m3u" {
+		t.Fatalf("应只收播放列表直链，实际 %d/%q/%v", len(entries), kind, entries)
+	}
+
+	// 5. txt 少量 URL 行 → 逐条候选（沿用批量导入口径：名称|地址 / 名称,地址 / 纯地址）
+	entries, kind = extractLiveSeedEntries("A,http://a.example/x.m3u\nB|http://b.example/y.m3u\n", seedName, seedURL)
+	if len(entries) != 2 || kind != "live-txt" {
+		t.Fatalf("少量 URL 行应逐条 2 条，实际 %d/%q/%v", len(entries), kind, entries)
+	}
+
+	// 6. 空 / 纯文字 → 0 条
+	if entries, _ := extractLiveSeedEntries("", seedName, seedURL); len(entries) != 0 {
+		t.Fatalf("空内容应 0 条，实际 %d", len(entries))
+	}
+	if entries, _ := extractLiveSeedEntries("这个订阅页暂时没有内容", seedName, seedURL); len(entries) != 0 {
+		t.Fatalf("纯文字应 0 条，实际 %d", len(entries))
+	}
+}
+
+// TestScrapeApplyLiveFlow 直播候选 apply 端到端：候选 → LiveSource 入库 → 状态回写 → 幂等。
+func TestScrapeApplyLiveFlow(t *testing.T) {
+	e := newEnv(t)
+
+	// 1. 添加 live 类型种子
+	code, body := e.doJSON("POST", "/api/scrape/seeds", map[string]interface{}{
+		"name": "直播聚合", "url": "https://live.agg.example/all.m3u", "type": "live", "group": "直播刮削",
+	})
+	if code != 200 {
+		t.Fatalf("添加 live 种子失败 %d: %v", code, body)
+	}
+	d := dataOf(t, body)
+	seedID, _ := d["id"].(string)
+	if seedID == "" {
+		t.Fatalf("种子 ID 为空: %v", d)
+	}
+
+	// 2. 注入 live 候选（URL 带 | 请求头参数，验证原样入库）
+	now := time.Now()
+	c := model.ScrapeCandidate{
+		ID: store.NewCandidateID(), SeedID: seedID, SeedName: "直播聚合",
+		Name: "海外综合", URL: "https://live.hw.example/iptv.m3u|User-Agent=okhttp/4.9.1",
+		Target: "live", Kind: "live-json", Status: "pending", FetchedAt: now,
+	}
+	if err := e.st.SetScrapeCandidates(seedID, []model.ScrapeCandidate{c}); err != nil {
+		t.Fatal(err)
+	}
+
+	// 3. apply → 应导入 1 条直播源
+	code, body = e.doJSON("POST", "/api/scrape/apply", map[string]interface{}{"ids": []string{c.ID}, "group": "直播刮削"})
+	if code != 200 {
+		t.Fatalf("apply 失败 %d: %v", code, body)
+	}
+	d = dataOf(t, body)
+	if n, _ := d["applied"].(float64); n != 1 {
+		t.Fatalf("应导入 1 条直播源，实际 %v", body)
+	}
+
+	// 4. 落库验证（原样含 | 参数）
+	found := false
+	for _, ls := range e.st.AllLiveSources() {
+		if ls.URL == c.URL {
+			found = true
+			if ls.Remark != "自动刮削导入" {
+				t.Fatalf("直播源 remark 应为自动刮削导入，实际 %q", ls.Remark)
+			}
+		}
+	}
+	if !found {
+		t.Fatal("候选直播源应已入库")
+	}
+
+	// 5. 候选状态回写
+	st := map[string]string{}
+	for _, cc := range e.st.ListScrapeCandidates() {
+		st[cc.ID] = cc.Status
+	}
+	if st[c.ID] != "applied" {
+		t.Fatalf("候选应为 applied，实际 %s", st[c.ID])
+	}
+
+	// 6. 二次 apply 同一候选 → 不再新增
+	code, body = e.doJSON("POST", "/api/scrape/apply", map[string]interface{}{"ids": []string{c.ID}})
 	if code != 200 {
 		t.Fatalf("二次 apply 失败 %d: %v", code, body)
 	}
