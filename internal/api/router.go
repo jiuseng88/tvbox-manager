@@ -67,6 +67,16 @@ func (a *API) Router() http.Handler {
 	apiMux.HandleFunc("POST /api/sources/{id}/check", a.handleCheckOne)
 	apiMux.HandleFunc("GET /api/groups", a.handleGroups)
 
+	// 自动刮削（A-06）：手动收录 + 种子同步 + 候选确认，全部围绕源地址本身
+	apiMux.HandleFunc("POST /api/scrape/import", a.handleScrapeImport)
+	apiMux.HandleFunc("GET /api/scrape/seeds", a.handleScrapeSeedList)
+	apiMux.HandleFunc("POST /api/scrape/seeds", a.handleScrapeSeedAdd)
+	apiMux.HandleFunc("PUT /api/scrape/seeds/{id}", a.handleScrapeSeedUpdate)
+	apiMux.HandleFunc("DELETE /api/scrape/seeds/{id}", a.handleScrapeSeedDelete)
+	apiMux.HandleFunc("POST /api/scrape/sync", a.handleScrapeSync)
+	apiMux.HandleFunc("GET /api/scrape/candidates", a.handleScrapeCandidates)
+	apiMux.HandleFunc("POST /api/scrape/apply", a.handleScrapeApply)
+
 	// 站点源（平铺层，订阅接口的数据来源）
 	apiMux.HandleFunc("GET /api/flats", a.handleFlatList)
 	apiMux.HandleFunc("GET /api/flats/groups", a.handleFlatGroups)

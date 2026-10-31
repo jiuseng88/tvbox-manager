@@ -151,6 +151,11 @@ type Data struct {
 	Sources     []Source     `json:"sources"`
 	Flats       []FlatSource `json:"flats,omitempty"`       // 平铺站点源（由 Sources 自动同步生成）
 	LiveSources []LiveSource `json:"liveSources,omitempty"` // 直播源（auto 由 lives[] 同步 / manual 手动添加）
+
+	// 自动刮削（A-06）：种子清单与候选区。刮削结果先入候选（pending），
+	// 用户确认后才导入为源；不自动入库、不自动删除。
+	ScrapeSeeds      []ScrapeSeed      `json:"scrapeSeeds,omitempty"`
+	ScrapeCandidates []ScrapeCandidate `json:"scrapeCandidates,omitempty"`
 }
 
 // Config 系统配置（config.json），全部可通过环境变量覆盖初值
@@ -296,4 +301,35 @@ type LiveSource struct {
 
 	// —— 运行时字段（列表查询回填，不落盘）——
 	ParentNames []string `json:"parentNames,omitempty"` // auto 源来自哪些父源（名称）
+}
+
+// ScrapeSeed 自动刮削种子：一条可定期同步的公开订阅源地址。
+// 来源仅限用户主动添加（源集合站点 / 公开仓库直链），不做全网自动发现。
+type ScrapeSeed struct {
+	ID      string `json:"id"`
+	Name    string `json:"name"`
+	URL     string `json:"url"` // 归一化后唯一
+	Group   string `json:"group"`
+	Enabled bool   `json:"enabled"` // 是否参与同步
+	Remark  string `json:"remark,omitempty"`
+
+	CreatedAt time.Time `json:"createdAt"`
+
+	// —— 最近一次同步结果 ——
+	LastSyncAt  *time.Time `json:"lastSyncAt,omitempty"`
+	LastSyncMsg string     `json:"lastSyncMsg,omitempty"`
+}
+
+// ScrapeCandidate 刮削候选：同步后等待用户确认的条目。
+// 语义：先候选后确认——候选不自动入库；apply 后按结果标记 applied/skipped。
+type ScrapeCandidate struct {
+	ID        string    `json:"id"`
+	SeedID    string    `json:"seedId,omitempty"`
+	SeedName  string    `json:"seedName,omitempty"`
+	Name      string    `json:"name"`
+	URL       string    `json:"url"` // 归一化后
+	Kind      string    `json:"kind,omitempty"` // repo-single / repo-multi / urls / array / txt
+	Dup       bool      `json:"dup"`            // 已存在于现有源（同步时标记，不重复入库）
+	Status    string    `json:"status"`         // pending / applied / skipped
+	FetchedAt time.Time `json:"fetchedAt"`
 }
