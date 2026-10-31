@@ -196,6 +196,11 @@ textarea { width: 100%; resize: vertical; font-family: Consolas, monospace; }
 }
 .result-box { background: #f0fdf4; border: 1px solid #bbf7d0; border-radius: 8px; padding: 10px 14px; margin-top: 12px; font-size: 13px; }
 
+/* 自动刮削：卡片标题与弹窗底部操作区 */
+.card-title { font-size: 14px; font-weight: 700; margin-bottom: 10px; text-align: left; }
+.modal-ops { display: flex; justify-content: flex-end; gap: 8px; margin-top: 16px; }
+
+
 .dropzone {
   display: block; border: 2px dashed var(--line); border-radius: 10px; padding: 34px;
   text-align: center; cursor: pointer; margin-bottom: 12px; font-size: 14px;

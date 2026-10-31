@@ -1334,6 +1334,137 @@
       }
       onMounted(boot);
       onMounted(resumeResync);
+
+      // ---- 自动刮削（A-06 TVBox 源 / A-07 直播源）----
+      const scrapeSeeds = ref([]);
+      const scrapeSeedsLoading = ref(false);
+      const scrapeCandidates = ref([]);
+      const scrapeCandidatesLoading = ref(false);
+      const scrapeSyncState = ref(""); // idle / running
+      const scrapeSyncResult = ref(null);
+      const scrapeSeedModal = ref(false);
+      const scrapeSeedForm = reactive({ id: "", name: "", url: "", type: "tvbox", group: "默认", enabled: true, remark: "" });
+      const scrapeImport = reactive({ url: "", importing: false, result: null, error: "" });
+      const scrapeApply = reactive({ group: "", enabled: true, applying: false, result: null });
+      const scrapeChecked = ref({});
+
+      async function loadScrapeSeeds() {
+        scrapeSeedsLoading.value = true;
+        try { scrapeSeeds.value = (await api("GET", "/api/scrape/seeds")) || []; }
+        catch (e) { toast(e.message, "error"); }
+        finally { scrapeSeedsLoading.value = false; }
+      }
+      async function loadScrapeCandidates() {
+        scrapeCandidatesLoading.value = true;
+        try { scrapeCandidates.value = (await api("GET", "/api/scrape/candidates")) || []; }
+        catch (e) { toast(e.message, "error"); }
+        finally { scrapeCandidatesLoading.value = false; }
+      }
+      function openScrapeSeedModal(s) {
+        scrapeSeedForm.id = s ? s.id : "";
+        scrapeSeedForm.name = s ? s.name : "";
+        scrapeSeedForm.url = s ? s.url : "";
+        scrapeSeedForm.type = s ? (s.type || "tvbox") : "tvbox";
+        scrapeSeedForm.group = s ? (s.group || "默认") : "默认";
+        scrapeSeedForm.enabled = s ? !!s.enabled : true;
+        scrapeSeedForm.remark = s ? (s.remark || "") : "";
+        scrapeSeedModal.value = true;
+      }
+      async function saveScrapeSeed() {
+        const body = {
+          name: scrapeSeedForm.name.trim(),
+          url: scrapeSeedForm.url.trim(),
+          type: scrapeSeedForm.type,
+          group: scrapeSeedForm.group.trim() || "默认",
+          enabled: scrapeSeedForm.enabled,
+          remark: scrapeSeedForm.remark.trim(),
+        };
+        if (!body.url) { toast("请输入种子地址", "warn"); return; }
+        try {
+          if (scrapeSeedForm.id) {
+            await api("PUT", "/api/scrape/seeds/" + scrapeSeedForm.id, body);
+            toast("种子已更新");
+          } else {
+            await api("POST", "/api/scrape/seeds", body);
+            toast("种子已添加");
+          }
+          scrapeSeedModal.value = false;
+          loadScrapeSeeds();
+        } catch (e) { toast(e.message, "error"); }
+      }
+      async function toggleScrapeSeed(s) {
+        try {
+          await api("PUT", "/api/scrape/seeds/" + s.id, { enabled: !s.enabled });
+          s.enabled = !s.enabled;
+          toast(s.enabled ? "已启用" : "已禁用");
+        } catch (e) { toast(e.message, "error"); }
+      }
+      async function delScrapeSeed(s) {
+        if (!confirm("删除种子「" + s.name + "」？其候选区条目会一并清除。")) return;
+        try {
+          await api("DELETE", "/api/scrape/seeds/" + s.id);
+          toast("种子已删除");
+          loadScrapeSeeds(); loadScrapeCandidates();
+        } catch (e) { toast(e.message, "error"); }
+      }
+      async function syncScrape() {
+        if (scrapeSyncState.value === "running") return;
+        scrapeSyncState.value = "running";
+        scrapeSyncResult.value = null;
+        try {
+          const r = await api("POST", "/api/scrape/sync", {});
+          scrapeSyncResult.value = r;
+          toast(`同步完成：${r.synced} 个种子，新增 ${r.candidates} 条候选（重复 ${r.duplicates}）`);
+          loadScrapeSeeds(); loadScrapeCandidates();
+        } catch (e) { toast(e.message, "error"); }
+        finally { scrapeSyncState.value = "idle"; }
+      }
+      async function importScrapeUrl() {
+        const url = scrapeImport.url.trim();
+        if (!url) { toast("请输入订阅地址", "warn"); return; }
+        scrapeImport.importing = true;
+        scrapeImport.result = null;
+        scrapeImport.error = "";
+        try {
+          const r = await api("POST", "/api/scrape/import", { url, name: "", group: scrapeApply.group || "默认" });
+          scrapeImport.result = r;
+          toast("收录完成");
+          if (r && r.added !== undefined) { loadScrapeSeeds(); loadScrapeCandidates(); loadSources(); }
+        } catch (e) { scrapeImport.error = e.message; toast(e.message, "error"); }
+        finally { scrapeImport.importing = false; }
+      }
+      function candidateTarget(c) { return c.target === "live" ? "📺 直播源" : "📋 源"; }
+      function candidateKindText(c) {
+        const m = { "repo-single": "单仓", "repo-multi": "子仓", urls: "分享", array: "数组", txt: "文本",
+          playlist: "播放列表", "live-json": "JSON 直链", "live-txt": "文本清单" };
+        return m[c.kind] || c.kind || "-";
+      }
+      function candidateStatusText(c) {
+        return c.status === "pending" ? "待确认" : c.status === "applied" ? "已导入" : "已跳过";
+      }
+      function toggleAllScrapeCandidates(on) {
+        scrapeChecked.value = {};
+        if (on) {
+          for (const c of scrapeCandidates.value) {
+            if (c.status === "pending" && !c.dup) scrapeChecked.value[c.id] = true;
+          }
+        }
+      }
+      async function applyScrapeCandidates() {
+        const ids = Object.entries(scrapeChecked.value).filter(([, v]) => v).map(([k]) => k);
+        if (!ids.length) { toast("请先勾选要导入的候选", "warn"); return; }
+        scrapeApply.applying = true;
+        scrapeApply.result = null;
+        try {
+          const r = await api("POST", "/api/scrape/apply", { ids, group: scrapeApply.group || "默认", enabled: scrapeApply.enabled });
+          scrapeApply.result = r;
+          toast(`已导入 ${r.applied} 条，跳过 ${r.skipped} 条`);
+          scrapeChecked.value = {};
+          loadScrapeCandidates(); loadSources(); loadLives(true);
+        } catch (e) { toast(e.message, "error"); }
+        finally { scrapeApply.applying = false; }
+      }
+
       watch(view, (v) => {
         if (v === "dashboard") {
           loadStats();
@@ -1342,6 +1473,7 @@
         if (v === "sources") { loadSources(); loadGroups(); }
         if (v === "flats") { loadFlats(); loadFlatGroups(); }
         if (v === "live") { loadLives(true); loadLiveGroups(); }
+        if (v === "scrape") { loadScrapeSeeds(); loadScrapeCandidates(); }
         if (v === "settings") loadConfig();
       });
       // api() 的 401 门控指向本组件
@@ -1375,6 +1507,11 @@
         config, subUrls, loadConfig, saveConfig, newToken, changeToken, authRequired, tvEnabled,
         backupJson, openBackupModal, copyBackup, downloadBackup, importBackup,
         login, logout, openTv,
+        scrapeSeeds, scrapeSeedsLoading, scrapeCandidates, scrapeCandidatesLoading,
+        scrapeSyncState, scrapeSyncResult, scrapeSeedModal, scrapeSeedForm,
+        openScrapeSeedModal, saveScrapeSeed, toggleScrapeSeed, delScrapeSeed, syncScrape,
+        scrapeImport, importScrapeUrl, candidateTarget, candidateKindText, candidateStatusText,
+        toggleAllScrapeCandidates, scrapeApply, applyScrapeCandidates, scrapeChecked,
       };
     },
   });

@@ -34,6 +34,7 @@
         <div class="nav-item" :class="{active: view==='sources'}" @click="view='sources'">📋 源列表</div>
         <div class="nav-item" :class="{active: view==='flats'}" @click="view='flats'">🔗 所有仓源</div>
         <div class="nav-item" :class="{active: view==='live'}" @click="view='live'">📺 直播源</div>
+        <div class="nav-item" :class="{active: view==='scrape'}" @click="view='scrape'">🕷️ 自动刮削</div>
         <div class="nav-item" v-if="tvEnabled" @click="openTv">🎬 看片（/tv）</div>
         <div class="nav-item" :class="{active: view==='settings'}" @click="view='settings'">⚙️ 设置</div>
       </nav>
@@ -490,6 +491,195 @@
           <button class="btn xs ghost" @click="liveChecked=[]">取消</button>
         </div>
       </section>
+
+      <!-- ===== 自动刮削 ===== -->
+      <section v-if="view==='scrape'">
+        <div class="list-head">
+          <h2>自动刮削 <span class="muted">（{{ scrapeSeeds.length }} 个种子）</span></h2>
+          <div class="row">
+            <button class="btn" @click="syncScrape" :disabled="scrapeSyncState==='running'"
+              title="逐个拉取启用种子，识别出候选进候选区（不自动入库）">
+              {{ scrapeSyncState==='running' ? '同步中…' : '⛁ 同步全部种子' }}
+            </button>
+            <button class="btn primary" @click="openScrapeSeedModal()">＋ 添加种子</button>
+            <button class="btn" @click="loadScrapeSeeds()" :disabled="scrapeSeedsLoading">{{ scrapeSeedsLoading ? '加载中…' : '↻ 刷新' }}</button>
+          </div>
+        </div>
+        <div class="muted" style="margin-bottom:8px">
+          自动刮削分两类种子：<b>TVBox 源</b>（type=tvbox，同步后候选为源地址，导入进「源列表」）与
+          <b>直播源</b>（type=live，同步后候选为播放列表，导入进「直播源」）。来源仅限你主动添加的
+          公开订阅地址（源集合站点 / 公开仓库直链），TG / 网盘渠道不做。候选先确认后导入，不自动删除；
+          导入的源会自动探活。从 TVBox 源 <code>lives</code> 提取直播源（直播页「⚡ 一键解析」）不受影响。
+        </div>
+
+        <div v-if="scrapeSyncResult" class="card" style="margin-bottom:10px;padding:8px 12px;text-align:left">
+          <span class="st-text ok">同步完成：{{ scrapeSyncResult.seeds }} 个种子 / 识别候选 {{ scrapeSyncResult.candidates }} 条（重复 {{ scrapeSyncResult.duplicates }}）</span>
+          <span v-if="scrapeSyncResult.errors && scrapeSyncResult.errors.length" class="err">
+            ；{{ scrapeSyncResult.errors.length }} 个种子失败：<span v-for="(er, i) in scrapeSyncResult.errors" :key="i" class="muted">{{ er }}</span>
+          </span>
+        </div>
+
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th class="w-num">#</th>
+                <th>名称</th>
+                <th>类型</th>
+                <th class="grow">订阅地址</th>
+                <th>分组</th>
+                <th>最近同步</th>
+                <th>同步结果</th>
+                <th>启用</th>
+                <th>操作</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr v-for="(s, i) in scrapeSeeds" :key="s.id" :class="{disabled: !s.enabled}">
+                <td class="muted w-num">{{ i+1 }}</td>
+                <td><a class="link" @click="openScrapeSeedModal(s)">{{ s.name }}</a></td>
+                <td>
+                  <span class="tag" :class="s.type==='live' ? 'from' : ''">{{ s.type==='live' ? '📺 直播源' : '📋 TVBox 源' }}</span>
+                </td>
+                <td class="url-cell" :title="s.url" @click="copyText(s.url)">{{ s.url }}</td>
+                <td><span class="tag group">{{ s.group }}</span></td>
+                <td :title="absTime(s.lastSyncAt)">{{ relTime(s.lastSyncAt) }}</td>
+                <td class="muted" :title="s.lastSyncMsg">{{ (s.lastSyncMsg||'').slice(0,48) }}</td>
+                <td><switch-box :on="s.enabled" @toggle="toggleScrapeSeed(s)"></switch-box></td>
+                <td class="ops">
+                  <button class="btn xs" @click="openScrapeSeedModal(s)">编辑</button>
+                  <button class="btn xs danger" @click="delScrapeSeed(s)">删除</button>
+                </td>
+              </tr>
+              <tr v-if="!scrapeSeeds.length">
+                <td colspan="9" class="empty">
+                  还没有种子 —— 点右上「＋ 添加种子」，填入公开订阅地址（TVBox 源集合或 m3u/txt/json 直播列表），
+                  同步后候选会出现在下方候选区
+                </td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+
+        <!-- 手动收录 -->
+        <div class="card" style="margin-top:12px;text-align:left;padding:14px">
+          <div class="card-title">手动收录（快速导入单个订阅地址）</div>
+          <div class="row" style="gap:8px">
+            <input v-model="scrapeImport.url" placeholder="https://…（源集合 / 直播列表地址）" class="grow" @keyup.enter="importScrapeUrl">
+            <button class="btn primary" @click="importScrapeUrl" :disabled="scrapeImport.importing">{{ scrapeImport.importing ? '收录中…' : '收录' }}</button>
+          </div>
+          <div v-if="scrapeImport.error" class="err" style="margin-top:6px">{{ scrapeImport.error }}</div>
+          <div v-if="scrapeImport.result" class="muted" style="margin-top:6px">
+            收录结果：
+            <template v-if="scrapeImport.result.kind">
+              识别为「{{ scrapeImport.result.kind }}」，
+              <template v-if="scrapeImport.result.candidates !== undefined">候选 {{ scrapeImport.result.candidates }} 条（重复 {{ scrapeImport.result.duplicates }}）</template>
+              <template v-else>新增 {{ scrapeImport.result.added }} 条，跳过 {{ scrapeImport.result.skipped }} 条</template>
+            </template>
+            <span v-else>{{ JSON.stringify(scrapeImport.result) }}</span>
+          </div>
+        </div>
+
+        <!-- 候选区 -->
+        <div class="card" style="margin-top:12px;text-align:left;padding:14px">
+          <div class="card-title">
+            候选区 <span class="muted">（{{ scrapeCandidates.length }} 条；重复项已标灰，勾选后导入）</span>
+            <button class="btn xs" style="float:right" @click="loadScrapeCandidates()" :disabled="scrapeCandidatesLoading">↻ 刷新候选</button>
+          </div>
+          <div v-if="scrapeCandidates.length" class="row" style="gap:8px;margin-bottom:8px">
+            <input v-model="scrapeApply.group" placeholder="导入分组（默认）" class="grow" list="scrape-group-list">
+            <label class="muted" style="display:flex;align-items:center;gap:6px">导入后启用 <switch-box :on="scrapeApply.enabled" @toggle="scrapeApply.enabled=!scrapeApply.enabled"></switch-box></label>
+            <button class="btn primary" @click="applyScrapeCandidates" :disabled="scrapeApply.applying">
+              {{ scrapeApply.applying ? '导入中…' : '导入选中（' + Object.values(scrapeChecked).filter(Boolean).length + '）' }}
+            </button>
+          </div>
+          <div v-if="scrapeApply.result" class="muted" style="margin-bottom:6px">
+            导入完成：新增 {{ scrapeApply.result.applied }} 条，跳过 {{ scrapeApply.result.skipped }} 条
+            <span v-for="(sk, i) in scrapeApply.result.skippedDetail" :key="i" class="muted">；{{ sk.reason }}</span>
+          </div>
+          <datalist id="scrape-group-list">
+            <option v-for="g in groups.concat(liveGroups).filter((v,idx,a)=>a.indexOf(v)===idx)" :key="g" :value="g"></option>
+          </datalist>
+          <div class="table-wrap" style="max-height:420px">
+            <table>
+              <thead>
+                <tr>
+                  <th class="w-check">
+                    <input type="checkbox"
+                      :checked="scrapeCandidates.length && Object.values(scrapeChecked).filter(Boolean).length===scrapeCandidates.filter(c=>c.status==='pending'&&!c.dup).length"
+                      @change="toggleAllScrapeCandidates($event.target.checked)">
+                  </th>
+                  <th class="w-num">#</th>
+                  <th>名称</th>
+                  <th>来源种子</th>
+                  <th>目标</th>
+                  <th>识别</th>
+                  <th class="grow">地址</th>
+                  <th>状态</th>
+                </tr>
+              </thead>
+              <tbody>
+                <tr v-for="(c, i) in scrapeCandidates" :key="c.id" :class="{disabled: c.status!=='pending' || c.dup}">
+                  <td>
+                    <input type="checkbox" :value="c.id" v-model="scrapeChecked[c.id]" :disabled="c.status!=='pending' || c.dup">
+                  </td>
+                  <td class="muted w-num">{{ i+1 }}</td>
+                  <td>{{ c.name || '—' }}</td>
+                  <td class="muted">{{ c.seedName }}</td>
+                  <td>{{ candidateTarget(c) }}</td>
+                  <td><span class="tag">{{ candidateKindText(c) }}</span></td>
+                  <td class="url-cell" :title="c.url" @click="copyText(c.url)">{{ c.url }}</td>
+                  <td>
+                    <span v-if="c.dup" class="tag" style="background:#fee2e2;color:#991b1b">重复</span>
+                    <span v-else :class="c.status==='pending' ? 'st-text' : 'muted'">{{ candidateStatusText(c) }}</span>
+                  </td>
+                </tr>
+                <tr v-if="!scrapeCandidates.length">
+                  <td colspan="8" class="empty">候选区为空 —— 添加种子后点「同步全部种子」</td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+        </div>
+      </section>
+
+      <!-- ===== 种子弹窗 ===== -->
+      <div class="modal-mask" v-if="scrapeSeedModal" @click.self="scrapeSeedModal=false">
+        <div class="modal">
+          <div class="modal-title">{{ scrapeSeedForm.id ? '编辑种子' : '添加种子' }}<button class="close" @click="scrapeSeedModal=false">✕</button></div>
+          <div class="form-row">
+            <label>类型</label>
+            <select v-model="scrapeSeedForm.type" class="grow">
+              <option value="tvbox">TVBox 源 —— 刮源地址（单仓 / 子仓 / 分享）</option>
+              <option value="live">直播源 —— 刮播放列表（m3u / txt / json）</option>
+            </select>
+          </div>
+          <div class="form-row">
+            <label>名称</label>
+            <input v-model="scrapeSeedForm.name" placeholder="便于识别的名称（可留空）">
+          </div>
+          <div class="form-row">
+            <label>订阅地址 *</label>
+            <input v-model="scrapeSeedForm.url" placeholder="https://… 公开订阅地址（源集合站点 / 仓库直链）">
+          </div>
+          <div class="form-row">
+            <label>分组</label>
+            <input v-model="scrapeSeedForm.group" placeholder="默认" list="group-list">
+          </div>
+          <div class="form-row">
+            <label>备注</label>
+            <input v-model="scrapeSeedForm.remark">
+          </div>
+          <div class="form-row">
+            <label>启用（参与同步）</label>
+            <switch-box :on="scrapeSeedForm.enabled" @toggle="scrapeSeedForm.enabled=!scrapeSeedForm.enabled"></switch-box>
+          </div>
+          <div class="modal-ops">
+            <button class="btn" @click="scrapeSeedModal=false">取消</button>
+            <button class="btn primary" @click="saveScrapeSeed">保存</button>
+          </div>
+        </div>
+      </div>
 
       <!-- ===== 设置 ===== -->
       <section v-if="view==='settings' && config">
