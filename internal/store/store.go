@@ -253,6 +253,7 @@ func applyEnv(cfg *model.Config, present map[string]bool) {
 	addi("AUTO_DISABLE_FAILS", "autoDisableAfterFails", func(c *model.Config, n int) { c.AutoDisableAfterFails = n })
 	addb("INSECURE_TLS", "insecureSkipVerify", func(c *model.Config, b bool) { c.InsecureSkipVerify = b })
 	addb("CHECK_SUB_URLS", "checkSubUrls", func(c *model.Config, b bool) { c.CheckSubURLs = b })
+	addb("SHOW_TV", "showTv", func(c *model.Config, b bool) { c.ShowTV = b })
 
 	if len(bindings) == 0 {
 		return

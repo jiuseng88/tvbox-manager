@@ -1,6 +1,8 @@
 package api
 
 import (
+	"encoding/json"
+	"io"
 	"net/http"
 	"strings"
 	"time"
@@ -24,9 +26,24 @@ func (a *API) handleConfigGet(w http.ResponseWriter, r *http.Request) {
 
 // handleConfigPut 修改配置，修改后 scheduler.Reload 立即生效
 func (a *API) handleConfigPut(w http.ResponseWriter, r *http.Request) {
-	var req model.Config
-	if !decodeJSON(w, r, &req) {
+	r.Body = http.MaxBytesReader(w, r.Body, maxJSONBody)
+	raw, err := io.ReadAll(r.Body)
+	if err != nil {
+		badRequest(w, "请求体读取失败: "+err.Error())
 		return
+	}
+	var req model.Config
+	if err := json.Unmarshal(raw, &req); err != nil {
+		badRequest(w, "请求体解析失败: "+err.Error())
+		return
+	}
+	// showTv 缺键视为「不改动」：不必让每个调用方都跟进新字段。
+	// 否则按旧字段集 PUT 的脚本会因 bool 零值把看片页静默关掉。
+	var probe map[string]json.RawMessage
+	if json.Unmarshal(raw, &probe) == nil {
+		if _, has := probe["showTv"]; !has {
+			req.ShowTV = a.st.Config().ShowTV
+		}
 	}
 	if req.CheckIntervalMinutes <= 0 {
 		badRequest(w, "探活间隔必须大于 0 分钟")
@@ -141,11 +158,14 @@ func (a *API) handleImport(w http.ResponseWriter, r *http.Request) {
 }
 
 func (a *API) handleHealthz(w http.ResponseWriter, r *http.Request) {
+	cfg := a.st.Config()
 	total := a.st.Count(store.Filter{})
 	// tokenRequired 给登录页用：false = 未设置令牌（无鉴权模式），前端提示可直接登录并尽快设置
+	// tvEnabled 给导航用：false = 已关闭看片页，菜单项不渲染（后端同时会把 /tv 全路径 404）
 	writeJSON(w, http.StatusOK, map[string]interface{}{
 		"status":        "up",
 		"sources":       total,
-		"tokenRequired": a.st.Config().Token != "",
+		"tokenRequired": cfg.Token != "",
+		"tvEnabled":     cfg.ShowTV,
 	})
 }

@@ -3,6 +3,8 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <!-- 登录态兜底：Cookie 中途失效时跳回后台登录页（首屏拦截由服务端完成） -->
+    <script src="js/auth-guard.js"></script>
     <title>电视直播 - tvbox-manager</title>
     <meta name="description" content="tvbox-manager 内嵌的直播频道页，频道由平铺源的 lives 配置自动聚合。">
     <meta name="robots" content="noindex, nofollow">

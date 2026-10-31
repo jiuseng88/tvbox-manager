@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"io/fs"
 	"net/http"
+	"net/url"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -120,17 +121,22 @@ func (a *API) Router() http.Handler {
 
 	// 粘贴单仓的本地托管配置（无鉴权，与订阅一致）
 	root.HandleFunc("GET /configs/{name}", a.handlePastedConfig)
-	// /tv 看片页：聚合源下发 + CMS 接口代理 + 播放媒体代理（m3u8 改写/分片透传）
-	root.HandleFunc("GET /tvapi/media", a.handleTVMedia)
 
-	// /tv 看片页（内嵌 LibreTV 谱系前端，无鉴权，与订阅一致）
-	root.HandleFunc("GET /tv", func(w http.ResponseWriter, r *http.Request) {
+	// /tv 看片页（内嵌 LibreTV 谱系前端）与配套接口：全部经 tvGuard
+	//   1. 配置 showTv=false → 一律 404（菜单隐藏 + 路径失效，登录了也打不开）
+	//   2. 设了令牌 → 必须已登录；页面请求跳登录页、接口请求返回 401
+	//   3. 没设令牌 → 无鉴权模式，与 /api/* 同口径放行
+	// 静态资源必须一起过守卫：否则拦了 HTML 却还能直接抓 /tv/js/app.js 与数据接口。
+	root.Handle("/tv/", a.tvGuard(a.spaHandler()))
+	root.Handle("GET /tv", a.tvGuard(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		http.Redirect(w, r, "/tv/", http.StatusTemporaryRedirect)
-	})
-	root.HandleFunc("GET /tvapi/sources", a.handleTVSources)
-	root.HandleFunc("GET /tvapi/proxy", a.handleTVProxy)
+	})))
+	// 聚合源下发 + CMS 接口代理 + 播放媒体代理（m3u8 改写/分片透传）
+	root.Handle("GET /tvapi/sources", a.tvGuard(http.HandlerFunc(a.handleTVSources)))
+	root.Handle("GET /tvapi/proxy", a.tvGuard(http.HandlerFunc(a.handleTVProxy)))
+	root.Handle("GET /tvapi/media", a.tvGuard(http.HandlerFunc(a.handleTVMedia)))
 	// 直播频道表：从平铺源 lives[] 聚合 m3u/txt 播放列表，解析合并后下发
-	root.HandleFunc("GET /tvapi/live", a.handleTVLive)
+	root.Handle("GET /tvapi/live", a.tvGuard(http.HandlerFunc(a.handleTVLive)))
 
 	// 静态资源（前端 SPA，go:embed 注入）；不限定方法，避免与 /api/ 子树模式冲突
 	root.Handle("/", a.spaHandler())
@@ -144,16 +150,80 @@ func (a *API) Router() http.Handler {
 
 // ---- 鉴权中间件 ----
 
-// tokenFromRequest X-Token / Authorization Bearer / ?token=
+// CookieName 登录态 Cookie 名。
+// 后台是 SPA，令牌放在 localStorage，请求时用 X-Token 头；但浏览器打开 /tv/、
+// 加载 /tv/js/*.js、video/hls 拉分片这类请求没法加自定义头，所以这一侧改用 Cookie。
+// 名字与 localStorage 的键保持一致（tm_token），便于排查。
+const CookieName = "tm_token"
+
+// tokenFromRequest X-Token / Authorization Bearer / ?token= / Cookie
 func tokenFromRequest(r *http.Request) string {
 	if t := r.Header.Get("X-Token"); t != "" {
 		return t
 	}
-	auth := r.Header.Get("Authorization")
-	if strings.HasPrefix(auth, "Bearer ") {
-		return strings.TrimSpace(auth[7:])
+	if auth := r.Header.Get("Authorization"); strings.HasPrefix(auth, "Bearer ") {
+		if t := strings.TrimSpace(auth[7:]); t != "" {
+			return t
+		}
 	}
-	return r.URL.Query().Get("token")
+	if t := r.URL.Query().Get("token"); t != "" {
+		return t
+	}
+	// Cookie 里是 encodeURIComponent 后的值，含特殊字符时需还原
+	if c, err := r.Cookie(CookieName); err == nil && c.Value != "" {
+		if v, e := url.QueryUnescape(c.Value); e == nil {
+			return v
+		}
+		return c.Value
+	}
+	return ""
+}
+
+// tokenMatch 常量时间比较，避免长度/前缀差异被时序侧信道利用
+func tokenMatch(got, want string) bool {
+	return len(got) > 0 && subtle.ConstantTimeCompare([]byte(got), []byte(want)) == 1
+}
+
+// isPageRequest 是否「浏览器打开页面」的请求（决定未登录时跳登录页还是返回 401 JSON）。
+// 接口与媒体分片用 Accept: */*，走 JSON 分支，避免播放器拿到一坨 HTML。
+func isPageRequest(r *http.Request) bool {
+	if r.Header.Get("Sec-Fetch-Mode") == "navigate" {
+		return true
+	}
+	if strings.Contains(r.Header.Get("Accept"), "text/html") {
+		return true
+	}
+	p := strings.ToLower(r.URL.Path)
+	return strings.HasSuffix(p, ".html") || p == "/tv" || p == "/tv/"
+}
+
+// tvGuard /tv 看片页与 /tvapi/* 的统一守卫
+func (a *API) tvGuard(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		cfg := a.st.Config()
+		// 关闭 = 真关掉：直接 404，不区分「未登录」与「已登录」，
+		// 避免把「这里有个看片页」这件事告诉外部扫描者。
+		if !cfg.ShowTV {
+			http.NotFound(w, r)
+			return
+		}
+		// 未设令牌 = 无鉴权模式（与 /api/* 一致），此时没有"登录"概念，直接放行
+		if cfg.Token == "" {
+			next.ServeHTTP(w, r)
+			return
+		}
+		if !tokenMatch(tokenFromRequest(r), cfg.Token) {
+			if isPageRequest(r) {
+				// 带上原始地址，登录后跳回来
+				target := "/?login=1&next=" + url.QueryEscape(r.URL.RequestURI())
+				http.Redirect(w, r, target, http.StatusFound)
+				return
+			}
+			writeErr(w, http.StatusUnauthorized, 401, "unauthorized")
+			return
+		}
+		next.ServeHTTP(w, r)
+	})
 }
 
 func (a *API) auth(next http.Handler) http.Handler {
@@ -166,9 +236,7 @@ func (a *API) auth(next http.Handler) http.Handler {
 			next.ServeHTTP(w, r)
 			return
 		}
-		got := tokenFromRequest(r)
-		if len(got) == 0 ||
-			subtle.ConstantTimeCompare([]byte(got), []byte(token)) != 1 {
+		if !tokenMatch(tokenFromRequest(r), token) {
 			writeErr(w, http.StatusUnauthorized, 401, "unauthorized")
 			return
 		}

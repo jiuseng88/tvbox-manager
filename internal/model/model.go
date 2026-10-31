@@ -165,6 +165,10 @@ type Config struct {
 	AutoDisableAfterFails int    `json:"autoDisableAfterFails"` // 连续失败 N 次自动禁用，0=不自动
 	InsecureSkipVerify    bool   `json:"insecureSkipVerify"`    // 跳过 TLS 校验，默认 true
 	CheckSubURLs          bool   `json:"checkSubUrls"`          // 是否递归探活多仓子仓
+	// ShowTV 是否开放 /tv 看片页（含 /tv/ 静态资源与 /tvapi/*）。
+	// 关闭后菜单项隐藏，且直接访问路径返回 404——不是"隐藏入口"，是真的关掉。
+	// 注意零值为 false，默认值必须由 DefaultConfig 显式给 true，缺字段的老配置才能保持开启。
+	ShowTV bool `json:"showTv"`
 }
 
 // CheckProgress 探活任务进度
@@ -233,6 +237,8 @@ func DefaultConfig() Config {
 		// 已在 config.json 里显式保存过该键的不受影响（含主动填 0 关闭的）。
 		AutoDisableAfterFails: 5, InsecureSkipVerify: true,
 		CheckSubURLs: false,
+		// /tv 看片页默认开放（保持升级前行为）；后台「设置」可关闭，关闭后菜单与路径一并失效
+		ShowTV: true,
 	}
 }
 

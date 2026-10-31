@@ -133,7 +133,7 @@ Windows 下用 `tvbox-manager.exe`，环境变量写法 `set DATA_DIR=...` 或 P
 | 所有仓源 | 订阅实际下发的「平铺层」单独可管：按父源/URL 对账生成，ID 稳定；可改名、改组、备注、排序、启用/禁用、单条或批量探活、删除（删除后父源再同步也不复活）；隐藏的条目不进订阅；支持按父源「恢复」重建被误删的条目 |
 | 未进订阅排查 | 概览页「未进订阅」卡片直接筛出「启用了却一条可用站点源都没有」的源，并按成因细分（未定型 / 多仓无子仓），点进去即可就地处理 |
 | 备份 | 导出/导入（merge 合并 / replace 替换），Token 永不导出 |
-| 内嵌看片页 `/tv` | LibreTV 谱系前端（Apache-2.0）随二进制内嵌，与订阅同源免鉴权：平铺源里的苹果CMS接口自动聚合成搜索源（去重、100 上限），搜索/详情/播放全链路服务端代理（m3u8 清单改写 + 分片透传），浏览器零 CORS 问题 |
+| 内嵌看片页 `/tv` | LibreTV 谱系前端（Apache-2.0）随二进制内嵌，**需登录后使用**（与后台共用令牌，页面级请求靠 Cookie 带登录态）：平铺源里的苹果CMS接口自动聚合成搜索源（去重、100 上限），搜索/详情/播放全链路服务端代理（m3u8 清单改写 + 分片透传），浏览器零 CORS 问题；可在「设置 → 开放看片页」关闭，关闭后菜单隐藏且 `/tv`、`/tvapi/*` 全部 404 |
 | 电视直播 `/tv/live.html` | 频道来自后台「直播源」页独立维护的播放列表（m3u/txt/json）：自动取自平铺源 `lives` 配置（探活时同步入库），也支持手动多行/表单添加、批量启停/移组/检测/删除；m3u 分组属性、txt `#genre#` 分组与多线路、GBK 编码自动识别；同名频道合并线路、分组按央视→卫视→地方→港澳台→平台直播排序；播放统一走媒体代理（HLS 改写 / FLV 长连透传 / `|User-Agent=` 防盗链头透传），断流自动重连、失败自动换线 |
 | 安全 | 后台 Token 鉴权（X-Token / Bearer / ?token=，常数时间比较；**令牌未设置时为无鉴权模式**，界面会提示设置）、`/api/preview?url=` 内网地址黑名单（SSRF 防护）、请求体 20MB / 上传文件 20MB 限制 |
 
@@ -228,7 +228,7 @@ Windows 下用 `tvbox-manager.exe`，环境变量写法 `set DATA_DIR=...` 或 P
 | GET | `/healthz` | 存活探针 |
 | GET | `/configs/{name}` | 本地源托管配置（无鉴权，文件名白名单校验） |
 | GET | `/sub` | 订阅（免鉴权，多仓自动平铺为单仓）：`?name=前缀`、`?format=fan`；`/sub/txt` 纯文本（带 `?name=` 时每行 `名称,URL`）；`/sub/all` 输出父源原始列表（需 Token） |
-| GET | `/tvapi/sources` | `/tv` 看片页搜索源聚合（免鉴权）：平铺源 CMS 接口去重下发，5 分钟缓存 |
+| GET | `/tvapi/sources` | `/tv` 看片页搜索源聚合（需登录）：平铺源 CMS 接口去重下发，5 分钟缓存 |
 | GET | `/tvapi/proxy?url=` | CMS 接口代理（免鉴权，SSRF 防护，10MB 上限） |
 | GET | `/tvapi/media?url=` | 播放媒体代理：m3u8 清单改写 + 分片流式透传；地址可带 `\|User-Agent=..&Referer=..` 落为请求头 |
 | GET/POST | `/api/live/sources` | 直播源列表（keyword/status/group/enabled/origin 筛选、分页）/ 单条添加（`{name,url,group,remark,check}`） |
@@ -239,7 +239,7 @@ Windows 下用 `tvbox-manager.exe`，环境变量写法 `set DATA_DIR=...` 或 P
 | POST | `/api/live/resync` | 一键解析：重新拉取源列表各源的 `lives` 配置，提取直播地址同步进直播源表（后台任务，`{ids:[]}` 空 = 全部启用源；地址判重，已存在的只补关联） |
 | GET | `/api/live/resync/status` | 一键解析进度：`{running,total,done,ok,failed,noLive,added,linked,detached,existed,errors}` |
 | GET | `/api/live/groups` | 直播源分组列表 |
-| GET | `/tvapi/live` | `/tv` 直播频道表（免鉴权）：聚合平铺源 `lives` 的播放列表，解析合并去重，10 分钟缓存 |
+| GET | `/tvapi/live` | `/tv` 直播频道表（需登录）：聚合平铺源 `lives` 的播放列表，解析合并去重，10 分钟缓存 |
 
 ## 环境变量（首次启动写入 config.json，之后以配置文件为准）
 
@@ -269,6 +269,7 @@ Windows 下用 `tvbox-manager.exe`，环境变量写法 `set DATA_DIR=...` 或 P
 | `AUTO_DISABLE_FAILS` | 0 | 连续失败自动禁用阈值 |
 | `INSECURE_TLS` | true | 跳过证书校验 |
 | `CHECK_SUB_URLS` | false | 递归探活多仓子仓 |
+| `SHOW_TV` | true | 是否开放 `/tv` 看片页；`false` 时菜单隐藏且路径 404（不写此项 = 保持开启） |
 | `ENV_OVERRIDE` | false | 设为 `1`/`true` 时环境变量强制覆盖配置文件 |
 | `TZ` | Asia/Shanghai | 时区 |
 
@@ -290,6 +291,13 @@ docker compose down && rm -rf ./data/config.json && docker compose up -d
 
 ## 安全须知
 
+- **`/tv` 看片页需要登录**（v1.4.8 起）。设了令牌时，未登录访问 `/tv`、`/tv/xxx`、`/tvapi/*` 一律被拦：
+  页面请求 302 到后台登录页（登录后自动跳回原地址），接口与媒体分片请求返回 401。
+  之前它和订阅一样是公开的，任何知道地址的人都能直接看片并消耗你的源。
+- **页面级请求靠 Cookie 带登录态**（`tm_token`，`SameSite=Lax`，30 天）。后台登录/退出会同步写入/清除；
+  浏览器直接打开 `/tv/` 时带不了 `X-Token` 头，只能靠它。因此**退出登录会同时让 `/tv` 失效**。
+- **看片页可整体关闭**：设置页「开放看片页」关掉后，左侧菜单不再显示「看片」，且 `/tv`、`/tvapi/*` 全部返回 **404**
+  （已登录也一样）——不是藏入口，是真关掉。对应环境变量 `SHOW_TV=false`。
 - **订阅接口无鉴权是设计取舍**（客户端填不了 Token）。任何知道地址的人都能拉到订阅列表。
   公网部署请用反向代理加 IP 白名单 / Basic Auth，或仅内网暴露端口。
 - `/configs/<name>` 与订阅同为无鉴权（客户端要能直接拉配置）。文件名是随机 16 位 hex，只能靠猜；但**拿到 URL 就等于拿到内容**，
@@ -383,6 +391,7 @@ PORT=18080 DATA_DIR=./data go run . -web ./web
 
 | 版本 | 要点 |
 |---|---|
+| 1.4.8 | `/tv` 看片页改为**登录后可用**：`/tv`、`/tv/静态资源`、`/tvapi/*` 统一鉴权，页面请求 302 到登录页并带回原地址、接口请求 401；登录态新增 `tm_token` Cookie（`SameSite=Lax`，30 天），退出登录同步失效。新增配置 `showTv`（设置页「开放看片页」/ 环境变量 `SHOW_TV`）：关闭后菜单项隐藏且上述路径一律 404（已登录亦然）。`/healthz` 增加 `tvEnabled` 字段 |
 | 1.4.7 | 许可证由 Apache-2.0 改为 **AGPL-3.0 + 商业双授权**：商用闭源需购买授权，开源使用一律免费；新增 `COMMERCIAL.md`（授权边界与联系方式）、`CONTRIBUTING.md`（含 CLA，双授权合法性的前提）；README 顶部与末尾补充许可证说明 |
 | 1.4.6 | 一键解析：直播源页 / 源列表页均可一键重新拉取各源 `lives` 配置并同步（源列表勾选则只解析选中项）；后台任务 + 实时进度，按地址判重（剥掉 `\|` 请求头参数后归一化），重复直接忽略、已删除的不复活；解析只覆盖 `lives`，不重跑站点探活 |
 | 1.4.5 | 直播源独立维护页：手动添加（多行混排 / 单个表单）、批量启用/禁用/移组/检测/删除；自动同步条目完全可管（改名/改组后不被覆盖、删除留墓碑不复活）；双层检测（源级 + 按分组抽样 20 频道算可用率）；检测失效的源自动退出直播页；增删改启停即时生效 |

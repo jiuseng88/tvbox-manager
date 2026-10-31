@@ -6,10 +6,28 @@
 
   /* ---------- 工具 ---------- */
 
+  // 令牌同时写 localStorage 与 Cookie：
+  //   后台接口靠 X-Token 头；/tv 看片页是独立静态页（另有 /tvapi/*），
+  //   浏览器打开页面、加载脚本、video/hls 拉分片都加不了自定义头，只能靠 Cookie 带登录态。
+  //   两者键名一致（tm_token），路径根，30 天，SameSite=Lax（外站 iframe 不带，防 CSRF）。
+  const COOKIE_NAME = "tm_token";
+  const COOKIE_MAX_AGE = 30 * 24 * 3600;
+  function writeTokenCookie(v) {
+    try {
+      document.cookie = v
+        ? COOKIE_NAME + "=" + encodeURIComponent(v) + "; path=/; max-age=" + COOKIE_MAX_AGE + "; SameSite=Lax"
+        : COOKIE_NAME + "=; path=/; max-age=0; SameSite=Lax";
+    } catch (e) { /* Cookie 被浏览器禁掉时忽略，后台仍能靠 X-Token 工作 */ }
+  }
   const store = {
     get token() { return localStorage.getItem("tm_token") || ""; },
-    set token(v) { v ? localStorage.setItem("tm_token", v) : localStorage.removeItem("tm_token"); },
+    set token(v) {
+      v ? localStorage.setItem("tm_token", v) : localStorage.removeItem("tm_token");
+      writeTokenCookie(v || "");
+    },
   };
+  // 老会话（或 Cookie 到期被清）时把 localStorage 里的令牌补写成 Cookie
+  function syncTokenCookie() { writeTokenCookie(store.token); }
 
   let loginGate = null; // 组件挂载后指向 needLogin ref
 
@@ -1167,7 +1185,9 @@
             autoDisableAfterFails: Number(c.autoDisableAfterFails) || 0,
             insecureSkipVerify: !!c.insecureSkipVerify,
             checkSubUrls: !!c.checkSubUrls,
+            showTv: !!c.showTv,
           });
+          tvEnabled.value = !!c.showTv; // 导航项跟着配置立即变
           toast("配置已保存（探活设置立即生效）", "ok");
         } catch (e) { toast(e.message, "error"); }
       }
@@ -1242,33 +1262,60 @@
       }
 
       /* ---- 登录 ---- */
-      function login() {
+      // 登录前 URL 上可能带 ?next=/tv/（从 /tv 被拦截跳回来），登录成功后原路返回
+      function nextTarget() {
+        const n = new URLSearchParams(location.search).get("next") || "";
+        // 只接受站内绝对路径，挡掉 //evil.com 这类开放重定向
+        return n.startsWith("/") && !n.startsWith("//") ? n : "";
+      }
+      async function login() {
         const t = tokenInput.value.trim();
         if (authRequired.value && !t) { toast("请输入访问令牌（首次启动时打印在服务日志中）", "warn"); return; }
-        store.token = t; // 无鉴权模式下允许为空
+        // 先写再校验：api() 从 store 取令牌，写错时要回滚，不能把无效令牌留在 Cookie 里
+        store.token = t;
+        try {
+          if (authRequired.value) await api("GET", "/api/config");
+        } catch (e) {
+          store.token = "";
+          toast(e.message || "令牌不正确", "error");
+          return;
+        }
         needLogin.value = false;
+        const to = nextTarget();
+        if (to) { location.href = to; return; }
         boot(true);
       }
       function logout() {
-        store.token = "";
+        store.token = ""; // 同时清 localStorage 与 Cookie，/tv 随之失效
         needLogin.value = true;
         toast("已退出登录", "info");
       }
       function openTv() {
+        if (!tvEnabled.value) { toast("看片页已在设置中关闭", "warn"); return; }
         window.open("/tv/", "_blank");
       }
 
       /* ---- 生命周期 ---- */
       // authRequired：后台是否设置了令牌。false = 无鉴权模式（/api/* 不校验），前端提示尽快设置。
       const authRequired = ref(true);
+      // tvEnabled：看片页是否开放。false 时导航项不渲染，后端也会把 /tv 全路径返回 404。
+      const tvEnabled = ref(true);
       async function checkAuthMode() {
         try {
           const h = await fetch("/healthz").then(r => r.json());
           authRequired.value = !!h.tokenRequired;
+          tvEnabled.value = h.tvEnabled !== false; // 老版本后端没有该字段，按开放处理
         } catch (e) { authRequired.value = true; } // 探测失败按需要鉴权处理，宁可多要一次令牌
       }
       async function boot(force) {
+        syncTokenCookie(); // 老会话补齐 Cookie：/tv 认 Cookie，不补会被拦到登录页
         await checkAuthMode();
+        // 服务端刚把我们从受保护路径（/tv）踢回来时 URL 带 ?login=1，
+        // 说明手上的令牌可能已失效：校验一次，别让"已登录"状态把登录框挡住。
+        const kicked = new URLSearchParams(location.search).get("login") === "1";
+        if (kicked && authRequired.value && store.token) {
+          try { await api("GET", "/api/config"); } catch (e) { store.token = ""; }
+        }
         if (authRequired.value && !store.token) { needLogin.value = true; return; }
         needLogin.value = false;
         // 落地页是概览，看不到仓源列表：等真正切过去时 watch(view) 再加载，
@@ -1325,7 +1372,7 @@
         jsonText, jsonParsed, jsonParsing, jsonResult, jsonRows, submitJsonImport,
         showAdd, openAddModal, knownUrls,
         fileRows, fileResult, handleFile, submitFileRows,
-        config, subUrls, loadConfig, saveConfig, newToken, changeToken, authRequired,
+        config, subUrls, loadConfig, saveConfig, newToken, changeToken, authRequired, tvEnabled,
         backupJson, openBackupModal, copyBackup, downloadBackup, importBackup,
         login, logout, openTv,
       };

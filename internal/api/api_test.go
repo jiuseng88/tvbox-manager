@@ -8,6 +8,7 @@ import (
 	"mime/multipart"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"strings"
 	"testing"
 	"testing/fstest"
@@ -31,7 +32,18 @@ type testEnv struct {
 
 func newEnv(t *testing.T) *testEnv {
 	t.Helper()
-	st, err := store.New(t.TempDir())
+	// 不用 t.TempDir()：导入/批量操作会起后台检测协程，测试结束时可能仍在写 data.json，
+	// Windows 上 RemoveAll 会因此报 "The directory is not empty" 把测试判失败
+	// （只在 `go test ./...` 并发跑多个包时明显）。这里自己建目录、清理失败就留给系统临时目录。
+	dir, err := os.MkdirTemp("", "tvbox-api-test-*")
+	if err != nil {
+		t.Fatal(err)
+	}
+	pastedDir, err := os.MkdirTemp("", "tvbox-api-pasted-*")
+	if err != nil {
+		t.Fatal(err)
+	}
+	st, err := store.New(dir)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -47,7 +59,7 @@ func newEnv(t *testing.T) *testEnv {
 	// webFS 以 web 目录为根（生产为 embed 子目录，开发模式为 os.DirFS）
 	webFS := fstest.MapFS{"index.html": &fstest.MapFile{Data: []byte("<html>ok</html>")}}
 	api := New(st, sch, "test", webFS)
-	api.PastedDir = t.TempDir() // 粘贴单仓托管目录
+	api.PastedDir = pastedDir // 粘贴单仓托管目录
 	handler := api.Router()
 
 	mock := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -64,8 +76,22 @@ func newEnv(t *testing.T) *testEnv {
 	env := &testEnv{t: t, st: st, sch: sch, api: handler, token: st.Config().Token, mock: mock, slow: slow}
 	t.Cleanup(func() {
 		sch.Shutdown()
+		// 等还在跑的探活收尾，再删临时目录
+		for i := 0; i < 100 && sch.Running(); i++ {
+			time.Sleep(20 * time.Millisecond)
+		}
 		mock.Close()
 		slow.Close()
+		// 导入后的异步检测协程可能仍在落盘：重试删除，实在删不掉就留给系统临时目录，
+		// 不能让清理报错把本来通过的用例判失败
+		for _, d := range []string{dir, pastedDir} {
+			for i := 0; i < 10; i++ {
+				if os.RemoveAll(d) == nil {
+					break
+				}
+				time.Sleep(50 * time.Millisecond)
+			}
+		}
 	})
 	return env
 }

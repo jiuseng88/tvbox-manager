@@ -34,7 +34,7 @@
         <div class="nav-item" :class="{active: view==='sources'}" @click="view='sources'">📋 源列表</div>
         <div class="nav-item" :class="{active: view==='flats'}" @click="view='flats'">🔗 所有仓源</div>
         <div class="nav-item" :class="{active: view==='live'}" @click="view='live'">📺 直播源</div>
-        <div class="nav-item" @click="openTv">🎬 看片（/tv）</div>
+        <div class="nav-item" v-if="tvEnabled" @click="openTv">🎬 看片（/tv）</div>
         <div class="nav-item" :class="{active: view==='settings'}" @click="view='settings'">⚙️ 设置</div>
       </nav>
       <div class="side-foot">
@@ -381,7 +381,7 @@
         <div class="muted" style="margin-bottom:8px">
           直播频道来自这里的 m3u / txt / json 播放列表。标记「自动」的条目由源列表里的
           <code>lives</code> 配置解析同步生成，也可以手动添加；只有「启用」且检测未失效的条目会进入
-          <a @click="openTv" class="link">/tv 直播页</a>。
+          <template v-if="tvEnabled"><a @click="openTv" class="link">/tv 直播页</a></template><template v-else>看片页（已在设置中关闭）</template>。
           检测 = 拉取播放列表 + 按分组抽样 20 个频道验证可用性。
           「⚡ 一键解析」= 不跑探活，只重新拉取各源的 <code>lives</code> 配置并同步；同地址只留一条。
         </div>
@@ -516,6 +516,12 @@
             </div>
             <div class="form-row"><label>监听端口 <span class="muted">(重启生效)</span></label><input type="number" v-model.number="config.port"></div>
             <div class="form-row"><label>订阅路径 <span class="muted">(重启生效)</span></label><input v-model="config.subPath"></div>
+            <div class="form-row"><label>开放看片页 <span class="muted">/tv 及 /tvapi/*</span></label>
+              <switch-box :on="config.showTv" @toggle="config.showTv = !config.showTv"></switch-box>
+            </div>
+            <div class="muted" v-if="config && !config.showTv" style="color:#d97706">
+              ⚠️ 已关闭：左侧菜单不再显示「看片」，直接访问 <code>/tv</code> 会返回 404（已登录也一样）。
+            </div>
           </div>
           <div class="muted" style="margin:8px 0">
             ℹ️ 探活固定使用客户端 UA（okhttp/4.9.1）——大量源站对浏览器 UA 返回 403，模拟客户端才能拿到真实结果。
