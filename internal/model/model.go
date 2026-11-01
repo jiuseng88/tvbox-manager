@@ -372,6 +372,7 @@ type ScrapeCandidate struct {
 	// —— 重建后新增（均 omitempty，向后兼容旧数据）——
 	DiscoveredDepth int        `json:"discoveredDepth,omitempty"` // 发现深度：0=种子自身内容，1+=递归层级
 	ParentURL      string     `json:"parentUrl,omitempty"`       // 递归展开时的父地址（多仓子仓的上级）
+	Origin         string     `json:"origin,omitempty"`          // 仓库内相对路径（如 live/iptv/cn.m3u），定位多层级目录来源
 	Quality        int        `json:"quality,omitempty"`        // 质量分 0~100：可达/结构/丰富/新鲜，仅排序，不阻断导入
 	Summary        string     `json:"summary,omitempty"`        // 富集摘要：如 "12 站点" / "800 频道"
 	FP             string     `json:"fp,omitempty"`             // 上游内容指纹（sha1），用于内容级漂移

@@ -1346,12 +1346,15 @@
       const scrapeCandidates = ref([]);
       const scrapeCandidatesLoading = ref(false);
       const scrapeSyncState = ref(""); // idle / running
+      const scrapeSyncingId = ref(""); // 正在单条同步的种子 ID
       const scrapeSyncResult = ref(null);
       const scrapeSeedModal = ref(false);
       const scrapeSeedForm = reactive({ id: "", name: "", url: "", group: "默认", enabled: true, remark: "", depth: 1 });
       const scrapeImport = reactive({ url: "", importing: false, result: null, error: "" });
       const scrapeApply = reactive({ group: "", enabled: true, applying: false, result: null });
       const scrapeChecked = ref({});
+      // 已刮削入库（源 + 直播源合并视图，服务端分页）
+      const scraped = reactive({ list: [], total: 0, page: 1, size: 20, loading: false, target: "all", seedId: "all", q: "" });
 
       async function loadScrapeSeeds() {
         scrapeSeedsLoading.value = true;
@@ -1365,6 +1368,21 @@
         catch (e) { toast(e.message, "error"); }
         finally { scrapeCandidatesLoading.value = false; }
       }
+      async function loadScraped() {
+        scraped.loading = true;
+        try {
+          const qs = new URLSearchParams({
+            page: String(scraped.page), pageSize: String(scraped.size),
+            target: scraped.target, seedId: scraped.seedId, q: scraped.q || "",
+          });
+          const r = await api("GET", "/api/scrape/applied?" + qs.toString());
+          scraped.list = (r && r.list) || [];
+          scraped.total = (r && r.total) || 0;
+        } catch (e) { toast(e.message, "error"); }
+        finally { scraped.loading = false; }
+      }
+      function scrapedPages() { return Math.max(1, Math.ceil(scraped.total / scraped.size)); }
+      function applyScrapedFilter() { scraped.page = 1; loadScraped(); }
       function openScrapeSeedModal(s) {
         scrapeSeedForm.id = s ? s.id : "";
         scrapeSeedForm.name = s ? s.name : "";
@@ -1409,7 +1427,7 @@
         try {
           await api("DELETE", "/api/scrape/seeds/" + s.id);
           toast("种子已删除");
-          loadScrapeSeeds(); loadScrapeCandidates();
+          loadScrapeSeeds(); loadScrapeCandidates(); loadScraped();
         } catch (e) { toast(e.message, "error"); }
       }
       async function syncScrape() {
@@ -1420,9 +1438,24 @@
           const r = await api("POST", "/api/scrape/sync", {});
           scrapeSyncResult.value = r;
           toast(`同步完成：${r.synced} 个种子，新增 ${r.candidates} 条候选（重复 ${r.duplicates}）`);
-          loadScrapeSeeds(); loadScrapeCandidates();
+          loadScrapeSeeds(); loadScrapeCandidates(); loadScraped();
         } catch (e) { toast(e.message, "error"); }
         finally { scrapeSyncState.value = "idle"; }
+      }
+      // 单条种子同步：不用等整轮跑完，改完某个种子可以立刻验证
+      async function syncScrapeSeed(s) {
+        if (scrapeSyncState.value === "running" || scrapeSyncingId.value) return;
+        scrapeSyncingId.value = s.id;
+        scrapeSyncResult.value = null;
+        try {
+          const r = await api("POST", "/api/scrape/seeds/" + s.id + "/sync", {});
+          scrapeSyncResult.value = r;
+          const err = (r && r.errors && r.errors[0]) || "";
+          if (err) toast("同步失败：" + err, "error");
+          else toast(`「${s.name}」同步完成：${r.candidates} 条候选（重复 ${r.duplicates}）`);
+          loadScrapeSeeds(); loadScrapeCandidates(); loadScraped();
+        } catch (e) { toast(e.message, "error"); }
+        finally { scrapeSyncingId.value = ""; }
       }
       async function importScrapeUrl() {
         const url = scrapeImport.url.trim();
@@ -1434,7 +1467,7 @@
           const r = await api("POST", "/api/scrape/import", { url, name: "", group: scrapeApply.group || "默认" });
           scrapeImport.result = r;
           toast("收录完成");
-          if (r && r.added !== undefined) { loadScrapeSeeds(); loadScrapeCandidates(); loadSources(); }
+          if (r && r.added !== undefined) { loadScrapeSeeds(); loadScrapeCandidates(); loadScraped(); loadSources(); }
         } catch (e) { scrapeImport.error = e.message; toast(e.message, "error"); }
         finally { scrapeImport.importing = false; }
       }
@@ -1471,7 +1504,7 @@
           scrapeApply.result = r;
           toast(`已导入 ${r.applied} 条，跳过 ${r.skipped} 条`);
           scrapeChecked.value = {};
-          loadScrapeCandidates(); loadSources(); loadLives(true);
+          loadScrapeCandidates(); loadScraped(); loadSources(); loadLives(true);
         } catch (e) { toast(e.message, "error"); }
         finally { scrapeApply.applying = false; }
       }
@@ -1484,7 +1517,7 @@
         if (v === "sources") { loadSources(); loadGroups(); }
         if (v === "flats") { loadFlats(); loadFlatGroups(); }
         if (v === "live") { loadLives(true); loadLiveGroups(); }
-        if (v === "scrape") { loadScrapeSeeds(); loadScrapeCandidates(); }
+        if (v === "scrape") { loadScrapeSeeds(); loadScrapeCandidates(); loadScraped(); }
         if (v === "settings") loadConfig();
       });
       // api() 的 401 门控指向本组件
@@ -1519,7 +1552,8 @@
         backupJson, openBackupModal, copyBackup, downloadBackup, importBackup,
         login, logout, openTv,
         scrapeSeeds, scrapeSeedsLoading, scrapeCandidates, scrapeCandidatesLoading,
-        scrapeSyncState, scrapeSyncResult, scrapeSeedModal, scrapeSeedForm,
+        scrapeSyncState, scrapeSyncingId, scrapeSyncResult, scrapeSeedModal, scrapeSeedForm,
+        syncScrapeSeed, scraped, loadScraped, scrapedPages, applyScrapedFilter,
         openScrapeSeedModal, saveScrapeSeed, toggleScrapeSeed, delScrapeSeed, syncScrape,
         scrapeImport, importScrapeUrl, candidateTarget, candidateKindText, candidateStatusText,
         candidateSummary, candidateDrift,

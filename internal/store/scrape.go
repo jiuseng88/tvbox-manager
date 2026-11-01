@@ -406,3 +406,133 @@ func (s *Store) ReconcileDrift(seedID string, sourceURLs, liveURLs []string) (re
 	}
 	return removed, restored
 }
+
+// ---------- 刮削入库结果（跨「源列表 / 直播源列表」的统一视图）----------
+
+// ScrapedItem 已刮削入库的一条记录。源与直播源是两张表，但用户在刮削页只想知道
+// 「我从种子刮进来哪些东西」，所以这里合并成一个视图，用 Target 区分去向。
+type ScrapedItem struct {
+	ID              string     `json:"id"`
+	Name            string     `json:"name"`
+	URL             string     `json:"url"`
+	Target          string     `json:"target"` // source / live
+	SeedID          string     `json:"seedId"`
+	SeedName        string     `json:"seedName,omitempty"` // 种子已删除时为空
+	Group           string     `json:"group"`
+	Enabled         bool       `json:"enabled"`
+	Status          string     `json:"status"`
+	DiscoveredAt    *time.Time `json:"discoveredAt,omitempty"`
+	UpstreamRemoved bool       `json:"upstreamRemoved,omitempty"` // 上游已不再提供（漂移标记）
+	ChannelCount    int        `json:"channelCount,omitempty"`    // 直播源才有
+}
+
+// ScrapedFilter 分页查询条件。Page 从 1 起；PageSize <= 0 用默认 20。
+type ScrapedFilter struct {
+	SeedID   string
+	Target   string // ""/"all" = 全部；source / live
+	Keyword  string
+	Page     int
+	PageSize int
+}
+
+const (
+	ScrapedPageSizeDefault = 20
+	ScrapedPageSizeMax     = 200
+)
+
+// ListScraped 返回一页「刮削入库」记录与总数。
+// 只统计带 SeedID 的源：手工添加、父源同步（lives 抽取）进来的都不算刮削结果。
+func (s *Store) ListScraped(f ScrapedFilter) ([]ScrapedItem, int) {
+	s.mu.RLock()
+	seedName := make(map[string]string, len(s.data.ScrapeSeeds))
+	for i := range s.data.ScrapeSeeds {
+		seedName[s.data.ScrapeSeeds[i].ID] = s.data.ScrapeSeeds[i].Name
+	}
+	out := make([]ScrapedItem, 0, 64)
+	for i := range s.data.Sources {
+		src := s.data.Sources[i]
+		if src.SeedID == "" {
+			continue
+		}
+		out = append(out, ScrapedItem{
+			ID: src.ID, Name: src.Name, URL: src.URL, Target: "source",
+			SeedID: src.SeedID, SeedName: seedName[src.SeedID], Group: src.Group,
+			Enabled: src.Enabled, Status: src.Status,
+			DiscoveredAt: src.DiscoveredAt, UpstreamRemoved: src.UpstreamRemoved,
+		})
+	}
+	for i := range s.data.LiveSources {
+		ls := s.data.LiveSources[i]
+		if ls.SeedID == "" || ls.Hidden {
+			continue
+		}
+		out = append(out, ScrapedItem{
+			ID: ls.ID, Name: ls.Name, URL: ls.URL, Target: "live",
+			SeedID: ls.SeedID, SeedName: seedName[ls.SeedID], Group: ls.Group,
+			Enabled: ls.Enabled, Status: ls.Status,
+			DiscoveredAt: ls.DiscoveredAt, UpstreamRemoved: ls.UpstreamRemoved,
+			ChannelCount: ls.ChannelCount,
+		})
+	}
+	s.mu.RUnlock()
+
+	if t := strings.TrimSpace(f.Target); t != "" && t != "all" {
+		out = filterScraped(out, func(x ScrapedItem) bool { return x.Target == t })
+	}
+	if id := strings.TrimSpace(f.SeedID); id != "" && id != "all" {
+		out = filterScraped(out, func(x ScrapedItem) bool { return x.SeedID == id })
+	}
+	if kw := strings.ToLower(strings.TrimSpace(f.Keyword)); kw != "" {
+		out = filterScraped(out, func(x ScrapedItem) bool {
+			return strings.Contains(strings.ToLower(x.Name), kw) ||
+				strings.Contains(strings.ToLower(x.URL), kw) ||
+				strings.Contains(strings.ToLower(x.SeedName), kw)
+		})
+	}
+	// 最近发现在前；没有发现时间的排最后（老数据），同时间按名称稳定排序
+	sort.SliceStable(out, func(i, j int) bool {
+		ti, tj := out[i].DiscoveredAt, out[j].DiscoveredAt
+		switch {
+		case ti != nil && tj != nil && !ti.Equal(*tj):
+			return ti.After(*tj)
+		case ti != nil && tj == nil:
+			return true
+		case ti == nil && tj != nil:
+			return false
+		}
+		return out[i].Name < out[j].Name
+	})
+
+	total := len(out)
+	size := f.PageSize
+	if size <= 0 {
+		size = ScrapedPageSizeDefault
+	}
+	if size > ScrapedPageSizeMax {
+		size = ScrapedPageSizeMax
+	}
+	page := f.Page
+	if page <= 0 {
+		page = 1
+	}
+	start := (page - 1) * size
+	if start >= total {
+		return []ScrapedItem{}, total
+	}
+	end := start + size
+	if end > total {
+		end = total
+	}
+	return out[start:end], total
+}
+
+// filterScraped 与 filterSlice 同义，仅因 filterSlice 绑定 model.Source 无法复用。
+func filterScraped(in []ScrapedItem, pred func(ScrapedItem) bool) []ScrapedItem {
+	out := make([]ScrapedItem, 0, len(in))
+	for _, x := range in {
+		if pred(x) {
+			out = append(out, x)
+		}
+	}
+	return out
+}

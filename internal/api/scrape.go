@@ -14,7 +14,10 @@ import (
 	"net/url"
 	"os"
 	"os/exec"
+	"path"
 	"path/filepath"
+	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -122,7 +125,9 @@ func (a *API) handleScrapeImport(w http.ResponseWriter, r *http.Request) {
 	entries := make([]jsonEntry, 0, 16)
 	seen := map[string]bool{}
 	for _, line := range strings.Split(text, "\n") {
-		n, u := splitNameURL(line)
+		n, rawu := splitNameURL(line)
+		// 相对地址按这份列表自身地址补全（仓库内 txt 清单常见 ./xxx.json 写法）
+		u := resolveRefURL(raw, rawu)
 		if u == "" || !looksLikeURL(u) || seen[strings.ToLower(u)] {
 			continue
 		}
@@ -372,105 +377,54 @@ func (a *API) handleScrapeSync(w http.ResponseWriter, r *http.Request) {
 	ok(w, stat)
 }
 
-// runScrapeSync 遍历启用的种子，逐个发现 → 归一化去重 → upsert 候选区（不自动入库）→ 漂移对账。
+// handleScrapeSeedSync POST /api/scrape/seeds/{id}/sync
+// 只同步单个种子。用户点某一行的「同步」时走这里：不必等全部种子跑完，
+// 也不受该种子 enabled 影响（显式点了就是要拉一次）。
+func (a *API) handleScrapeSeedSync(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	sd, found := a.st.GetScrapeSeed(id)
+	if !found {
+		notFound(w, "种子不存在")
+		return
+	}
+	stat := a.runScrapeSyncFor(r.Context(), &sd)
+	if stat == nil {
+		writeJSON(w, http.StatusConflict, envelope{Code: 409, Msg: "已有同步任务在运行"})
+		return
+	}
+	ok(w, stat)
+}
+
+// runScrapeSync 全部启用种子同步。
+func (a *API) runScrapeSync(ctx context.Context) *scrapeSyncStat {
+	return a.runScrapeSyncFor(ctx, nil)
+}
+
+// runScrapeSyncFor 同步种子：only 为 nil 时遍历全部启用种子，否则只同步该条（忽略 enabled）。
+// 逐个发现 → 归一化去重 → upsert 候选区（不自动入库）→ 漂移对账。
 // HTTP 手动触发与定时调度（scheduler.SetScrapeSync）共用；同一时刻只允许一个同步任务，
 // 被占用时返回 nil。调用方应基于返回的统计展示/记录。
-func (a *API) runScrapeSync(ctx context.Context) *scrapeSyncStat {
+func (a *API) runScrapeSyncFor(ctx context.Context, only *model.ScrapeSeed) *scrapeSyncStat {
 	if !scrapeSyncMu.TryLock() {
 		return nil
 	}
 	defer scrapeSyncMu.Unlock()
 
 	seeds := a.st.ListScrapeSeeds()
+	if only != nil {
+		seeds = []model.ScrapeSeed{*only}
+	}
 	stat := &scrapeSyncStat{}
 	now := time.Now()
 	hl := newHostLimiter(150 * time.Millisecond)
 
 	for i := range seeds {
 		sd := seeds[i]
-		if !sd.Enabled {
+		if only == nil && !sd.Enabled {
 			continue
 		}
 		stat.Seeds++
-
-		items, msg := a.discoverSeed(ctx, sd, hl)
-		if msg != "" {
-			stat.Errors = append(stat.Errors, fmt.Sprintf("%s：%s", sd.Name, msg))
-			a.st.TouchScrapeSeedSync(sd.ID, msg, now)
-			continue
-		}
-
-		// 归一化 + 去重 + 标记 dup + 建候选
-		var cands []model.ScrapeCandidate
-		seen := map[string]bool{}
-		var srcURLs []string
-		var liveURLs []string
-		for _, it := range items {
-			storeURL := strings.TrimSpace(it.URL)
-			if norm, nerr := parser.Normalize(storeURL); nerr == nil {
-				storeURL = norm
-			}
-			key := strings.ToLower(storeURL)
-			if storeURL == "" || seen[key] {
-				continue
-			}
-			seen[key] = true
-
-			var exists bool
-			if it.Target == "live" {
-				exists = a.st.LiveSourceExists(storeURL)
-				liveURLs = append(liveURLs, storeURL)
-				stat.Lives++
-			} else {
-				_, exists = a.st.GetByURL(storeURL)
-				srcURLs = append(srcURLs, storeURL)
-				stat.Sources++
-			}
-			cands = append(cands, model.ScrapeCandidate{
-				SeedID:         sd.ID,
-				SeedName:       sd.Name,
-				Name:           it.Name,
-				URL:            storeURL,
-				Target:         it.Target,
-				Kind:           it.Kind,
-				Dup:            exists,
-				DiscoveredDepth: it.Depth,
-				ParentURL:      it.ParentURL,
-				Quality:        it.Quality,
-				Summary:        it.Summary,
-				FP:             it.FP,
-				FetchedAt:      now,
-				LastSeenAt:     now,
-			})
-		}
-
-		if len(cands) == 0 {
-			a.st.TouchScrapeSeedSync(sd.ID, "同步完成，未识别到任何源地址", now)
-			continue
-		}
-		if err := a.st.UpsertScrapeCandidates(sd.ID, cands); err != nil {
-			stat.Errors = append(stat.Errors, fmt.Sprintf("%s：候选写入失败: %v", sd.Name, err))
-			a.st.TouchScrapeSeedSync(sd.ID, "候选写入失败: "+err.Error(), now)
-			continue
-		}
-
-		// 漂移对账：已导入源 vs 本次发现集（上游移除 → 仅标记，不删）
-		removed, _ := a.st.ReconcileDrift(sd.ID, srcURLs, liveURLs)
-
-		stat.Synced++
-		stat.Candidates += len(cands)
-		dup := 0
-		for _, c := range cands {
-			if c.Dup {
-				dup++
-			}
-		}
-		stat.Duplicates += dup
-		msg = fmt.Sprintf("同步完成：识别 %d 条候选（%d 条已存在）", len(cands), dup)
-		if removed > 0 {
-			msg += fmt.Sprintf("，%d 个已导入源上游失效", removed)
-		}
-		a.st.TouchScrapeSeedSync(sd.ID, msg, now)
+		a.syncOneSeed(ctx, sd, stat, now, hl)
 	}
 
 	// 末次 Save 落盘所有种子的同步结果（候选/漂移已各自 flush）
@@ -478,6 +432,89 @@ func (a *API) runScrapeSync(ctx context.Context) *scrapeSyncStat {
 		log.Printf("[scrape] 同步后落盘失败: %v", err)
 	}
 	return stat
+}
+
+// syncOneSeed 发现单个种子并把结果写入候选区，统计累加进 stat。
+func (a *API) syncOneSeed(ctx context.Context, sd model.ScrapeSeed, stat *scrapeSyncStat, now time.Time, hl *hostLimiter) {
+	items, msg := a.discoverSeed(ctx, sd, hl)
+	if msg != "" {
+		stat.Errors = append(stat.Errors, fmt.Sprintf("%s：%s", sd.Name, msg))
+		a.st.TouchScrapeSeedSync(sd.ID, msg, now)
+		return
+	}
+
+	// 归一化 + 去重 + 标记 dup + 建候选
+	var cands []model.ScrapeCandidate
+	seen := map[string]bool{}
+	var srcURLs []string
+	var liveURLs []string
+	for _, it := range items {
+		storeURL := strings.TrimSpace(it.URL)
+		if norm, nerr := parser.Normalize(storeURL); nerr == nil {
+			storeURL = norm
+		}
+		key := strings.ToLower(storeURL)
+		if storeURL == "" || seen[key] {
+			continue
+		}
+		seen[key] = true
+
+		var exists bool
+		if it.Target == "live" {
+			exists = a.st.LiveSourceExists(storeURL)
+			liveURLs = append(liveURLs, storeURL)
+			stat.Lives++
+		} else {
+			_, exists = a.st.GetByURL(storeURL)
+			srcURLs = append(srcURLs, storeURL)
+			stat.Sources++
+		}
+		cands = append(cands, model.ScrapeCandidate{
+			SeedID:          sd.ID,
+			SeedName:        sd.Name,
+			Name:            it.Name,
+			URL:             storeURL,
+			Target:          it.Target,
+			Kind:            it.Kind,
+			Dup:             exists,
+			DiscoveredDepth: it.Depth,
+			ParentURL:       it.ParentURL,
+			Quality:         it.Quality,
+			Summary:         it.Summary,
+			Origin:          it.Origin,
+			FP:              it.FP,
+			FetchedAt:       now,
+			LastSeenAt:      now,
+		})
+	}
+
+	if len(cands) == 0 {
+		a.st.TouchScrapeSeedSync(sd.ID, "同步完成，未识别到任何源地址", now)
+		return
+	}
+	if err := a.st.UpsertScrapeCandidates(sd.ID, cands); err != nil {
+		stat.Errors = append(stat.Errors, fmt.Sprintf("%s：候选写入失败: %v", sd.Name, err))
+		a.st.TouchScrapeSeedSync(sd.ID, "候选写入失败: "+err.Error(), now)
+		return
+	}
+
+	// 漂移对账：已导入源 vs 本次发现集（上游移除 → 仅标记，不删）
+	removed, _ := a.st.ReconcileDrift(sd.ID, srcURLs, liveURLs)
+
+	stat.Synced++
+	stat.Candidates += len(cands)
+	dup := 0
+	for _, c := range cands {
+		if c.Dup {
+			dup++
+		}
+	}
+	stat.Duplicates += dup
+	msg = fmt.Sprintf("同步完成：识别 %d 条候选（%d 条已存在）", len(cands), dup)
+	if removed > 0 {
+		msg += fmt.Sprintf("，%d 个已导入源上游失效", removed)
+	}
+	a.st.TouchScrapeSeedSync(sd.ID, msg, now)
 }
 
 // ---- 发现引擎 ----
@@ -488,6 +525,7 @@ type discoveredItem struct {
 	Kind     string // repo-single / repo-multi / urls / array / txt / playlist / live-json / live-txt
 	Depth    int    // 发现深度：0=种子自身内容，1+=递归层级
 	ParentURL string
+	Origin   string // 仓库内相对路径（如 live/iptv/cn.m3u）；非仓库来源为空
 	Quality  int // 0~100，仅排序
 	Summary  string
 	FP       string // 上游内容指纹
@@ -500,7 +538,12 @@ type discoveredItem struct {
 
 const (
 	maxRepoFileBytes = 20 << 20 // 单文件上限 20MB
-	maxRepoFiles     = 300      // 单仓库最多处理的媒体文件数
+	maxRepoFiles     = 800      // 单仓库最多嗅探的文件数（浅层优先，避免深层文件挤掉根目录索引）
+	// sniffMaxBytes 无扩展名 / 未知扩展名文件的内容嗅探体积上限：
+	// 超过这个大小基本是二进制或数据包，不值得整份读进来判断。
+	sniffMaxBytes = 1 << 20
+	// sniffPeekBytes 内容嗅探读取的前缀长度（判 #EXTM3U / JSON 开头足够）
+	sniffPeekBytes = 1024
 )
 
 // splitProxyPrefix 分离包裹式代理前缀。形如 https://gh-proxy.org/https://github.com/...
@@ -576,6 +619,56 @@ func repoArchiveURL(host, owner, repo, branch string) string {
 		return "https://gitee.com/" + owner + "/" + repo + "/repository/archive/" + branch + ".zip"
 	}
 	return ""
+}
+
+// resolveRefURL 把配置里的引用地址解析成绝对地址。
+// 多仓 urls[] 与地址列表里允许写相对路径（./sub.json、../live/cn.json），
+// 仓库内多层目录索引几乎都是相对写法；base 为当前文件的绝对地址。
+// 非相对地址原样返回；base 不可用（空/非绝对）时也原样返回，交由后续流程判断。
+func resolveRefURL(base, ref string) string {
+	r := strings.TrimSpace(ref)
+	if r == "" {
+		return ""
+	}
+	if pu, err := url.Parse(r); err == nil && pu.IsAbs() {
+		return r
+	}
+	// 只有「像相对路径」的才补全：txt 行列表里的说明文字（含空格/中文）不能被当成路径，
+	// 否则 "这个订阅页暂时没有内容" 会被拼成 URL 混进候选。
+	if !looksLikeRelativeRef(r) {
+		return r
+	}
+	bu, err := url.Parse(strings.TrimSpace(base))
+	if err != nil || !bu.IsAbs() {
+		return r
+	}
+	ru, perr := url.Parse(r)
+	if perr != nil {
+		return r
+	}
+	return bu.ResolveReference(ru).String()
+}
+
+// looksLikeRelativeRef 判断一段文本是否可能是相对引用路径。
+func looksLikeRelativeRef(r string) bool {
+	if r == "" || strings.ContainsAny(r, " \t") || strings.Contains(r, "//") {
+		return false
+	}
+	for _, ch := range r {
+		if ch > 127 { // 中文说明/表情不是路径
+			return false
+		}
+	}
+	if strings.HasPrefix(r, "./") || strings.HasPrefix(r, "../") || strings.HasPrefix(r, "/") {
+		return true
+	}
+	low := strings.ToLower(r)
+	for _, ext := range []string{".json", ".m3u", ".m3u8", ".txt"} {
+		if strings.HasSuffix(low, ext) {
+			return true
+		}
+	}
+	return false
 }
 
 // repoRawURL 构造仓库内文件的 raw 直链（作为候选 URL，客户端可直接拉取）。
@@ -710,50 +803,195 @@ func (a *API) gitCloneRepo(ctx context.Context, host, owner, repo, proxyPrefix s
 	return workdir, branch, nil
 }
 
-// walkRepoDir 遍历克隆下来的工作树，对 .m3u/.m3u8/.txt/.json 逐文件复用 discoverContent。
-// 每个文件以各主机 raw 直链作为 baseURLStr，使候选 URL 客户端可直接拉取。
+// repoFile 仓库里一个待嗅探的文件。目录层级不单独建模：遍历本身就是全递归的，
+// 相对路径（Rel）把层级信息带给候选（Origin 字段），用户能看到某个源来自哪一层目录。
+type repoFile struct {
+	Rel  string // 相对仓库根，slash 分隔
+	Size int64
+	Open func() (io.ReadCloser, error)
+}
+
+// walkRepoDir 遍历克隆下来的工作树（任意层级），收集候选文件后统一嗅探。
 func (a *API) walkRepoDir(ctx context.Context, root, host, owner, repo, proxyPrefix, branch, seedName string, depth, curDepth int, parentURL string, hl *hostLimiter) ([]discoveredItem, error) {
-	var items []discoveredItem
-	processed := 0
-	err := filepath.WalkDir(root, func(p string, d os.DirEntry, err error) error {
+	var files []repoFile
+	werr := filepath.WalkDir(root, func(p string, d os.DirEntry, err error) error {
 		if err != nil {
-			return err
+			return nil // 单个条目不可读不影响整体
 		}
 		if d.IsDir() {
-			if d.Name() == ".git" {
+			if d.Name() == ".git" || d.Name() == "node_modules" {
 				return filepath.SkipDir
 			}
 			return nil
 		}
-		if processed >= maxRepoFiles {
-			return filepath.SkipDir
-		}
-		name := strings.ToLower(d.Name())
-		if !strings.HasSuffix(name, ".m3u") && !strings.HasSuffix(name, ".m3u8") &&
-			!strings.HasSuffix(name, ".txt") && !strings.HasSuffix(name, ".json") {
-			return nil
-		}
-		processed++
-		b, rerr := os.ReadFile(p)
+		rel, rerr := filepath.Rel(root, p)
 		if rerr != nil {
 			return nil
 		}
-		if len(b) > maxRepoFileBytes {
-			b = b[:maxRepoFileBytes]
-		}
-		rel, _ := filepath.Rel(root, p)
 		rel = filepath.ToSlash(rel)
-		rawFileURL := repoRawURL(host, owner, repo, proxyPrefix, branch, rel)
-		fileLabel := seedName + " · " + d.Name()
-		sub, derr := a.discoverContent(ctx, string(b), fileLabel, rawFileURL, depth, curDepth+1, parentURL, fingerprint(b), hl)
-		if derr != nil {
-			return nil // 单个非源文件跳过，不阻断其余文件
+		info, ierr := d.Info()
+		var size int64
+		if ierr == nil {
+			size = info.Size()
 		}
-		items = append(items, sub...)
+		// 扩展名不认识的文件也留下来：交给内容嗅探判断是不是漏网的播放列表/配置
+		if !isSourceFileExt(rel) && size > sniffMaxBytes {
+			return nil
+		}
+		local := p
+		files = append(files, repoFile{Rel: rel, Size: size, Open: func() (io.ReadCloser, error) {
+			return os.Open(local)
+		}})
 		return nil
 	})
+	if werr != nil {
+		return nil, werr
+	}
+	return a.walkRepoFiles(ctx, files, host, owner, repo, proxyPrefix, branch, seedName, depth, curDepth, parentURL, hl)
+}
+
+// walkRepoZip 解压归档（任意层级目录），收集候选文件后统一嗅探。
+// 每个文件以各主机 raw 直链作为 baseURLStr，使播放列表/单仓 JSON 的候选 URL
+// 直接可用（TVBox 客户端能拉到，无需经本服务端二次转发）。
+func (a *API) walkRepoZip(ctx context.Context, data []byte, host, owner, repo, proxyPrefix, branch, seedName string, depth, curDepth int, parentURL string, hl *hostLimiter) ([]discoveredItem, error) {
+	zr, err := zip.NewReader(bytes.NewReader(data), int64(len(data)))
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("归档解压失败: %v", err)
+	}
+	topDir := detectZipTopDir(zr.File)
+	var files []repoFile
+	for _, f := range zr.File {
+		if f.FileInfo().IsDir() {
+			continue
+		}
+		rel := f.Name
+		if topDir != "" && strings.HasPrefix(rel, topDir) {
+			rel = rel[len(topDir):]
+		}
+		if rel == "" {
+			continue
+		}
+		size := f.FileInfo().Size()
+		if !isSourceFileExt(rel) && size > sniffMaxBytes {
+			continue
+		}
+		zf := f
+		files = append(files, repoFile{Rel: rel, Size: size, Open: func() (io.ReadCloser, error) {
+			return zf.Open()
+		}})
+	}
+	return a.walkRepoFiles(ctx, files, host, owner, repo, proxyPrefix, branch, seedName, depth, curDepth, parentURL, hl)
+}
+
+// detectZipTopDir 判定归档的公共顶层目录（github/gitlab 为 repo-branch/，gitee 为 repo/）。
+// 不能只看首个条目：首条目常常是根目录下的 README / .gitattributes，按它判断会得出
+// 「没有顶层目录」或错层，导致 raw 直链多一层或少一层而 404。改成统计各一级目录占比，
+// 过半才剥；没有公共根的归档（内容直接铺在根）原样使用。
+func detectZipTopDir(files []*zip.File) string {
+	counts := make(map[string]int, 4)
+	total := 0
+	for _, f := range files {
+		if strings.HasSuffix(f.Name, "/") {
+			continue // 目录条目绕过
+		}
+		total++
+		if i := strings.Index(f.Name, "/"); i > 0 {
+			counts[f.Name[:i+1]]++
+		}
+	}
+	if total == 0 {
+		return ""
+	}
+	best, bestN := "", 0
+	for p, n := range counts {
+		if n > bestN || (n == bestN && p < best) {
+			best, bestN = p, n
+		}
+	}
+	if bestN*2 < total {
+		return "" // 未过半：不是公共根
+	}
+	return best
+}
+
+// isSourceFileExt 扩展名是否属于源文件候选（m3u/频道表/JSON 配置/地址列表 txt）。
+func isSourceFileExt(rel string) bool {
+	low := strings.ToLower(rel)
+	return strings.HasSuffix(low, ".m3u") || strings.HasSuffix(low, ".m3u8") ||
+		strings.HasSuffix(low, ".txt") || strings.HasSuffix(low, ".json")
+}
+
+// sniffSourceContent 内容嗅探：扩展名不可信时，靠内容判断这份文件值不值得解析。
+// 只读前缀，不整份加载——仓库里大量 .png/.zip/.md 不该被当成源，也不该被读进内存。
+func sniffSourceContent(head []byte) bool {
+	h := strings.TrimLeft(string(head), "\ufeff \t\r\n")
+	if h == "" {
+		return false
+	}
+	if strings.HasPrefix(strings.ToUpper(h), "#EXTM3U") || strings.HasPrefix(strings.ToUpper(h), "#EXTINF") {
+		return true
+	}
+	if h[0] == '{' || h[0] == '[' {
+		return true
+	}
+	// 无扩展名的地址列表：正文里出现 http(s) 链接即认
+	return strings.Contains(h, "http://") || strings.Contains(h, "https://")
+}
+
+// walkRepoFiles 统一嗅探入口：先按目录层级排序（浅层优先，保证根目录索引/顶层清单
+// 不会被几百个深层文件挤掉配额），再逐个读文件 → 内容嗅探 → discoverContent。
+func (a *API) walkRepoFiles(ctx context.Context, files []repoFile, host, owner, repo, proxyPrefix, branch, seedName string, depth, curDepth int, parentURL string, hl *hostLimiter) ([]discoveredItem, error) {
+	sort.SliceStable(files, func(i, j int) bool {
+		di, dj := pathDepth(files[i].Rel), pathDepth(files[j].Rel)
+		if di != dj {
+			return di < dj
+		}
+		return files[i].Rel < files[j].Rel
+	})
+
+	var items []discoveredItem
+	processed := 0
+	for _, f := range files {
+		if processed >= maxRepoFiles {
+			break
+		}
+		rc, oerr := f.Open()
+		if oerr != nil {
+			continue
+		}
+		b, rerr := io.ReadAll(io.LimitReader(rc, maxRepoFileBytes))
+		rc.Close()
+		if rerr != nil || len(b) == 0 {
+			continue
+		}
+		// 扩展名不认识的（无后缀 / .md / .conf …）先做前缀嗅探，省掉无谓的解析
+		if !isSourceFileExt(f.Rel) {
+			head := b
+			if len(head) > sniffPeekBytes {
+				head = head[:sniffPeekBytes]
+			}
+			if !sniffSourceContent(head) {
+				continue
+			}
+		}
+		processed++
+
+		rawFileURL := repoRawURL(host, owner, repo, proxyPrefix, branch, f.Rel)
+		if rawFileURL == "" {
+			continue
+		}
+		base := path.Base(f.Rel)
+		fileLabel := seedName + " · " + base
+		sub, derr := a.discoverContent(ctx, string(b), fileLabel, rawFileURL, depth, curDepth+1, parentURL, fingerprint(b), hl)
+		if derr != nil {
+			continue // 单个非源文件跳过，不阻断其余文件
+		}
+		for k := range sub {
+			if sub[k].Origin == "" {
+				sub[k].Origin = f.Rel
+			}
+		}
+		items = append(items, sub...)
 	}
 	if len(items) == 0 {
 		return nil, fmt.Errorf("仓库内未找到可识别的源文件")
@@ -761,66 +999,12 @@ func (a *API) walkRepoDir(ctx context.Context, root, host, owner, repo, proxyPre
 	return items, nil
 }
 
-// walkRepoZip 解压归档，遍历 .m3u/.m3u8/.txt/.json，逐文件复用 discoverContent。
-// 每个文件以各主机 raw 直链作为 baseURLStr，使播放列表/单仓 JSON 的候选 URL
-// 直接可用（TVBox 客户端能拉到，无需经本服务端二次转发）。
-// 顶层目录名各主机不同（github/gitlab 为 repo-branch/，gitee 为 repo/），故动态剥离首层目录。
-func (a *API) walkRepoZip(ctx context.Context, data []byte, host, owner, repo, proxyPrefix, branch, seedName string, depth, curDepth int, parentURL string, hl *hostLimiter) ([]discoveredItem, error) {
-	zr, err := zip.NewReader(bytes.NewReader(data), int64(len(data)))
-	if err != nil {
-		return nil, fmt.Errorf("归档解压失败: %v", err)
+// pathDepth 相对路径的目录层级：live/a.m3u → 1，live/cn/a.m3u → 2。
+func pathDepth(rel string) int {
+	if rel == "" {
+		return 0
 	}
-	// 动态取首个文件的顶层目录作为统一前缀（兼容不同主机的归档根目录命名）
-	var topDir string
-	if len(zr.File) > 0 {
-		if i := strings.Index(zr.File[0].Name, "/"); i >= 0 {
-			topDir = zr.File[0].Name[:i+1]
-		}
-	}
-	var items []discoveredItem
-	processed := 0
-	for _, f := range zr.File {
-		if f.FileInfo().IsDir() {
-			continue
-		}
-		name := strings.ToLower(f.Name)
-		if !strings.HasSuffix(name, ".m3u") && !strings.HasSuffix(name, ".m3u8") &&
-			!strings.HasSuffix(name, ".txt") && !strings.HasSuffix(name, ".json") {
-			continue
-		}
-		if processed >= maxRepoFiles {
-			break
-		}
-		processed++
-		rc, oerr := f.Open()
-		if oerr != nil {
-			continue
-		}
-		b, rerr := io.ReadAll(io.LimitReader(rc, maxRepoFileBytes))
-		rc.Close()
-		if rerr != nil {
-			continue
-		}
-		rel := f.Name
-		if topDir != "" && strings.HasPrefix(rel, topDir) {
-			rel = rel[len(topDir):]
-		}
-		base := rel
-		if i := strings.LastIndex(base, "/"); i >= 0 {
-			base = base[i+1:]
-		}
-		rawFileURL := repoRawURL(host, owner, repo, proxyPrefix, branch, rel)
-		fileLabel := seedName + " · " + base
-		sub, derr := a.discoverContent(ctx, string(b), fileLabel, rawFileURL, depth, curDepth+1, parentURL, fingerprint(b), hl)
-		if derr != nil {
-			continue
-		}
-		items = append(items, sub...)
-	}
-	if len(items) == 0 {
-		return nil, fmt.Errorf("仓库内未找到可识别的源文件")
-	}
-	return items, nil
+	return strings.Count(rel, "/") + 1
 }
 
 // discoverSeed 抓取种子并发现条目（顶层，depth 来自种子配置）。
@@ -870,7 +1054,7 @@ func (a *API) discoverContent(ctx context.Context, text, seedName, baseURLStr st
 		case model.TypeMulti:
 			// 多仓：逐条展开。m3u 直链本身就是播放列表，直接归直播；
 			// 其余当子仓递归（expandMulti 内部判 m3u）
-			return a.expandMulti(ctx, detail.SubURLs, depth, curDepth, baseURLStr, baseFP, hl)
+			return a.expandMulti(ctx, detail.SubURLs, depth, curDepth, baseURLStr, parentURL, baseFP, hl)
 		case model.TypeSingle:
 			// 有站点 → 单仓源候选。只有 lives 没有 sites 的「lives-only 配置」不是站点源，
 			// 不在这里返回，继续往下按播放列表集合提取（第 3 步）。
@@ -891,9 +1075,16 @@ func (a *API) discoverContent(ctx context.Context, text, seedName, baseURLStr st
 				if entries := extractLiveURLsFromJSON(text); len(entries) > 0 {
 					items := make([]discoveredItem, 0, len(entries))
 					for _, e := range entries {
-						items = append(items, discoveredItem{Name: e.Name, URL: e.URL, Target: "live", Kind: "live-json", Depth: curDepth, ParentURL: parentURL, Quality: 60})
+						// 仓库内的 lives 常写相对路径，按当前文件地址补全
+						u := resolveRefURL(baseURLStr, e.URL)
+						if u == "" {
+							continue
+						}
+						items = append(items, discoveredItem{Name: e.Name, URL: u, Target: "live", Kind: "live-json", Depth: curDepth, ParentURL: parentURL, Quality: 60})
 					}
-					return items, nil
+					if len(items) > 0 {
+						return items, nil
+					}
 				}
 			}
 		}
@@ -903,11 +1094,12 @@ func (a *API) discoverContent(ctx context.Context, text, seedName, baseURLStr st
 	if parsed, perr := ParseSourceJSON(cleaned); perr == nil && len(parsed.Entries) > 0 {
 		items := make([]discoveredItem, 0, len(parsed.Entries))
 		for _, e := range parsed.Entries {
-			t := entryTarget(e.URL)
+			u := resolveRefURL(baseURLStr, e.URL)
+			t := entryTarget(u)
 			if t == "" {
 				continue
 			}
-			items = append(items, discoveredItem{Name: e.Name, URL: e.URL, Target: t, Kind: parsed.Kind, Depth: curDepth, ParentURL: parentURL, Quality: 60})
+			items = append(items, discoveredItem{Name: e.Name, URL: u, Target: t, Kind: parsed.Kind, Depth: curDepth, ParentURL: parentURL, Quality: 60})
 		}
 		if len(items) > 0 {
 			return items, nil
@@ -919,7 +1111,8 @@ func (a *API) discoverContent(ctx context.Context, text, seedName, baseURLStr st
 	var out []discoveredItem
 	seen := map[string]bool{}
 	for _, line := range strings.Split(text, "\n") {
-		n, u := splitNameURL(line)
+		n, rawu := splitNameURL(line)
+		u := resolveRefURL(baseURLStr, rawu)
 		if u == "" || !looksLikeURL(u) || seen[strings.ToLower(u)] {
 			continue
 		}
@@ -962,11 +1155,13 @@ func entryTarget(u string) string {
 }
 
 // expandMulti 多仓：提取子仓地址为源候选；若 depth 允许且子仓本身仍是多仓，则递归展开一层。
-func (a *API) expandMulti(ctx context.Context, subURLs []model.SubURL, depth, curDepth int, parentURL, baseFP string, hl *hostLimiter) ([]discoveredItem, error) {
+// base 是当前配置自身的地址：多仓里的 urls 常见写成相对路径（./live/cn.json），
+// 仓库内多层目录索引尤其如此，必须按 base 解析成绝对地址，否则候选 URL 客户端拿不到。
+func (a *API) expandMulti(ctx context.Context, subURLs []model.SubURL, depth, curDepth int, base, parentURL, baseFP string, hl *hostLimiter) ([]discoveredItem, error) {
 	out := make([]discoveredItem, 0, len(subURLs))
 	seen := map[string]bool{}
 	for _, s := range subURLs {
-		u := strings.TrimSpace(s.URL)
+		u := resolveRefURL(base, s.URL)
 		if u == "" || seen[strings.ToLower(u)] {
 			continue
 		}
@@ -1011,6 +1206,37 @@ func (a *API) expandMulti(ctx context.Context, subURLs []model.SubURL, depth, cu
 
 func (a *API) handleScrapeCandidates(w http.ResponseWriter, r *http.Request) {
 	ok(w, a.st.ListScrapeCandidates())
+}
+
+// handleScrapeApplied GET /api/scrape/applied
+// 已刮削入库的源（源列表 + 直播源列表合并视图），支持分页与筛选。
+// 刮削页需要回答的是「我从这些种子里到底刮进来了什么」，而不是只看未导入的候选。
+func (a *API) handleScrapeApplied(w http.ResponseWriter, r *http.Request) {
+	q := r.URL.Query()
+	page, _ := strconv.Atoi(q.Get("page"))
+	size, _ := strconv.Atoi(q.Get("pageSize"))
+	list, total := a.st.ListScraped(store.ScrapedFilter{
+		SeedID:   q.Get("seedId"),
+		Target:   q.Get("target"),
+		Keyword:  q.Get("q"),
+		Page:     page,
+		PageSize: size,
+	})
+	if page <= 0 {
+		page = 1
+	}
+	if size <= 0 {
+		size = store.ScrapedPageSizeDefault
+	}
+	if size > store.ScrapedPageSizeMax {
+		size = store.ScrapedPageSizeMax
+	}
+	ok(w, map[string]interface{}{
+		"total":    total,
+		"page":     page,
+		"pageSize": size,
+		"list":     list,
+	})
 }
 
 type scrapeApplyReq struct {

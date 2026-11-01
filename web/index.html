@@ -523,7 +523,7 @@
             <li><b>直播播放列表</b> —— <code>.m3u</code> / <code>.m3u8</code> / txt 频道表 → 一条「直播源」候选，整份收录</li>
             <li><b>lives-only JSON</b> —— 只有 <code>lives</code> 没有 <code>sites</code> → 提取里面的播放列表直链</li>
             <li><b>地址列表</b> —— txt 或 JSON 一行一个订阅地址：<code>名称,URL</code> / <code>名称|URL</code> / 纯 URL 都认</li>
-            <li><b>Git 仓库</b> —— GitHub / GitLab / Gitee 仓库地址（可带 <code>.git</code>），支持 <code>https://gh-proxy.org/https://github.com/…</code> 这类代理前缀；会遍历仓库内的 <code>.m3u/.txt/.json</code></li>
+            <li><b>Git 仓库</b> —— GitHub / GitLab / Gitee 仓库地址（可带 <code>.git</code>），支持 <code>https://gh-proxy.org/https://github.com/…</code> 这类代理前缀；支持<b>任意层级目录</b>，会遍历仓库内所有子目录的 <code>.m3u/.txt/.json</code>，无扩展名的播放列表按内容识别</li>
             <li><b>本机地址</b> —— <code>http://127.0.0.1:9978/…</code> 这类 TVBox 客户端自带接口，需先在「设置」打开「允许访问本机回环地址」</li>
             <li class="muted"><b>不会被收录</b>：脚本与二进制（<code>.js/.jar/.py/.apk/.exe</code>）、需要登录的私有仓库、TG / 网盘分享页</li>
           </ul>
@@ -564,6 +564,11 @@
                 <td class="muted" :title="s.lastSyncMsg">{{ (s.lastSyncMsg||'').slice(0,48) }}</td>
                 <td><switch-box :on="s.enabled" @toggle="toggleScrapeSeed(s)"></switch-box></td>
                 <td class="ops">
+                  <button class="btn xs primary" @click="syncScrapeSeed(s)"
+                    :disabled="scrapeSyncingId===s.id || scrapeSyncState==='running'"
+                    title="只同步这一个种子，不用等整轮跑完">
+                    {{ scrapeSyncingId===s.id ? '同步中…' : '同步' }}
+                  </button>
                   <button class="btn xs" @click="openScrapeSeedModal(s)">编辑</button>
                   <button class="btn xs danger" @click="delScrapeSeed(s)">删除</button>
                 </td>
@@ -649,6 +654,7 @@
                   <td>
                     <span class="tag">{{ candidateKindText(c) }}</span>
                     <span v-if="c.discoveredDepth > 0" class="muted" style="font-size:11px;margin-left:4px">深度{{ c.discoveredDepth }}</span>
+                    <div v-if="c.origin" class="muted" style="font-size:11px;margin-top:2px" :title="'仓库内路径：' + c.origin">{{ c.origin }}</div>
                   </td>
                   <td class="muted">{{ candidateSummary(c) }}</td>
                   <td class="url-cell" :title="c.url" @click="copyText(c.url)">{{ c.url }}</td>
@@ -667,6 +673,80 @@
                 </tr>
               </tbody>
             </table>
+          </div>
+        </div>
+
+        <!-- 已刮削入库：源 + 直播源合并视图，服务端分页 -->
+        <div class="card" style="margin-top:12px;text-align:left;padding:14px">
+          <div class="card-title">
+            已刮削入库 <span class="muted">（共 {{ scraped.total }} 条；来自种子的源与直播源）</span>
+            <button class="btn xs" style="float:right" @click="loadScraped()" :disabled="scraped.loading">↻ 刷新</button>
+          </div>
+          <div class="row" style="gap:8px;margin-bottom:8px;flex-wrap:wrap">
+            <select v-model="scraped.target" @change="applyScrapedFilter()" title="按去向筛选">
+              <option value="all">全部去向</option>
+              <option value="source">📋 源</option>
+              <option value="live">📺 直播源</option>
+            </select>
+            <select v-model="scraped.seedId" @change="applyScrapedFilter()" title="按来源种子筛选">
+              <option value="all">全部种子</option>
+              <option v-for="s in scrapeSeeds" :key="s.id" :value="s.id">{{ s.name }}</option>
+            </select>
+            <input v-model="scraped.q" placeholder="搜索名称 / 地址 / 种子" class="grow" @keyup.enter="applyScrapedFilter()">
+            <button class="btn" @click="applyScrapedFilter()" :disabled="scraped.loading">查询</button>
+          </div>
+          <div class="table-wrap" style="max-height:420px">
+            <table>
+              <thead>
+                <tr>
+                  <th class="w-num">#</th>
+                  <th>名称</th>
+                  <th>去向</th>
+                  <th>来源种子</th>
+                  <th>分组</th>
+                  <th>状态</th>
+                  <th>频道</th>
+                  <th class="grow">地址</th>
+                  <th>发现时间</th>
+                </tr>
+              </thead>
+              <tbody>
+                <tr v-for="(x, i) in scraped.list" :key="x.target + x.id">
+                  <td class="muted w-num">{{ (scraped.page-1)*scraped.size + i + 1 }}</td>
+                  <td>{{ x.name || '—' }}</td>
+                  <td><span class="tag" :class="x.target==='live' ? 'from' : ''">{{ x.target==='live' ? '📺 直播源' : '📋 源' }}</span></td>
+                  <td class="muted">{{ x.seedName || '（种子已删除）' }}</td>
+                  <td><span class="tag group">{{ x.group }}</span></td>
+                  <td>
+                    <span v-if="x.upstreamRemoved" class="tag fail" title="上游种子已不再提供该地址（漂移），仅标记不自动删除">上游失效</span>
+                    <span v-else-if="!x.enabled" class="muted">已停用</span>
+                    <span v-else-if="x.status==='ok'" class="st-text ok">正常</span>
+                    <span v-else-if="x.status==='fail'" class="st-text fail">失败</span>
+                    <span v-else class="muted">待检测</span>
+                  </td>
+                  <td class="muted">{{ x.target==='live' ? (x.channelCount || 0) : '—' }}</td>
+                  <td class="url-cell" :title="x.url" @click="copyText(x.url)">{{ x.url }}</td>
+                  <td :title="absTime(x.discoveredAt)">{{ relTime(x.discoveredAt) }}</td>
+                </tr>
+                <tr v-if="!scraped.list.length">
+                  <td colspan="9" class="empty">
+                    还没有刮削入库的源 —— 在候选区勾选后点「导入选中」，这里会列出它们分别来自哪个种子
+                  </td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+          <div class="pager" v-if="scraped.total > 0">
+            <button class="btn xs" :disabled="scraped.page<=1" @click="scraped.page--; loadScraped()">上一页</button>
+            <span class="pager-total">共 {{ scraped.total }} 条</span>
+            <span>{{ scraped.page }} / {{ scrapedPages() }}</span>
+            <button class="btn xs" :disabled="scraped.page>=scrapedPages()" @click="scraped.page++; loadScraped()">下一页</button>
+            <select v-model.number="scraped.size" @change="applyScrapedFilter()" title="每页条数">
+              <option :value="20">20 条/页</option>
+              <option :value="50">50 条/页</option>
+              <option :value="100">100 条/页</option>
+              <option :value="200">200 条/页</option>
+            </select>
           </div>
         </div>
       </section>

@@ -82,7 +82,9 @@ func (a *API) Router() http.Handler {
 	apiMux.HandleFunc("PUT /api/scrape/seeds/{id}", a.handleScrapeSeedUpdate)
 	apiMux.HandleFunc("DELETE /api/scrape/seeds/{id}", a.handleScrapeSeedDelete)
 	apiMux.HandleFunc("POST /api/scrape/sync", a.handleScrapeSync)
+	apiMux.HandleFunc("POST /api/scrape/seeds/{id}/sync", a.handleScrapeSeedSync)
 	apiMux.HandleFunc("GET /api/scrape/candidates", a.handleScrapeCandidates)
+	apiMux.HandleFunc("GET /api/scrape/applied", a.handleScrapeApplied)
 	apiMux.HandleFunc("POST /api/scrape/apply", a.handleScrapeApply)
 
 	// 站点源（平铺层，订阅接口的数据来源）

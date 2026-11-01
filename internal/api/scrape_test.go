@@ -4,6 +4,7 @@ import (
 	"archive/zip"
 	"bytes"
 	"context"
+	"encoding/json"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -12,6 +13,7 @@ import (
 	"time"
 
 	"tvbox-manager/internal/model"
+	"tvbox-manager/internal/store"
 )
 
 // discoverContent 是刮削同步的内容识别核心（纯函数，不联网），覆盖：
@@ -571,5 +573,197 @@ func TestScrapeImportLivePlaylist(t *testing.T) {
 	}
 	if !strings.Contains(resp, "2 频道 / 2 组") {
 		t.Fatalf("应解析出 2 频道 2 组，实际: %s", resp)
+	}
+}
+
+// TestWalkRepoZipNestedDirs 多层级目录嗅探：
+//   - 归档首条目是根目录文件时，顶层目录剥离不能误判（旧实现会漏掉 repo-main/ 前缀，
+//     raw 直链多一层目录 → 客户端 404）；
+//   - 深层目录（live/iptv/cn.m3u）里的文件要被找到，候选 Origin 带出相对路径；
+//   - 无扩展名的播放列表靠内容嗅探认出来，二进制（伪装成无扩展名）必须被跳过。
+func TestWalkRepoZipNestedDirs(t *testing.T) {
+	var buf bytes.Buffer
+	zw := zip.NewWriter(&buf)
+	write := func(name, content string) {
+		w, err := zw.Create(name)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := w.Write([]byte(content)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// 首条目故意放在归档根（真实归档常见 README 排在最前）
+	write("README.md", "# iptv sources\n")
+	write("repo-main/live/iptv/cn.m3u", "#EXTM3U\n#EXTINF:-1,CCTV1\nhttp://e/1.m3u8\n")
+	write("repo-main/live/backup", "#EXTM3U\n#EXTINF:-1,卫视\nhttp://e/2.m3u8\n") // 无扩展名，靠嗅探
+	write("repo-main/vod/a/b/c/index.json", `{"sites":[{"key":"a","name":"站","api":"https://api.example/vod"}]}`)
+	write("repo-main/img/logo", "\x89PNG\r\n\x1a\n\x00\x00\x00") // 二进制，应跳过
+	if err := zw.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	items, err := new(API).walkRepoZip(context.Background(), buf.Bytes(), "github.com", "o", "r", "", "main", "种子", 1, 0, "", nil)
+	if err != nil {
+		t.Fatalf("walkRepoZip: %v", err)
+	}
+	if len(items) != 3 {
+		t.Fatalf("应识别 3 条（2 直播 + 1 源），实际 %d: %+v", len(items), items)
+	}
+	byOrigin := map[string]discoveredItem{}
+	for _, it := range items {
+		byOrigin[it.Origin] = it
+	}
+	deep, ok := byOrigin["live/iptv/cn.m3u"]
+	if !ok {
+		t.Fatalf("深层目录文件未被嗅探到，实际 Origin: %v", byOrigin)
+	}
+	wantURL := "https://raw.githubusercontent.com/o/r/main/live/iptv/cn.m3u"
+	if deep.URL != wantURL {
+		t.Fatalf("深层文件 raw URL 错误（顶层目录剥离有问题）: %s", deep.URL)
+	}
+	if _, ok := byOrigin["live/backup"]; !ok {
+		t.Fatalf("无扩展名的播放列表应被内容嗅探认出，实际 Origin: %v", byOrigin)
+	}
+	if _, ok := byOrigin["vod/a/b/c/index.json"]; !ok {
+		t.Fatalf("四级目录里的配置应被识别，实际 Origin: %v", byOrigin)
+	}
+}
+
+// TestResolveRefURL 多仓/地址列表里的相对引用补全；说明文字不能被拼成 URL。
+func TestResolveRefURL(t *testing.T) {
+	base := "https://raw.githubusercontent.com/o/r/main/live/index.json"
+	cases := []struct{ ref, want string }{
+		{"https://a.example/x.json", "https://a.example/x.json"},
+		{"./cn.json", "https://raw.githubusercontent.com/o/r/main/live/cn.json"},
+		{"../vod/a.json", "https://raw.githubusercontent.com/o/r/main/vod/a.json"},
+		{"sub/b.m3u", "https://raw.githubusercontent.com/o/r/main/live/sub/b.m3u"},
+		{"这个订阅页暂时没有内容", "这个订阅页暂时没有内容"},
+		{"", ""},
+	}
+	for _, c := range cases {
+		got := resolveRefURL(base, c.ref)
+		if got != c.want {
+			t.Fatalf("resolveRefURL(%q) = %q，期望 %q", c.ref, got, c.want)
+		}
+	}
+}
+
+// TestScrapeSeedSyncOne 单条种子同步：只跑这一条，其它种子状态不受影响。
+func TestScrapeSeedSyncOne(t *testing.T) {
+	e := newEnv(t)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(`{"sites":[{"key":"a","name":"站","api":"https://api.example/vod"}]}`))
+	}))
+	defer srv.Close()
+
+	cfg := e.st.Config()
+	cfg.AllowLoopbackFetch = true
+	if err := e.st.UpdateConfig(cfg); err != nil {
+		t.Fatal(err)
+	}
+	e.sch.Reload(&cfg)
+
+	code, resp := e.do("POST", "/api/scrape/seeds", e.token,
+		`{"name":"本地种子","url":"`+srv.URL+`/a.json","enabled":true}`, "application/json")
+	if code != http.StatusOK {
+		t.Fatalf("添加种子失败 %d %s", code, resp)
+	}
+	var added struct {
+		Data model.ScrapeSeed `json:"data"`
+	}
+	if err := json.Unmarshal([]byte(resp), &added); err != nil {
+		t.Fatal(err)
+	}
+	// 另一个指向不可达地址的种子：不应被这次单条同步触碰
+	code, other := e.do("POST", "/api/scrape/seeds", e.token,
+		`{"name":"另一个","url":"http://127.0.0.1:9/dead.json","enabled":true}`, "application/json")
+	if code != http.StatusOK {
+		t.Fatalf("添加第二个种子失败 %d %s", code, other)
+	}
+
+	code, resp = e.do("POST", "/api/scrape/seeds/"+added.Data.ID+"/sync", e.token, "", "")
+	if code != http.StatusOK {
+		t.Fatalf("单条同步失败 %d %s", code, resp)
+	}
+	if !strings.Contains(resp, `"seeds":1`) || !strings.Contains(resp, `"candidates":1`) {
+		t.Fatalf("单条同步统计不对: %s", resp)
+	}
+	cands := e.st.ListScrapeCandidates()
+	if len(cands) != 1 || cands[0].SeedID != added.Data.ID {
+		t.Fatalf("只应有该种子的 1 条候选，实际 %+v", cands)
+	}
+	for _, sd := range e.st.ListScrapeSeeds() {
+		if sd.Name == "另一个" && sd.LastSyncAt != nil {
+			t.Fatal("单条同步不应触发其它种子")
+		}
+	}
+
+	// 不存在的种子 → 404
+	if code, _ := e.do("POST", "/api/scrape/seeds/seed_nope/sync", e.token, "", ""); code != http.StatusNotFound {
+		t.Fatalf("不存在的种子应 404，实际 %d", code)
+	}
+}
+
+// TestScrapeAppliedPaging 已刮削入库视图：只统计带 SeedID 的源，支持分页/筛选/搜索。
+func TestScrapeAppliedPaging(t *testing.T) {
+	e := newEnv(t)
+	now := time.Now()
+	var srcs []model.Source
+	for i := 0; i < 5; i++ {
+		srcs = append(srcs, model.Source{
+			Name: fmt.Sprintf("刮削源%d", i), URL: fmt.Sprintf("http://s%d.example/api.php/provide/vod", i),
+			Group: "刮削", Enabled: true, SeedID: "seed_x", DiscoveredAt: &now,
+		})
+	}
+	srcs = append(srcs, model.Source{Name: "手工源", URL: "http://manual.example/api.php/provide/vod", Enabled: true})
+	if _, err := e.st.AddManySources(srcs); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := e.st.AddManyLiveSources([]store.LiveAddItem{{
+		Name: "刮削直播", RawURL: "http://live.example/all.m3u", Group: "刮削", Enabled: true, SeedID: "seed_x",
+	}}); err != nil {
+		t.Fatal(err)
+	}
+
+	read := func(path string) (total int, items []store.ScrapedItem) {
+		code, resp := e.do("GET", path, e.token, "", "")
+		if code != http.StatusOK {
+			t.Fatalf("%s 请求失败 %d %s", path, code, resp)
+		}
+		var out struct {
+			Data struct {
+				Total int                 `json:"total"`
+				List  []store.ScrapedItem `json:"list"`
+			} `json:"data"`
+		}
+		if err := json.Unmarshal([]byte(resp), &out); err != nil {
+			t.Fatal(err)
+		}
+		return out.Data.Total, out.Data.List
+	}
+
+	total, list := read("/api/scrape/applied?page=1&pageSize=3")
+	if total != 6 {
+		t.Fatalf("总数应为 6（5 源 + 1 直播源，手工源不算），实际 %d", total)
+	}
+	if len(list) != 3 {
+		t.Fatalf("第一页应 3 条，实际 %d", len(list))
+	}
+	total, list = read("/api/scrape/applied?page=2&pageSize=3")
+	if total != 6 || len(list) != 3 {
+		t.Fatalf("第二页应 3 条/总 6，实际 %d/%d", len(list), total)
+	}
+	total, list = read("/api/scrape/applied?target=live")
+	if total != 1 || len(list) != 1 || list[0].Target != "live" {
+		t.Fatalf("按直播源筛选应 1 条，实际 %d/%d", total, len(list))
+	}
+	total, _ = read("/api/scrape/applied?q=刮削源1")
+	if total != 1 {
+		t.Fatalf("搜索「刮削源1」应 1 条，实际 %d", total)
+	}
+	total, _ = read("/api/scrape/applied?seedId=seed_none")
+	if total != 0 {
+		t.Fatalf("不存在的种子应 0 条，实际 %d", total)
 	}
 }
