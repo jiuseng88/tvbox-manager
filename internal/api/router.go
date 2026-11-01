@@ -27,6 +27,10 @@ type API struct {
 	// PastedDir 粘贴单仓配置的本地托管目录（main 注入 data/pasted；空 = 托管未启用）
 	PastedDir string
 
+	// LiveCacheFile 聚合直播频道表的落盘缓存路径（main 注入 data/live_cache.json；
+	// 空 = 不落盘，仅用内存缓存，重启后首次点直播仍要冷拉）。
+	LiveCacheFile string
+
 	// 一键解析直播源的后台任务状态（同一时刻只允许一个，避免重复去打上游）
 	resyncMu sync.Mutex
 	resync   *liveResyncState

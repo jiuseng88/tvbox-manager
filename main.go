@@ -53,7 +53,8 @@ func main() {
 		os.Exit(1)
 	}
 	apiSrv := api.New(st, sch, version, webRoot)
-	apiSrv.PastedDir = filepath.Join(dataDir, "pasted") // 粘贴单仓的本地托管目录
+	apiSrv.PastedDir = filepath.Join(dataDir, "pasted")             // 粘贴单仓的本地托管目录
+	apiSrv.LiveCacheFile = filepath.Join(dataDir, "live_cache.json") // 直播频道表落盘缓存（重启秒开）
 	if webDir != "" {
 		apiSrv.DevMode(true)
 	}
@@ -98,6 +99,10 @@ func main() {
 			os.Exit(1)
 		}
 	}()
+
+	// 后台预热直播频道表：启动即开始拉取并落盘，用户点「直播」时直接命中缓存秒开，
+	// 不必等每次进页面现拉几十个上游 m3u。
+	go apiSrv.PreloadLiveChannels()
 
 	// 优雅关闭：等待进行中的探活与请求
 	quit := make(chan os.Signal, 1)
