@@ -1,100 +1,176 @@
 package api
 
 import (
+	"context"
 	"fmt"
 	"strings"
 	"testing"
 	"time"
 
 	"tvbox-manager/internal/model"
-	"tvbox-manager/internal/store"
 )
 
-// extractScrapeEntries 是刮削同步的内容识别核心（纯函数，不联网），
-// 覆盖：单仓 / 多仓 / 地址列表 JSON / txt 行列表 / 空内容。
+// discoverContent 是刮削同步的内容识别核心（纯函数，不联网），覆盖：
+// 单仓 / 多仓 / 地址列表 JSON / txt 行列表 / 空内容，以及逐条类型嗅探（source/live）。
 
-func TestExtractScrapeEntriesSingle(t *testing.T) {
+func TestDiscoverScrapeSingle(t *testing.T) {
 	text := `{"sites":[{"key":"a","name":"测试站","url":"https://api.example/api.php/provide/vod"}],"lives":[]}`
-	entries, kind := extractScrapeEntries(text, "我的仓", "https://example.com/tvbox.json")
-	if len(entries) != 1 {
-		t.Fatalf("单仓应 1 条候选，实际 %d", len(entries))
+	items, err := discoverFn()(context.Background(), text, "我的仓", "https://example.com/tvbox.json", 1, 0, "", "", false, nil)
+	if err != nil {
+		t.Fatalf("不应报错: %v", err)
 	}
-	if kind != "repo-single" {
-		t.Fatalf("单仓 kind 应为 repo-single，实际 %s", kind)
+	if len(items) != 1 {
+		t.Fatalf("单仓应 1 条候选，实际 %d", len(items))
 	}
-	if entries[0].URL != "https://example.com/tvbox.json" {
-		t.Fatalf("单仓候选应为种子自身地址，实际 %s", entries[0].URL)
+	if items[0].Kind != "repo-single" {
+		t.Fatalf("单仓 kind 应为 repo-single，实际 %s", items[0].Kind)
 	}
-	if entries[0].Name != "我的仓" {
-		t.Fatalf("单仓候选名称应为种子名，实际 %s", entries[0].Name)
+	if items[0].URL != "https://example.com/tvbox.json" {
+		t.Fatalf("单仓候选应为种子自身地址，实际 %s", items[0].URL)
+	}
+	if items[0].Name != "我的仓" {
+		t.Fatalf("单仓候选名称应为种子名，实际 %s", items[0].Name)
+	}
+	if items[0].Target != "source" {
+		t.Fatalf("单仓候选应为 source，实际 %s", items[0].Target)
 	}
 }
 
-func TestExtractScrapeEntriesMulti(t *testing.T) {
+func TestDiscoverScrapeMulti(t *testing.T) {
 	text := `{"urls":[{"name":"子仓A","url":"https://a.example/sub1.json"},{"name":"子仓B","url":"https://b.example/sub2.json"}]}`
-	entries, kind := extractScrapeEntries(text, "聚合", "https://agg.example/all.json")
-	if kind != "repo-multi" {
-		t.Fatalf("多仓 kind 应为 repo-multi，实际 %s", kind)
+	items, err := discoverFn()(context.Background(), text, "聚合", "https://agg.example/all.json", 1, 0, "", "", false, nil)
+	if err != nil {
+		t.Fatalf("不应报错: %v", err)
 	}
-	if len(entries) != 2 {
-		t.Fatalf("多仓应 2 条候选，实际 %d", len(entries))
+	if len(items) != 2 {
+		t.Fatalf("多仓应 2 条候选，实际 %d", len(items))
 	}
-	if entries[0].URL != "https://a.example/sub1.json" || entries[0].Name != "子仓A" {
-		t.Fatalf("多仓子仓解析错误: %+v", entries[0])
+	if items[0].Kind != "repo-multi" {
+		t.Fatalf("多仓 kind 应为 repo-multi，实际 %s", items[0].Kind)
+	}
+	if items[0].URL != "https://a.example/sub1.json" || items[0].Name != "子仓A" {
+		t.Fatalf("多仓子仓解析错误: %+v", items[0])
 	}
 }
 
-func TestExtractScrapeEntriesURLShareFormat(t *testing.T) {
-	// TVBox 社区分享格式（带 // 注释的 JSONC）——urls 键存在即视为多仓子仓
+func TestDiscoverScrapeURLShareFormat(t *testing.T) {
 	text := `// 分享列表
 {"urls":[{"url":"https://x.example/a.json","name":"甲"},{"url":"https://y.example/b.json","name":"乙"}]}`
-	entries, kind := extractScrapeEntries(text, "seed", "https://s.example/seed.json")
-	if kind != "repo-multi" {
-		t.Fatalf("分享格式应识别为 repo-multi，实际 %s", kind)
+	items, err := discoverFn()(context.Background(), text, "seed", "https://s.example/seed.json", 1, 0, "", "", false, nil)
+	if err != nil {
+		t.Fatalf("不应报错: %v", err)
 	}
-	if len(entries) != 2 {
-		t.Fatalf("应 2 条候选，实际 %d", len(entries))
+	if len(items) != 2 {
+		t.Fatalf("分享格式应 2 条候选，实际 %d", len(items))
+	}
+	for _, it := range items {
+		if it.Target != "source" {
+			t.Fatalf("分享格式应为 source，实际 %s", it.Target)
+		}
 	}
 }
 
-func TestExtractScrapeEntriesURLArray(t *testing.T) {
-	// 纯字符串数组（无注释）
+func TestDiscoverScrapeURLArray(t *testing.T) {
 	text := `["https://x.example/a.json", "https://y.example/b.json"]`
-	entries, kind := extractScrapeEntries(text, "seed", "s")
-	if kind != "array" {
-		t.Fatalf("数组 kind 应为 array，实际 %s", kind)
+	items, err := discoverFn()(context.Background(), text, "seed", "s", 1, 0, "", "", false, nil)
+	if err != nil {
+		t.Fatalf("不应报错: %v", err)
 	}
-	if len(entries) != 2 {
-		t.Fatalf("应 2 条候选，实际 %d", len(entries))
+	if len(items) != 2 {
+		t.Fatalf("数组应 2 条候选，实际 %d", len(items))
+	}
+	if items[0].Kind != "array" {
+		t.Fatalf("数组 kind 应为 array，实际 %s", items[0].Kind)
 	}
 }
 
-func TestExtractScrapeEntriesTxt(t *testing.T) {
+func TestDiscoverScrapeTxt(t *testing.T) {
 	text := "测试源1,https://a.example/1.json\nhttps://b.example/2.json|源2\n# 注释行\n\nhttps://a.example/1.json\n"
-	entries, kind := extractScrapeEntries(text, "seed", "x")
-	if kind != "txt" {
-		t.Fatalf("txt kind 应为 txt，实际 %s", kind)
+	items, err := discoverFn()(context.Background(), text, "seed", "x", 1, 0, "", "", false, nil)
+	if err != nil {
+		t.Fatalf("不应报错: %v", err)
 	}
-	if len(entries) != 2 {
-		t.Fatalf("应 2 条候选（含注释与重复过滤），实际 %d", len(entries))
+	if len(items) != 2 {
+		t.Fatalf("应 2 条候选（含注释与重复过滤），实际 %d", len(items))
 	}
-}
-
-func TestExtractScrapeEntriesEmpty(t *testing.T) {
-	if entries, _ := extractScrapeEntries("   ", "s", "u"); len(entries) != 0 {
-		t.Fatalf("空白内容应 0 条，实际 %d", len(entries))
-	}
-	if entries, _ := extractScrapeEntries("hello world 没有任何地址", "s", "u"); len(entries) != 0 {
-		t.Fatalf("无地址内容应 0 条，实际 %d", len(entries))
+	for _, it := range items {
+		if it.Target != "source" {
+			t.Fatalf("txt 源清单应为 source，实际 %s", it.Target)
+		}
 	}
 }
 
-// TestScrapeApplyFlow 候选确认 → 导入为源的端到端闭环（不依赖网络：
-// 候选直接注入 store，apply 走标准导入 + 状态回写）。
+func TestDiscoverScrapeEmpty(t *testing.T) {
+	fn := discoverFn()
+	if items, _ := fn(context.Background(), "   ", "s", "u", 1, 0, "", "", false, nil); len(items) != 0 {
+		t.Fatalf("空白内容应 0 条，实际 %d", len(items))
+	}
+	if items, _ := fn(context.Background(), "hello world 没有任何地址", "s", "u", 1, 0, "", "", false, nil); len(items) != 0 {
+		t.Fatalf("无地址内容应 0 条，实际 %d", len(items))
+	}
+}
+
+// ---- 直播源发现（A-07 / E-04）----
+
+func TestDiscoverLiveEntries(t *testing.T) {
+	fn := discoverFn()
+	seedName, seedURL := "直播聚合", "https://live.agg.example/all.m3u"
+
+	// 1. 整份 m3u → 一条直播候选（playlist）
+	items, err := fn(context.Background(), "#EXTM3U\n#EXTINF:-1,央视综合\nhttp://x.example/cctv1.m3u8\n", seedName, seedURL, 1, 0, "", "", true, nil)
+	if err != nil || len(items) != 1 || items[0].Kind != "playlist" || items[0].Target != "live" || items[0].URL != seedURL {
+		t.Fatalf("m3u 应整份为 1 条直播候选，实际 %d/%v/%v", len(items), items, err)
+	}
+
+	// 2. txt 频道表（≥8 行 http）→ 整份直播（playlist）
+	var sb strings.Builder
+	for i := 0; i < 10; i++ {
+		sb.WriteString(fmt.Sprintf("频道%d,http://x.example/ch%d.m3u8\n", i, i))
+	}
+	items, err = fn(context.Background(), sb.String(), seedName, seedURL, 1, 0, "", "", true, nil)
+	if err != nil || len(items) != 1 || items[0].Kind != "playlist" || items[0].Target != "live" {
+		t.Fatalf("txt 频道表应整份为 1 条直播候选，实际 %d/%v/%v", len(items), items, err)
+	}
+
+	// 3. JSON lives 结构 → 提取播放列表直链（live-json）
+	items, err = fn(context.Background(), `{"lives":[{"name":"A站","url":"http://a.example/x.m3u"},{"name":"B站","url":"http://b.example/y.txt"}]}`, seedName, seedURL, 1, 0, "", "", true, nil)
+	if err != nil || len(items) != 2 || items[0].Target != "live" || items[0].Kind != "live-json" {
+		t.Fatalf("JSON lives 应提取 2 条直播，实际 %d/%v/%v", len(items), items, err)
+	}
+	if items[0].Name != "A站" {
+		t.Fatalf("条目名称应为 A站，实际 %q", items[0].Name)
+	}
+
+	// 4. JSON urls 混合，脚本/接口直链应被过滤，仅留播放列表直链
+	items, err = fn(context.Background(), `{"urls":[{"name":"脚本","url":"http://a.example/spider.js"},{"name":"播放","url":"http://c.example/live.m3u"},{"name":"CMS","url":"http://d.example/api.php/xx?y=1"}]}`, seedName, seedURL, 1, 0, "", "", true, nil)
+	if err != nil || len(items) != 1 || items[0].Target != "live" || items[0].URL != "http://c.example/live.m3u" {
+		t.Fatalf("应只收播放列表直链（1 条直播），实际 %d/%v/%v", len(items), items, err)
+	}
+
+	// 5. txt 少量 URL 行 → 逐条直播候选（沿用批量导入口径：名称|地址 / 名称,地址 / 纯地址）
+	items, err = fn(context.Background(), "A,http://a.example/x.m3u\nB|http://b.example/y.m3u\n", seedName, seedURL, 1, 0, "", "", true, nil)
+	if err != nil || len(items) != 2 || items[0].Kind != "live-txt" || items[0].Target != "live" {
+		t.Fatalf("少量 URL 行应逐条 2 条直播，实际 %d/%v/%v", len(items), items, err)
+	}
+
+	// 6. 空 / 纯文字 → 0 条
+	if items, _ := fn(context.Background(), "", seedName, seedURL, 1, 0, "", "", true, nil); len(items) != 0 {
+		t.Fatalf("空内容应 0 条，实际 %d", len(items))
+	}
+	if items, _ := fn(context.Background(), "这个订阅页暂时没有内容", seedName, seedURL, 1, 0, "", "", true, nil); len(items) != 0 {
+		t.Fatalf("纯文字应 0 条，实际 %d", len(items))
+	}
+}
+
+// discoverFn 取出真实的 discoverContent 方法（类型安全包装）。
+func discoverFn() func(context.Context, string, string, string, int, int, string, string, bool, *hostLimiter) ([]discoveredItem, error) {
+	return new(API).discoverContent
+}
+
+// TestScrapeApplyFlow 候选确认 → 导入为源的端到端闭环（不依赖网络：候选直接注入 store，apply 走标准导入 + 状态回写）。
 func TestScrapeApplyFlow(t *testing.T) {
 	e := newEnv(t)
 
-	// 1. 添加种子
 	code, body := e.doJSON("POST", "/api/scrape/seeds", map[string]interface{}{
 		"name": "聚合源", "url": "https://agg.example/all.json", "group": "刮削",
 	})
@@ -107,17 +183,26 @@ func TestScrapeApplyFlow(t *testing.T) {
 		t.Fatalf("种子 ID 为空: %v", d)
 	}
 
-	// 2. 注入候选：一条新地址 + 一条已存在（dup）的
 	now := time.Now()
-	c1 := model.ScrapeCandidate{ID: store.NewCandidateID(), SeedID: seedID, SeedName: "聚合源", Name: "新站1", URL: "https://new1.example/api.php", Kind: "repo-multi", Status: "pending", FetchedAt: now}
-	c2 := model.ScrapeCandidate{ID: store.NewCandidateID(), SeedID: seedID, SeedName: "聚合源", Name: "重复站", URL: "https://dup.example/api.php", Kind: "repo-multi", Dup: true, Status: "pending", FetchedAt: now}
-	if err := e.st.SetScrapeCandidates(seedID, []model.ScrapeCandidate{c1, c2}); err != nil {
+	c1 := model.ScrapeCandidate{SeedID: seedID, SeedName: "聚合源", Name: "新站1", URL: "https://new1.example/api.php", Kind: "repo-multi", Status: "pending", FetchedAt: now}
+	c2 := model.ScrapeCandidate{SeedID: seedID, SeedName: "聚合源", Name: "重复站", URL: "https://dup.example/api.php", Kind: "repo-multi", Dup: true, Status: "pending", FetchedAt: now}
+	if err := e.st.UpsertScrapeCandidates(seedID, []model.ScrapeCandidate{c1, c2}); err != nil {
 		t.Fatal(err)
 	}
 
-	// 3. apply：非 dup 导入为源，dup 跳过
+	// 取出稳定 ID
+	var id1, id2 string
+	for _, c := range e.st.ListScrapeCandidates() {
+		if c.URL == "https://new1.example/api.php" {
+			id1 = c.ID
+		}
+		if c.URL == "https://dup.example/api.php" {
+			id2 = c.ID
+		}
+	}
+
 	code, body = e.doJSON("POST", "/api/scrape/apply", map[string]interface{}{
-		"ids": []string{c1.ID, c2.ID}, "group": "刮削导入",
+		"ids": []string{id1, id2}, "group": "刮削导入",
 	})
 	if code != 200 {
 		t.Fatalf("apply 失败 %d: %v", code, body)
@@ -130,7 +215,6 @@ func TestScrapeApplyFlow(t *testing.T) {
 		t.Fatalf("应跳过 1 条（dup），实际 %v", body)
 	}
 
-	// 4. 落库验证
 	if _, found := e.st.GetByURL("https://new1.example/api.php"); !found {
 		t.Fatal("新站应已入库")
 	}
@@ -138,20 +222,20 @@ func TestScrapeApplyFlow(t *testing.T) {
 		t.Fatal("重复站不应入库")
 	}
 
-	// 5. 候选状态回写
+	// 候选状态回写
 	st := map[string]string{}
 	for _, c := range e.st.ListScrapeCandidates() {
 		st[c.ID] = c.Status
 	}
-	if st[c1.ID] != "applied" {
-		t.Fatalf("新站候选应为 applied，实际 %s", st[c1.ID])
+	if st[id1] != "applied" {
+		t.Fatalf("新站候选应为 applied，实际 %s", st[id1])
 	}
-	if st[c2.ID] != "skipped" {
-		t.Fatalf("重复站候选应为 skipped，实际 %s", st[c2.ID])
+	if st[id2] != "skipped" {
+		t.Fatalf("重复站候选应为 skipped，实际 %s", st[id2])
 	}
 
-	// 6. 二次 apply 同一候选不再新增（已处理过）
-	code, body = e.doJSON("POST", "/api/scrape/apply", map[string]interface{}{"ids": []string{c1.ID}})
+	// 二次 apply 同一候选不再新增（已处理过）
+	code, body = e.doJSON("POST", "/api/scrape/apply", map[string]interface{}{"ids": []string{id1}})
 	if code != 200 {
 		t.Fatalf("二次 apply 失败 %d: %v", code, body)
 	}
@@ -161,62 +245,10 @@ func TestScrapeApplyFlow(t *testing.T) {
 	}
 }
 
-// ---- 直播源刮削（A-07/E-04）----
-
-func TestExtractLiveSeedEntries(t *testing.T) {
-	seedName, seedURL := "直播聚合", "https://live.agg.example/all.m3u"
-
-	// 1. 整份 m3u → 种子自身一条候选（playlist）
-	entries, kind := extractLiveSeedEntries("#EXTM3U\n#EXTINF:-1,央视综合\nhttp://x.example/cctv1.m3u8\n", seedName, seedURL)
-	if len(entries) != 1 || kind != "playlist" || entries[0].URL != seedURL {
-		t.Fatalf("m3u 应整份为 1 条 playlist 候选，实际 %d/%q/%v", len(entries), kind, entries)
-	}
-
-	// 2. txt 频道表（≥8 行 http）→ 整份
-	var sb strings.Builder
-	for i := 0; i < 10; i++ {
-		sb.WriteString(fmt.Sprintf("频道%d,http://x.example/ch%d.m3u8\n", i, i))
-	}
-	entries, kind = extractLiveSeedEntries(sb.String(), seedName, seedURL)
-	if len(entries) != 1 || kind != "playlist" || entries[0].URL != seedURL {
-		t.Fatalf("txt 频道表应整份为 1 条 playlist，实际 %d/%q/%v", len(entries), kind, entries)
-	}
-
-	// 3. JSON lives 结构 → 提取播放列表直链（lives 键不过滤）
-	entries, kind = extractLiveSeedEntries(`{"lives":[{"name":"A站","url":"http://a.example/x.m3u"},{"name":"B站","url":"http://b.example/y.txt"}]}`, seedName, seedURL)
-	if len(entries) != 2 || kind != "live-json" {
-		t.Fatalf("JSON lives 应提取 2 条，实际 %d/%q/%v", len(entries), kind, entries)
-	}
-	if entries[0].Name != "A站" {
-		t.Fatalf("条目名称应为 A站，实际 %q", entries[0].Name)
-	}
-
-	// 4. JSON urls 混合，脚本/接口直链应被过滤
-	entries, kind = extractLiveSeedEntries(`{"urls":[{"name":"脚本","url":"http://a.example/spider.js"},{"name":"播放","url":"http://c.example/live.m3u"},{"name":"CMS","url":"http://d.example/api.php/xx?y=1"}]}`, seedName, seedURL)
-	if len(entries) != 1 || kind != "live-json" || entries[0].URL != "http://c.example/live.m3u" {
-		t.Fatalf("应只收播放列表直链，实际 %d/%q/%v", len(entries), kind, entries)
-	}
-
-	// 5. txt 少量 URL 行 → 逐条候选（沿用批量导入口径：名称|地址 / 名称,地址 / 纯地址）
-	entries, kind = extractLiveSeedEntries("A,http://a.example/x.m3u\nB|http://b.example/y.m3u\n", seedName, seedURL)
-	if len(entries) != 2 || kind != "live-txt" {
-		t.Fatalf("少量 URL 行应逐条 2 条，实际 %d/%q/%v", len(entries), kind, entries)
-	}
-
-	// 6. 空 / 纯文字 → 0 条
-	if entries, _ := extractLiveSeedEntries("", seedName, seedURL); len(entries) != 0 {
-		t.Fatalf("空内容应 0 条，实际 %d", len(entries))
-	}
-	if entries, _ := extractLiveSeedEntries("这个订阅页暂时没有内容", seedName, seedURL); len(entries) != 0 {
-		t.Fatalf("纯文字应 0 条，实际 %d", len(entries))
-	}
-}
-
 // TestScrapeApplyLiveFlow 直播候选 apply 端到端：候选 → LiveSource 入库 → 状态回写 → 幂等。
 func TestScrapeApplyLiveFlow(t *testing.T) {
 	e := newEnv(t)
 
-	// 1. 添加 live 类型种子
 	code, body := e.doJSON("POST", "/api/scrape/seeds", map[string]interface{}{
 		"name": "直播聚合", "url": "https://live.agg.example/all.m3u", "type": "live", "group": "直播刮削",
 	})
@@ -229,19 +261,23 @@ func TestScrapeApplyLiveFlow(t *testing.T) {
 		t.Fatalf("种子 ID 为空: %v", d)
 	}
 
-	// 2. 注入 live 候选（URL 带 | 请求头参数，验证原样入库）
 	now := time.Now()
 	c := model.ScrapeCandidate{
-		ID: store.NewCandidateID(), SeedID: seedID, SeedName: "直播聚合",
+		SeedID: seedID, SeedName: "直播聚合",
 		Name: "海外综合", URL: "https://live.hw.example/iptv.m3u|User-Agent=okhttp/4.9.1",
 		Target: "live", Kind: "live-json", Status: "pending", FetchedAt: now,
 	}
-	if err := e.st.SetScrapeCandidates(seedID, []model.ScrapeCandidate{c}); err != nil {
+	if err := e.st.UpsertScrapeCandidates(seedID, []model.ScrapeCandidate{c}); err != nil {
 		t.Fatal(err)
 	}
+	var cid string
+	for _, cc := range e.st.ListScrapeCandidates() {
+		if cc.URL == c.URL {
+			cid = cc.ID
+		}
+	}
 
-	// 3. apply → 应导入 1 条直播源
-	code, body = e.doJSON("POST", "/api/scrape/apply", map[string]interface{}{"ids": []string{c.ID}, "group": "直播刮削"})
+	code, body = e.doJSON("POST", "/api/scrape/apply", map[string]interface{}{"ids": []string{cid}, "group": "直播刮削"})
 	if code != 200 {
 		t.Fatalf("apply 失败 %d: %v", code, body)
 	}
@@ -250,7 +286,6 @@ func TestScrapeApplyLiveFlow(t *testing.T) {
 		t.Fatalf("应导入 1 条直播源，实际 %v", body)
 	}
 
-	// 4. 落库验证（原样含 | 参数）
 	found := false
 	for _, ls := range e.st.AllLiveSources() {
 		if ls.URL == c.URL {
@@ -258,28 +293,66 @@ func TestScrapeApplyLiveFlow(t *testing.T) {
 			if ls.Remark != "自动刮削导入" {
 				t.Fatalf("直播源 remark 应为自动刮削导入，实际 %q", ls.Remark)
 			}
+			if ls.SeedID != seedID {
+				t.Fatalf("直播源应带溯源 SeedID，实际 %q", ls.SeedID)
+			}
 		}
 	}
 	if !found {
 		t.Fatal("候选直播源应已入库")
 	}
 
-	// 5. 候选状态回写
 	st := map[string]string{}
 	for _, cc := range e.st.ListScrapeCandidates() {
 		st[cc.ID] = cc.Status
 	}
-	if st[c.ID] != "applied" {
-		t.Fatalf("候选应为 applied，实际 %s", st[c.ID])
+	if st[cid] != "applied" {
+		t.Fatalf("候选应为 applied，实际 %s", st[cid])
 	}
 
-	// 6. 二次 apply 同一候选 → 不再新增
-	code, body = e.doJSON("POST", "/api/scrape/apply", map[string]interface{}{"ids": []string{c.ID}})
+	// 二次 apply 同一候选 → 不再新增
+	code, body = e.doJSON("POST", "/api/scrape/apply", map[string]interface{}{"ids": []string{cid}})
 	if code != 200 {
 		t.Fatalf("二次 apply 失败 %d: %v", code, body)
 	}
 	d = dataOf(t, body)
 	if n, _ := d["applied"].(float64); n != 0 {
 		t.Fatalf("二次 apply 不应新增，实际 %v", body)
+	}
+}
+
+// TestScrapeApplyBatchFlush 验证批量导入只触发一次 flush（新增 AddManySources 路径）。
+func TestScrapeApplyBatchFlush(t *testing.T) {
+	e := newEnv(t)
+	code, body := e.doJSON("POST", "/api/scrape/seeds", map[string]interface{}{
+		"name": "批量", "url": "https://batch.example/all.json", "group": "刮削",
+	})
+	if code != 200 {
+		t.Fatalf("添加种子失败 %d: %v", code, body)
+	}
+	seedID, _ := dataOf(t, body)["id"].(string)
+
+	now := time.Now()
+	var cands []model.ScrapeCandidate
+	for i := 0; i < 5; i++ {
+		cands = append(cands, model.ScrapeCandidate{
+			SeedID: seedID, Name: fmt.Sprintf("src%d", i),
+			URL: fmt.Sprintf("https://batch%d.example/api.php", i), Kind: "repo-multi", Status: "pending", FetchedAt: now,
+		})
+	}
+	if err := e.st.UpsertScrapeCandidates(seedID, cands); err != nil {
+		t.Fatal(err)
+	}
+	ids := make([]string, 0, len(cands))
+	for _, c := range e.st.ListScrapeCandidates() {
+		ids = append(ids, c.ID)
+	}
+	code, body = e.doJSON("POST", "/api/scrape/apply", map[string]interface{}{"ids": ids, "group": "刮削导入"})
+	if code != 200 {
+		t.Fatalf("apply 失败 %d: %v", code, body)
+	}
+	d := dataOf(t, body)
+	if n, _ := d["applied"].(float64); n != 5 {
+		t.Fatalf("应导入 5 条，实际 %v", body)
 	}
 }

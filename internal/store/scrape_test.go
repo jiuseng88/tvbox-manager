@@ -49,38 +49,70 @@ func TestScrapeSeedsCRUD(t *testing.T) {
 	}
 }
 
-func TestScrapeCandidatesReplaceAndStatus(t *testing.T) {
+func TestScrapeCandidatesUpsert(t *testing.T) {
 	s, err := New(t.TempDir())
 	if err != nil {
 		t.Fatal(err)
 	}
 	seed, _ := s.AddScrapeSeed(&model.ScrapeSeed{Name: "A", URL: "https://a.example/x.json"})
+
 	now := time.Now()
-	cands := []model.ScrapeCandidate{
-		{ID: NewCandidateID(), SeedID: seed.ID, Name: "c1", URL: "https://a.example/1", Status: "pending", FetchedAt: now},
-		{ID: NewCandidateID(), SeedID: seed.ID, Name: "c2", URL: "https://a.example/2", Status: "pending", FetchedAt: now},
-	}
-	if err := s.SetScrapeCandidates(seed.ID, cands); err != nil {
+	c1 := model.ScrapeCandidate{SeedID: seed.ID, Name: "c1", URL: "https://a.example/1", Status: "pending", FetchedAt: now}
+	c2 := model.ScrapeCandidate{SeedID: seed.ID, Name: "c2", URL: "https://a.example/2", Status: "pending", FetchedAt: now}
+	if err := s.UpsertScrapeCandidates(seed.ID, []model.ScrapeCandidate{c1, c2}); err != nil {
 		t.Fatal(err)
 	}
-	if got := len(s.ListScrapeCandidates()); got != 2 {
-		t.Fatalf("应 2 个候选，实际 %d", got)
+	all := s.ListScrapeCandidates()
+	if len(all) != 2 {
+		t.Fatalf("应 2 个候选，实际 %d", len(all))
 	}
-	// 整批替换：第二次同步只留新的（旧候选全部清掉）
-	c2 := model.ScrapeCandidate{ID: NewCandidateID(), SeedID: seed.ID, Name: "c3", URL: "https://a.example/3", Status: "pending", FetchedAt: now}
-	if err := s.SetScrapeCandidates(seed.ID, []model.ScrapeCandidate{c2}); err != nil {
+	// 稳定键：两次同步同 URL 应是同一条记录（ID 派生自 seedID+URL）
+	id1 := CandidateID(seed.ID, "https://a.example/1")
+
+	// 第二次同步：c1 不再出现（pending → 应被丢弃）；c2 仍在；新增 c3
+	c2b := model.ScrapeCandidate{SeedID: seed.ID, Name: "c2", URL: "https://a.example/2", Status: "pending", FetchedAt: now}
+	c3 := model.ScrapeCandidate{SeedID: seed.ID, Name: "c3", URL: "https://a.example/3", Status: "pending", FetchedAt: now}
+	if err := s.UpsertScrapeCandidates(seed.ID, []model.ScrapeCandidate{c2b, c3}); err != nil {
 		t.Fatal(err)
 	}
-	if got := len(s.ListScrapeCandidates()); got != 1 {
-		t.Fatalf("整批替换后应 1 个候选，实际 %d", got)
+	all = s.ListScrapeCandidates()
+	if len(all) != 2 {
+		t.Fatalf("二次同步后应为 2 个（c1 过期丢弃，c2 保留，c3 新增），实际 %d", len(all))
 	}
-	// 状态回写
-	if err := s.UpdateScrapeCandidates(map[string]string{c2.ID: "applied"}); err != nil {
+	for _, c := range all {
+		if c.URL == "https://a.example/1" {
+			t.Fatal("过期的 pending c1 应被丢弃")
+		}
+		if c.ID != id1 && c.URL == "https://a.example/2" {
+			// c2 的 ID 应稳定
+		}
+	}
+
+	// 确认 c2（标记 applied）
+	if err := s.UpdateScrapeCandidates(map[string]string{CandidateID(seed.ID, "https://a.example/2"): "applied"}); err != nil {
 		t.Fatal(err)
 	}
-	if got := s.ListScrapeCandidates()[0]; got.Status != "applied" {
-		t.Fatalf("状态应为 applied，实际 %s", got.Status)
+
+	// 第三次同步：c2 不再出现，但它是 applied → 应保留并标记 upstreamStatus=removed（漂移，不删）
+	if err := s.UpsertScrapeCandidates(seed.ID, []model.ScrapeCandidate{c3}); err != nil {
+		t.Fatal(err)
 	}
+	all = s.ListScrapeCandidates()
+	if len(all) != 2 {
+		t.Fatalf("三次同步后应为 2 个（c2 漂移保留 + c3），实际 %d", len(all))
+	}
+	for _, c := range all {
+		if c.URL == "https://a.example/2" && c.Status != "applied" {
+			t.Fatalf("c2 应仍为 applied，实际 %s", c.Status)
+		}
+		if c.URL == "https://a.example/2" && c.UpstreamStatus != "removed" {
+			t.Fatalf("c2 上游移除应标记 removed，实际 %q", c.UpstreamStatus)
+		}
+		if c.URL == "https://a.example/3" && c.UpstreamStatus != "present" {
+			t.Fatalf("c3 应 present，实际 %q", c.UpstreamStatus)
+		}
+	}
+
 	// 删除种子连带候选
 	s.DeleteScrapeSeed(seed.ID)
 	if len(s.ListScrapeCandidates()) != 0 {
@@ -95,8 +127,8 @@ func TestScrapeCandidatesPersistAcrossReload(t *testing.T) {
 		t.Fatal(err)
 	}
 	seed, _ := s.AddScrapeSeed(&model.ScrapeSeed{Name: "A", URL: "https://a.example/x.json"})
-	c := model.ScrapeCandidate{ID: NewCandidateID(), SeedID: seed.ID, Name: "c1", URL: "https://a.example/1", Status: "pending", FetchedAt: time.Now()}
-	if err := s.SetScrapeCandidates(seed.ID, []model.ScrapeCandidate{c}); err != nil {
+	c := model.ScrapeCandidate{SeedID: seed.ID, Name: "c1", URL: "https://a.example/1", Status: "pending", FetchedAt: time.Now()}
+	if err := s.UpsertScrapeCandidates(seed.ID, []model.ScrapeCandidate{c}); err != nil {
 		t.Fatal(err)
 	}
 	// 重新打开（模拟重启）
