@@ -155,6 +155,8 @@ func (a *API) Router() http.Handler {
 	root.Handle("GET /tvapi/media", a.tvGuard(http.HandlerFunc(a.handleTVMedia)))
 	// 直播频道表：从平铺源 lives[] 聚合 m3u/txt 播放列表，解析合并后下发
 	root.Handle("GET /tvapi/live", a.tvGuard(http.HandlerFunc(a.handleTVLive)))
+	// 强制刷新频道表（忽略缓存，实时重拉上游）：直播页「刷新频道」按钮
+	root.Handle("POST /tvapi/live/refresh", a.tvGuard(http.HandlerFunc(a.handleTVLiveRefresh)))
 
 	// 静态资源（前端 SPA，go:embed 注入）；不限定方法，避免与 /api/ 子树模式冲突
 	root.Handle("/", a.spaHandler())

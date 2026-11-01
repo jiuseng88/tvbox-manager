@@ -164,6 +164,9 @@ func (a *API) buildLivePayload(ctx context.Context) *tvLivePayload {
 	}
 
 	merged := live.Merge(all)
+	// 只保留有线路的频道：没有 urls 的频道点开也播不了，出现在列表/分组/来源筛选里
+	// 只会干扰选择。
+	merged = filterPlayable(merged)
 	if len(merged) > tvLiveMaxChans {
 		merged = merged[:tvLiveMaxChans]
 	}
@@ -194,6 +197,40 @@ func (a *API) buildLivePayload(ctx context.Context) *tvLivePayload {
 	payload.Groups = groups
 	payload.Count = len(merged)
 	return payload
+}
+
+// hasPlayableLine 频道是否有至少一条非空线路。Merge 只保证 URL 非空才追加，
+// 但来源数据本身可能只有空串，这里再兜一层，避免把「点开必失败」的频道下发出去。
+func hasPlayableLine(ch live.Channel) bool {
+	for _, u := range ch.URLs {
+		if strings.TrimSpace(u) != "" {
+			return true
+		}
+	}
+	return false
+}
+
+// filterPlayable 剔除没有可播线路的频道。原地过滤（复用底层数组），不额外分配。
+func filterPlayable(chs []live.Channel) []live.Channel {
+	if len(chs) == 0 {
+		return chs
+	}
+	kept := chs[:0]
+	for _, ch := range chs {
+		if hasPlayableLine(ch) {
+			kept = append(kept, ch)
+		}
+	}
+	return kept
+}
+
+// handleTVLiveRefresh 强制重建频道表（忽略缓存），供直播页「刷新频道」按钮使用。
+// 与 GET /tvapi/live 同构返回，前端拿到就能直接重渲染。冷启动/多源并发时耗时
+// 可能十几秒，前端按钮侧有 loading 态兜住。
+func (a *API) handleTVLiveRefresh(w http.ResponseWriter, r *http.Request) {
+	a.refreshLiveCache()
+	// 刷新后内存缓存刚写入，tvLive 必然命中热缓存，不会二次打上游
+	ok(w, a.tvLive(r.Context()))
 }
 
 // refreshLiveCache 强制重建频道表（忽略内存热缓存），实时拉取后更新内存并落盘。

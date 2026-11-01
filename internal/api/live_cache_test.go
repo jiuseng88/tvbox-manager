@@ -48,3 +48,28 @@ func TestLiveCacheFileInvalid(t *testing.T) {
 		t.Fatal("空频道表应视为无效缓存")
 	}
 }
+
+// 没有线路的频道不该出现在下发的频道表里（列表/分组/来源筛选都会因此失真）。
+func TestFilterPlayable(t *testing.T) {
+	in := []live.Channel{
+		{Group: "央视", Name: "CCTV-1", URLs: []string{"http://a/1.m3u8"}},
+		{Group: "央视", Name: "空线路", URLs: nil},
+		{Group: "卫视", Name: "全空串", URLs: []string{"", "  "}},
+		{Group: "卫视", Name: "湖南卫视", URLs: []string{"http://a/hn.m3u8", "http://b/hn.m3u8"}},
+	}
+	out := filterPlayable(in)
+	if len(out) != 2 {
+		t.Fatalf("应只保留 2 个有线路的频道，实际 %d: %+v", len(out), out)
+	}
+	if out[0].Name != "CCTV-1" || out[1].Name != "湖南卫视" {
+		t.Fatalf("过滤结果或顺序不对: %+v", out)
+	}
+	// 原地过滤复用底层数组：多出来的槽位不该再被引用
+	if len(filterPlayable(nil)) != 0 {
+		t.Fatal("nil 输入应返回空")
+	}
+	if got := filterPlayable([]live.Channel{{Group: "x", Name: "y"}}); len(got) != 0 {
+		t.Fatalf("全部无线路时应返回空，实际 %+v", got)
+	}
+}
+

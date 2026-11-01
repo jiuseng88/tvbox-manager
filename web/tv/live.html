@@ -50,8 +50,25 @@
         .live-title { font-size: 15px; font-weight: 600; letter-spacing: .5px; }
         .live-title span { color: var(--primary-color); }
         .live-stat { font-size: 12px; color: var(--text-muted); }
-        .ch-search {
+        .refresh-btn {
             margin-left: auto;
+            display: inline-flex;
+            align-items: center;
+            gap: 5px;
+            padding: 6px 11px;
+            font-size: 12px;
+            font-family: inherit;
+            color: #cfe0f5;
+            background: #1a2433;
+            border: 1px solid var(--border-color);
+            border-radius: 8px;
+            cursor: pointer;
+            transition: all .2s;
+        }
+        .refresh-btn:hover:not(:disabled) { border-color: var(--primary-color); color: #fff; }
+        .refresh-btn:disabled { opacity: .55; cursor: default; }
+        .refresh-btn.busy svg { animation: spin .9s linear infinite; }
+        .ch-search {
             width: 200px;
             padding: 7px 12px;
             font-size: 13px;
@@ -258,6 +275,8 @@
             .group-pane { order: 2; max-height: 32vh; }
             .chan-pane { order: 3; }
             .ch-search { width: 130px; }
+            .refresh-btn { padding: 6px 8px; }
+            .refresh-btn span { display: none; }
             .live-stat { display: none; }
         }
     </style>
@@ -272,6 +291,13 @@
         </a>
         <div class="live-title">电视<span>直播</span></div>
         <div class="live-stat" id="liveStat"></div>
+        <button class="refresh-btn" id="refreshBtn" type="button" title="重新拉取所有直播源，刷新频道表">
+            <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" aria-hidden="true">
+                <path d="M20.5 12a8.5 8.5 0 1 1-2.5-6" stroke-linecap="round"/>
+                <path d="M20.5 3.5v5.5H15" stroke-linecap="round" stroke-linejoin="round"/>
+            </svg>
+            <span>刷新频道</span>
+        </button>
         <input class="ch-search" id="chSearch" type="search" placeholder="搜索频道" autocomplete="off">
     </header>
 
