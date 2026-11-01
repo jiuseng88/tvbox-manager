@@ -19,7 +19,7 @@ import (
 	"sync"
 	"time"
 
-	"tvbox-manager/internal/checker"
+	"tvbox-manager/internal/live"
 	"tvbox-manager/internal/model"
 	"tvbox-manager/internal/parser"
 	"tvbox-manager/internal/store"
@@ -97,7 +97,9 @@ func (a *API) handleScrapeImport(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	res, body := a.sch.Checker().Fetch(r.Context(), raw, true) // guardPrivate=true：SSRF 强制
+	// 只做 SSRF + 体积限制，不在这里判类型：m3u 播放列表过不了 JSON 解析，
+	// 用 Fetch 会被直接判失败（「响应非 JSON」），类型交给下面的嗅探决定。
+	res, body := a.sch.Checker().FetchRaw(r.Context(), raw, true, 0) // guardPrivate=true：SSRF 强制
 	if res.Status != model.StatusOK {
 		ok(w, map[string]interface{}{
 			"ok": false, "errMsg": res.Msg, "httpCode": res.HTTPCode, "latencyMs": res.LatencyMs,
@@ -105,6 +107,12 @@ func (a *API) handleScrapeImport(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	text := string(body)
+	// 直播播放列表（m3u / 频道表）：整份收录成一条**直播源**。
+	// 站点源必须是 TVBox 仓库 JSON，播放列表塞进源列表只会永远探活失败。
+	if looksLikeLivePlaylist(text) {
+		a.importLivePlaylist(w, raw, text, req)
+		return
+	}
 	if jsonLooksLike(text) {
 		// JSON 内容：与粘贴/文件导入完全同一套智能识别（单仓托管/多仓提子仓/地址列表）
 		a.importContent(w, r, text, req.Name, req.Group, req.Enabled, req.DryRun)
@@ -122,6 +130,65 @@ func (a *API) handleScrapeImport(w http.ResponseWriter, r *http.Request) {
 		entries = append(entries, jsonEntry{Name: n, URL: u})
 	}
 	a.importEntries(w, req, entries)
+}
+
+// importLivePlaylist 把一份 m3u / 频道表整份收录为**直播源**（而不是站点源）。
+// 手动收录走到这里说明用户填的是播放列表地址：它本身就该作为一条直播源被订阅、
+// 被检测、被直播页消费；当成站点源只会永远探活失败（不是 TVBox 仓库结构）。
+func (a *API) importLivePlaylist(w http.ResponseWriter, rawURL, text string, req scrapeImportReq) {
+	name := strings.TrimSpace(req.Name)
+	if name == "" {
+		name = parser.HostOf(rawURL)
+	}
+	base, _ := url.Parse(rawURL)
+	chans := live.Parse([]byte(text), base, name)
+	groups := make(map[string]bool, 8)
+	for _, ch := range chans {
+		groups[ch.Group] = true
+	}
+	summary := fmt.Sprintf("%d 频道 / %d 组", len(chans), len(groups))
+
+	if req.DryRun {
+		rows := []jsonPreviewRow{{Name: name, URL: rawURL, Reason: summary}}
+		dup := 0
+		wantKey := liveURLKey(rawURL)
+		list, _ := a.st.ListLiveSourcesPage(store.LiveFilter{})
+		for _, x := range list {
+			if liveURLKey(x.URL) == wantKey {
+				dup = 1
+				rows[0].Dup = true
+				rows[0].Reason = summary + "（已在直播源列表）"
+				break
+			}
+		}
+		ok(w, map[string]interface{}{"kind": "live", "total": 1, "dup": dup, "entries": rows})
+		return
+	}
+	enabled := true
+	if req.Enabled != nil {
+		enabled = *req.Enabled
+	}
+	ids, skipped := a.st.AddLiveSources([]model.LiveSource{{
+		Name: name, URL: rawURL, Group: req.Group, Remark: "手动收录", Enabled: enabled,
+	}})
+	a.invalidateLiveCache()
+	ok(w, map[string]interface{}{
+		"ok": true, "kind": "live", "added": len(ids), "ids": ids,
+		"skipped": skipped, "summary": summary,
+	})
+	// 收录后异步检测一次，让频道数/可用率立刻可见（与直播源页手动添加同口径）
+	for _, id := range ids {
+		go a.checkLiveSource(context.Background(), id, true)
+	}
+}
+
+// liveURLKey 直播源去重键：与 store 内部一致（剥掉 | 请求头参数后归一化）
+func liveURLKey(raw string) string {
+	stem := raw
+	if i := strings.Index(raw, "|"); i >= 0 {
+		stem = raw[:i]
+	}
+	return parser.DedupKey(strings.TrimSpace(stem))
 }
 
 // importEntries 把一批地址条目走预览（dryRun）或直接批量导入。被 txt 行列表与仓库解压两条路径复用。
@@ -485,7 +552,9 @@ func (a *API) discoverURL(ctx context.Context, rawURL, seedName, baseURLStr stri
 	if host, owner, repo, pp, isRepo := parseGitRepo(rawURL); isRepo {
 		return a.discoverRepo(ctx, host, owner, repo, pp, seedName, depth, curDepth, parentURL, preferLive, hl)
 	}
-	res, body := a.sch.Checker().Fetch(ctx, rawURL, true) // SSRF 强制
+	// 只校验 SSRF + HTTP 状态，不预判内容类型：discoverContent 自己会嗅探
+	// m3u/频道表/单仓/多仓/地址列表。用 Fetch 的话 m3u 会先被 JSON 解析判失败。
+	res, body := a.sch.Checker().FetchRaw(ctx, rawURL, true, 0) // SSRF 强制
 	if res.Status != model.StatusOK {
 		return nil, fmt.Errorf("拉取失败: %s", res.Msg)
 	}
@@ -595,12 +664,12 @@ func (a *API) discoverRepo(ctx context.Context, host, owner, repo, proxyPrefix, 
 // gitCloneRepo 用 git 协议把仓库浅克隆到临时目录。返回工作树目录与默认分支名。
 // 安全：clone 前校验仓库主机与包裹式代理主机均非内网（SSRF）；无 git 二进制直接报错交由归档兜底。
 func (a *API) gitCloneRepo(ctx context.Context, host, owner, repo, proxyPrefix string) (string, string, error) {
-	if err := checker.RejectPrivateHost(host); err != nil {
+	if err := a.guardHost(host); err != nil {
 		return "", "", fmt.Errorf("仓库主机被拒绝: %v", err)
 	}
 	if proxyPrefix != "" {
 		if pp, e := url.Parse(proxyPrefix); e == nil && pp.Hostname() != "" {
-			if re := checker.RejectPrivateHost(pp.Hostname()); re != nil {
+			if re := a.guardHost(pp.Hostname()); re != nil {
 				return "", "", fmt.Errorf("代理主机被拒绝: %v", re)
 			}
 		}

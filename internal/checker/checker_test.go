@@ -132,6 +132,57 @@ func TestSSRFOnPreview(t *testing.T) {
 	if res.Status != model.StatusFail || !strings.Contains(res.Msg, "拒绝") {
 		t.Fatalf("guard 应拦截内网地址: %+v", res)
 	}
+	// 拦截文案要能指导用户去开开关，否则只会以为「源坏了」
+	if !strings.Contains(res.Msg, "允许访问本机回环地址") {
+		t.Fatalf("回环拦截文案应给出开启指引: %s", res.Msg)
+	}
+}
+
+// 允许回环只放行回环本身，内网网段必须仍然拦截
+func TestSSRFAllowLoopback(t *testing.T) {
+	loop := []string{"127.0.0.1", "127.0.1.5", "::1", "localhost", "foo.localhost"}
+	for _, h := range loop {
+		if err := RejectPrivateHostOpt(h, true); err != nil {
+			t.Errorf("allowLoopback 下回环地址 %s 应放行: %v", h, err)
+		}
+		if err := RejectPrivateHostOpt(h, false); err == nil {
+			t.Errorf("allowLoopback=false 时 %s 应被拒绝", h)
+		}
+	}
+	internal := []string{
+		"10.1.2.3", "172.16.0.9", "192.168.1.1", "169.254.169.254", "0.0.0.0", "100.64.0.1",
+	}
+	for _, h := range internal {
+		if err := RejectPrivateHostOpt(h, true); err == nil {
+			t.Errorf("内网地址 %s 即使开着 allowLoopback 也必须拒绝", h)
+		}
+	}
+	if err := RejectPrivateHostOpt("8.8.8.8", true); err != nil {
+		t.Errorf("公网 IP 不应被拒绝: %v", err)
+	}
+}
+
+// 配置打开后，Fetch 要能拉通本机 httptest 服务（TVBox 内置 9978 接口的最小复现）
+func TestFetchAllowLoopbackConfig(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(singleBody))
+	}))
+	defer srv.Close()
+
+	cfg := model.DefaultConfig()
+	cfg.CheckTimeoutSeconds = 3
+	cfg.AllowLoopbackFetch = true
+	ck := New(&cfg)
+	if !ck.AllowLoopback() {
+		t.Fatal("配置打开后 Checker 应感知到 allowLoopback")
+	}
+	res, _ := ck.Fetch(context.Background(), srv.URL, true)
+	if res.Status != model.StatusOK {
+		t.Fatalf("开启后应能拉取本机地址: %+v", res)
+	}
+	if res.Detail == nil || res.Detail.Sites != 1 {
+		t.Fatalf("解析结果异常: %+v", res.Detail)
+	}
 }
 
 // 单条源单独配置的超时要能覆盖全局：同一慢地址，全局 1 秒判失败、

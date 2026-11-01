@@ -5,6 +5,8 @@ import (
 	"bytes"
 	"context"
 	"fmt"
+	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
 	"time"
@@ -513,5 +515,48 @@ func TestGitCloneRepoNoGitBinary(t *testing.T) {
 	}
 	if strings.Contains(err.Error(), "git clone 失败") {
 		t.Fatalf("无 git 二进制不应走到 git clone，但报错: %v", err)
+	}
+}
+
+// TestScrapeImportLivePlaylist 手动收录一份 m3u 播放列表：
+//  1. 回环地址默认被拦，且文案要能指导用户去开开关（否则只会以为「源坏了」）；
+//  2. 打开「允许访问本机回环地址」后能拉通，并识别成**直播源**（kind=live）而不是站点源——
+//     播放列表不是 TVBox 仓库 JSON，塞进源列表只会永远探活失败。
+func TestScrapeImportLivePlaylist(t *testing.T) {
+	e := newEnv(t)
+	m3u := "#EXTM3U\n" +
+		"#EXTINF:-1 group-title=\"央视\",CCTV1\nhttp://127.0.0.1:9/1.m3u8\n" +
+		"#EXTINF:-1 group-title=\"卫视\",湖南卫视\nhttp://127.0.0.1:9/2.m3u8\n"
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(m3u))
+	}))
+	defer srv.Close()
+
+	body := `{"url":"` + srv.URL + `/live.m3u","dryRun":true}`
+	code, resp := e.do("POST", "/api/scrape/import", e.token, body, "application/json")
+	if code != http.StatusOK {
+		t.Fatalf("请求失败 %d %s", code, resp)
+	}
+	if !strings.Contains(resp, "允许访问本机回环地址") {
+		t.Fatalf("回环被拦时应提示开启开关，实际: %s", resp)
+	}
+
+	// 打开开关：checker 由 scheduler 持有，必须 Reload 才换到新配置
+	cfg := e.st.Config()
+	cfg.AllowLoopbackFetch = true
+	if err := e.st.UpdateConfig(cfg); err != nil {
+		t.Fatal(err)
+	}
+	e.sch.Reload(&cfg)
+
+	code, resp = e.do("POST", "/api/scrape/import", e.token, body, "application/json")
+	if code != http.StatusOK {
+		t.Fatalf("请求失败 %d %s", code, resp)
+	}
+	if !strings.Contains(resp, `"kind":"live"`) {
+		t.Fatalf("m3u 播放列表应识别为直播源，实际: %s", resp)
+	}
+	if !strings.Contains(resp, "2 频道 / 2 组") {
+		t.Fatalf("应解析出 2 频道 2 组，实际: %s", resp)
 	}
 }

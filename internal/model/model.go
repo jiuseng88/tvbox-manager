@@ -183,6 +183,11 @@ type Config struct {
 	// ScrapeIntervalHours 自动刮削定时同步间隔（小时）：0 = 关闭；>0 = 每隔 N 小时同步一次种子。
 	// 定时同步与手动「同步全部种子」同一条链路：拉取 → 识别 → 候选区（不自动入库）。
 	ScrapeIntervalHours int `json:"scrapeIntervalHours,omitempty"`
+	// AllowLoopbackFetch 允许访问本机回环地址（127.0.0.1 / localhost / ::1）。
+	// 默认关闭：SSRF 防护需要挡住「把本服务当跳板探内网」。但用户常把 TVBox 客户端自带的
+	// 本地接口（如 http://127.0.0.1:9978/...）直接填成源，这类地址只在本机有意义，
+	// 故提供一个显式开关。开启后也只放行回环，内网网段仍然拦截。
+	AllowLoopbackFetch bool `json:"allowLoopbackFetch,omitempty"`
 }
 
 // CheckProgress 探活任务进度
@@ -253,6 +258,8 @@ func DefaultConfig() Config {
 		CheckSubURLs: false,
 		// /tv 看片页默认开放（保持升级前行为）；后台「设置」可关闭，关闭后菜单与路径一并失效
 		ShowTV: true,
+		// 本机回环默认不放行（SSRF 防护优先）；需要在「设置」显式打开才能用 127.0.0.1 的本地源
+		AllowLoopbackFetch: false,
 	}
 }
 

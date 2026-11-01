@@ -141,6 +141,7 @@ func (a *API) buildLivePayload(ctx context.Context) *tvLivePayload {
 		results[i].idx = i
 	}
 	sem := make(chan struct{}, tvLiveWorkers)
+	allowLB := a.allowLoopback()
 	var wg sync.WaitGroup
 	for i, it := range sites {
 		wg.Add(1)
@@ -148,7 +149,7 @@ func (a *API) buildLivePayload(ctx context.Context) *tvLivePayload {
 			defer wg.Done()
 			sem <- struct{}{}
 			defer func() { <-sem }()
-			chans, _, err := fetchLivePlaylistCtx(ctx, it.URL, it.Name, tvLiveDoor)
+			chans, _, err := fetchLivePlaylistCtx(ctx, it.URL, it.Name, tvLiveDoor, allowLB)
 			results[i].channels = chans
 			results[i].err = err
 		}(i, it)

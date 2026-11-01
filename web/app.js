@@ -1187,6 +1187,7 @@
             checkSubUrls: !!c.checkSubUrls,
             showTv: !!c.showTv,
             scrapeIntervalHours: Number(c.scrapeIntervalHours) || 0,
+            allowLoopbackFetch: !!c.allowLoopbackFetch,
           });
           tvEnabled.value = !!c.showTv; // 导航项跟着配置立即变
           toast("配置已保存（探活设置立即生效）", "ok");
@@ -1211,6 +1212,9 @@
             autoDisableAfterFails: Number(c.autoDisableAfterFails) || 0,
             insecureSkipVerify: !!c.insecureSkipVerify,
             checkSubUrls: !!c.checkSubUrls,
+            showTv: !!c.showTv,
+            scrapeIntervalHours: Number(c.scrapeIntervalHours) || 0,
+            allowLoopbackFetch: !!c.allowLoopbackFetch,
             token: t, // 空 / "**" 后端都会保持原令牌，这里一定带新值
           });
           store.token = t; // 当前会话直接切到新令牌，不用重新登录
