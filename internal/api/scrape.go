@@ -31,9 +31,12 @@ import (
     候选条目写入候选区；候选经用户确认后才导入为源（先候选后确认，不自动入库）。
   - 发现引擎：对内容自动嗅探类型（single/multi/list/m3u/json/mixed），不再依赖用户手标
     tvbox/live；受控递归（Depth，默认 1，上限 2）展开多仓；fetch 带同主机限频与重试退避。
-  - GitHub 仓库种子（.git 后缀 / gh-proxy 包裹式代理）：走 codeload 归档（经代理可稳定拉取），
-    用 Go 内置 archive/zip 解压后遍历 .m3u/.txt/.json，逐文件复用发现引擎；仓库内文件以
-    raw.githubusercontent 直链作为候选 URL，客户端可直接拉取。零镜像依赖。
+  - Git 仓库种子（.git 后缀 / 包裹式代理前缀，支持 GitHub/GitLab/Gitee）：走各主机归档包
+    （codeload / -/archive / repository/archive），用 Go 内置 archive/zip 解压后遍历
+    .m3u/.txt/.json，逐文件复用发现引擎；仓库内文件以各主机 raw 直链作为候选 URL，客户端
+    可直接拉取，不经服务端转发。零镜像依赖（运行镜像无需装 git）。
+  - 默认分支探测：先用各主机 API 取 default_branch，失败则回退 main→master→dev 尝试下载，
+    覆盖非主流默认分支名的仓库。
   - 富集+评估：发现后顺手解析摘要（站点数/频道数）并算质量分，仅用于排序标注，不阻断导入。
   - 对账（重建核心）：候选 ID 由 (SeedID+URL) 派生、upsert 合并——已确认状态不被整批覆盖；
     上游已移除的已导入源标记 UpstreamRemoved（漂移，不自动删除），可进复核。
@@ -68,13 +71,13 @@ func (a *API) handleScrapeImport(w http.ResponseWriter, r *http.Request) {
 		badRequest(w, "url 不能为空")
 		return
 	}
-	// GitHub 仓库地址（含 .git 后缀 / 包裹式代理前缀）：下载归档解压后遍历，而非当原始文本解析
-	if owner, repo, pp, isRepo := parseGitHubRepo(raw); isRepo {
+	// Git 仓库地址（含 .git 后缀 / 包裹式代理前缀，支持 GitHub/GitLab/Gitee）：下载归档解压后遍历，而非当原始文本解析
+	if host, owner, repo, pp, isRepo := parseGitRepo(raw); isRepo {
 		seedName := req.Name
 		if seedName == "" {
 			seedName = parser.HostOf(raw)
 		}
-		items, rerr := a.discoverRepo(r.Context(), owner, repo, pp, seedName, 1, 0, "", false, nil)
+		items, rerr := a.discoverRepo(r.Context(), host, owner, repo, pp, seedName, 1, 0, "", false, nil)
 		if rerr != nil {
 			ok(w, map[string]interface{}{"ok": false, "errMsg": rerr.Error()})
 			return
@@ -431,36 +434,49 @@ func splitProxyPrefix(rawURL string) (string, string) {
 	return "", rawURL
 }
 
-// parseGitHubRepo 识别 GitHub 仓库根地址（含 .git 后缀 / 包裹式代理前缀）。
-// 仅匹配 owner/repo 根，不匹配 blob/tree/raw 等文件路径。返回 (owner, repo, proxyPrefix, ok)。
-func parseGitHubRepo(rawURL string) (owner, repo, proxyPrefix string, ok bool) {
+// normalizeGitHost 把主机名归一化为受支持的三大 Git 主机；不支持返回空串。
+func normalizeGitHost(h string) string {
+	switch strings.ToLower(h) {
+	case "github.com", "www.github.com":
+		return "github.com"
+	case "gitlab.com", "www.gitlab.com":
+		return "gitlab.com"
+	case "gitee.com", "www.gitee.com":
+		return "gitee.com"
+	}
+	return ""
+}
+
+// parseGitRepo 识别受支持 Git 主机的仓库根地址（含 .git 后缀 / 包裹式代理前缀）。
+// 仅匹配 owner/repo 根，不匹配 blob/tree/raw 等文件路径。返回 (host, owner, repo, proxyPrefix, ok)。
+func parseGitRepo(rawURL string) (host, owner, repo, proxyPrefix string, ok bool) {
 	proxyPrefix, inner := splitProxyPrefix(rawURL)
 	p, err := url.Parse(inner)
 	if err != nil {
-		return "", "", "", false
+		return "", "", "", "", false
 	}
-	host := strings.ToLower(p.Hostname())
-	if host != "github.com" && host != "www.github.com" {
-		return "", "", "", false
+	host = normalizeGitHost(p.Hostname())
+	if host == "" {
+		return "", "", "", "", false
 	}
 	segs := strings.Split(strings.Trim(p.Path, "/"), "/")
 	// 仓库根恰好是 owner/repo 两段；blob/tree/raw 等文件路径段数 > 2，不是仓库根
 	if len(segs) != 2 {
-		return "", "", "", false
+		return "", "", "", "", false
 	}
 	owner = segs[0]
 	repo = strings.TrimSuffix(segs[1], ".git")
 	if owner == "" || repo == "" {
-		return "", "", "", false
+		return "", "", "", "", false
 	}
-	return owner, repo, proxyPrefix, true
+	return host, owner, repo, proxyPrefix, true
 }
 
-// discoverURL 按 URL 形态分发：GitHub 仓库根 → 走 codeload 解压遍历；否则原样 raw 拉取解析。
+// discoverURL 按 URL 形态分发：受支持 Git 主机仓库根 → 走归档解压遍历；否则原样 raw 拉取解析。
 // 让 discoverSeed 与 expandMulti 都能透明处理“种子/子仓本身是仓库”的情况（Depth 递归）。
 func (a *API) discoverURL(ctx context.Context, rawURL, seedName, baseURLStr string, depth, curDepth int, parentURL, baseFP string, preferLive bool, hl *hostLimiter) ([]discoveredItem, error) {
-	if owner, repo, pp, isRepo := parseGitHubRepo(rawURL); isRepo {
-		return a.discoverRepo(ctx, owner, repo, pp, seedName, depth, curDepth, parentURL, preferLive, hl)
+	if host, owner, repo, pp, isRepo := parseGitRepo(rawURL); isRepo {
+		return a.discoverRepo(ctx, host, owner, repo, pp, seedName, depth, curDepth, parentURL, preferLive, hl)
 	}
 	res, body := a.sch.Checker().Fetch(ctx, rawURL, true) // SSRF 强制
 	if res.Status != model.StatusOK {
@@ -469,17 +485,84 @@ func (a *API) discoverURL(ctx context.Context, rawURL, seedName, baseURLStr stri
 	return a.discoverContent(ctx, string(body), seedName, baseURLStr, depth, curDepth, parentURL, fingerprint(body), preferLive, hl)
 }
 
-// discoverRepo 下载 codeload 归档（main→master 兜底），解压后遍历媒体文件发现条目。
-func (a *API) discoverRepo(ctx context.Context, owner, repo, proxyPrefix, seedName string, depth, curDepth int, parentURL string, preferLive bool, hl *hostLimiter) ([]discoveredItem, error) {
+// repoArchiveURL 返回各主机仓库归档包下载地址。
+func repoArchiveURL(host, owner, repo, branch string) string {
+	switch host {
+	case "github.com":
+		return "https://codeload.github.com/" + owner + "/" + repo + "/zip/refs/heads/" + branch
+	case "gitlab.com":
+		return "https://gitlab.com/" + owner + "/" + repo + "/-/archive/" + branch + "/" + repo + "-" + branch + ".zip"
+	case "gitee.com":
+		return "https://gitee.com/" + owner + "/" + repo + "/repository/archive/" + branch + ".zip"
+	}
+	return ""
+}
+
+// repoRawURL 构造仓库内文件的 raw 直链（作为候选 URL，客户端可直接拉取）。
+func repoRawURL(host, owner, repo, proxyPrefix, branch, rel string) string {
+	switch host {
+	case "github.com":
+		return proxyPrefix + "https://raw.githubusercontent.com/" + owner + "/" + repo + "/" + branch + "/" + rel
+	case "gitlab.com":
+		return proxyPrefix + "https://gitlab.com/" + owner + "/" + repo + "/raw/" + branch + "/" + rel
+	case "gitee.com":
+		return proxyPrefix + "https://gitee.com/" + owner + "/" + repo + "/raw/" + branch + "/" + rel
+	}
+	return ""
+}
+
+// resolveRepoBranches 返回该仓库的分支探测候选（有序）：优先 default_branch（各主机 API 取），
+// 失败则回退 main→master→dev。覆盖非主流默认分支名的仓库。
+func (a *API) resolveRepoBranches(ctx context.Context, host, owner, repo, proxyPrefix string) []string {
+	if b := a.fetchDefaultBranch(ctx, host, owner, repo, proxyPrefix); b != "" {
+		cands := []string{b}
+		for _, x := range []string{"main", "master", "dev"} {
+			if x != b {
+				cands = append(cands, x)
+			}
+		}
+		return cands
+	}
+	return []string{"main", "master", "dev"}
+}
+
+// fetchDefaultBranch 调各主机 API 取仓库默认分支名；任何异常返回空串（交由回退策略）。
+func (a *API) fetchDefaultBranch(ctx context.Context, host, owner, repo, proxyPrefix string) string {
+	var apiURL string
+	switch host {
+	case "github.com":
+		apiURL = proxyPrefix + "https://api.github.com/repos/" + owner + "/" + repo
+	case "gitlab.com":
+		apiURL = proxyPrefix + "https://gitlab.com/api/v4/projects/" + url.PathEscape(owner+"/"+repo)
+	case "gitee.com":
+		apiURL = proxyPrefix + "https://gitee.com/api/v5/repos/" + owner + "/" + repo
+	default:
+		return ""
+	}
+	res, body := a.sch.Checker().FetchRaw(ctx, apiURL, true, 1<<20)
+	if res.Status != model.StatusOK {
+		return ""
+	}
+	var j struct {
+		DefaultBranch string `json:"default_branch"`
+	}
+	if err := json.Unmarshal(body, &j); err != nil || j.DefaultBranch == "" {
+		return ""
+	}
+	return j.DefaultBranch
+}
+
+// discoverRepo 下载仓库归档（默认分支优先，回退 main→master→dev），解压后遍历媒体文件发现条目。
+func (a *API) discoverRepo(ctx context.Context, host, owner, repo, proxyPrefix, seedName string, depth, curDepth int, parentURL string, preferLive bool, hl *hostLimiter) ([]discoveredItem, error) {
 	var lastErr error
-	for _, branch := range []string{"main", "master"} {
-		zipURL := proxyPrefix + "https://codeload.github.com/" + owner + "/" + repo + "/zip/refs/heads/" + branch
+	for _, branch := range a.resolveRepoBranches(ctx, host, owner, repo, proxyPrefix) {
+		zipURL := proxyPrefix + repoArchiveURL(host, owner, repo, branch)
 		res, body := a.sch.Checker().FetchRaw(ctx, zipURL, true, 200<<20) // 归档可达上百 MB，单独放宽上限
 		if res.Status != model.StatusOK {
 			lastErr = fmt.Errorf("下载仓库归档失败(%s): %s", branch, res.Msg)
 			continue
 		}
-		items, err := a.walkRepoZip(ctx, body, owner, repo, proxyPrefix, branch, seedName, depth, curDepth, parentURL, preferLive, hl)
+		items, err := a.walkRepoZip(ctx, body, host, owner, repo, proxyPrefix, branch, seedName, depth, curDepth, parentURL, preferLive, hl)
 		if err != nil {
 			lastErr = err
 			continue
@@ -490,14 +573,21 @@ func (a *API) discoverRepo(ctx context.Context, owner, repo, proxyPrefix, seedNa
 }
 
 // walkRepoZip 解压归档，遍历 .m3u/.m3u8/.txt/.json，逐文件复用 discoverContent。
-// 每个文件以 raw.githubusercontent 直链作为 baseURLStr，使播放列表/单仓 JSON 的候选 URL
+// 每个文件以各主机 raw 直链作为 baseURLStr，使播放列表/单仓 JSON 的候选 URL
 // 直接可用（TVBox 客户端能拉到，无需经本服务端二次转发）。
-func (a *API) walkRepoZip(ctx context.Context, data []byte, owner, repo, proxyPrefix, branch, seedName string, depth, curDepth int, parentURL string, preferLive bool, hl *hostLimiter) ([]discoveredItem, error) {
+// 顶层目录名各主机不同（github/gitlab 为 repo-branch/，gitee 为 repo/），故动态剥离首层目录。
+func (a *API) walkRepoZip(ctx context.Context, data []byte, host, owner, repo, proxyPrefix, branch, seedName string, depth, curDepth int, parentURL string, preferLive bool, hl *hostLimiter) ([]discoveredItem, error) {
 	zr, err := zip.NewReader(bytes.NewReader(data), int64(len(data)))
 	if err != nil {
 		return nil, fmt.Errorf("归档解压失败: %v", err)
 	}
-	topPrefix := repo + "-" + branch + "/"
+	// 动态取首个文件的顶层目录作为统一前缀（兼容不同主机的归档根目录命名）
+	var topDir string
+	if len(zr.File) > 0 {
+		if i := strings.Index(zr.File[0].Name, "/"); i >= 0 {
+			topDir = zr.File[0].Name[:i+1]
+		}
+	}
 	var items []discoveredItem
 	processed := 0
 	for _, f := range zr.File {
@@ -522,12 +612,15 @@ func (a *API) walkRepoZip(ctx context.Context, data []byte, owner, repo, proxyPr
 		if rerr != nil {
 			continue
 		}
-		rel := strings.TrimPrefix(f.Name, topPrefix)
+		rel := f.Name
+		if topDir != "" && strings.HasPrefix(rel, topDir) {
+			rel = rel[len(topDir):]
+		}
 		base := rel
 		if i := strings.LastIndex(base, "/"); i >= 0 {
 			base = base[i+1:]
 		}
-		rawFileURL := proxyPrefix + "https://raw.githubusercontent.com/" + owner + "/" + repo + "/" + branch + "/" + rel
+		rawFileURL := repoRawURL(host, owner, repo, proxyPrefix, branch, rel)
 		fileLabel := seedName + " · " + base
 		sub, derr := a.discoverContent(ctx, string(b), fileLabel, rawFileURL, depth, curDepth+1, parentURL, fingerprint(b), preferLive, hl)
 		if derr != nil {

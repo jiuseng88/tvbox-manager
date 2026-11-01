@@ -360,30 +360,34 @@ func TestScrapeApplyBatchFlush(t *testing.T) {
 }
 
 // TestParseGitHubRepo 覆盖包裹式代理前缀、.git 后缀、blob/tree 路径、非 GitHub 域名等识别边界。
-func TestParseGitHubRepo(t *testing.T) {
+func TestParseGitRepo(t *testing.T) {
 	cases := []struct {
-		in       string
-		owner    string
-		repo     string
-		proxy    string
-		ok       bool
+		in    string
+		host  string
+		owner string
+		repo  string
+		proxy string
+		ok    bool
 	}{
-		{"https://gh-proxy.org/https://github.com/best-fan/iptv-sources.git", "best-fan", "iptv-sources", "https://gh-proxy.org/", true},
-		{"https://github.com/best-fan/iptv-sources", "best-fan", "iptv-sources", "", true},
-		{"https://github.com/best-fan/iptv-sources.git", "best-fan", "iptv-sources", "", true},
-		{"https://github.com/best-fan/iptv-sources/blob/main/x.m3u", "", "", "", false},
-		{"https://github.com/best-fan/iptv-sources/tree/main/dir", "", "", "", false},
-		{"https://raw.githubusercontent.com/best-fan/iptv-sources/main/x.m3u", "", "", "", false},
-		{"https://example.com/foo.json", "", "", "", false},
+		{"https://gh-proxy.org/https://github.com/best-fan/iptv-sources.git", "github.com", "best-fan", "iptv-sources", "https://gh-proxy.org/", true},
+		{"https://github.com/best-fan/iptv-sources", "github.com", "best-fan", "iptv-sources", "", true},
+		{"https://github.com/best-fan/iptv-sources.git", "github.com", "best-fan", "iptv-sources", "", true},
+		{"https://gitlab.com/group/iptv", "gitlab.com", "group", "iptv", "", true},
+		{"https://gitee.com/mirrors/iptv.git", "gitee.com", "mirrors", "iptv", "", true},
+		{"https://github.com/best-fan/iptv-sources/blob/main/x.m3u", "", "", "", "", false},
+		{"https://github.com/best-fan/iptv-sources/tree/main/dir", "", "", "", "", false},
+		{"https://raw.githubusercontent.com/best-fan/iptv-sources/main/x.m3u", "", "", "", "", false},
+		{"https://example.com/foo.json", "", "", "", "", false},
+		{"https://bitbucket.org/a/b", "", "", "", "", false}, // 不支持的主机
 	}
 	for _, c := range cases {
-		owner, repo, proxy, ok := parseGitHubRepo(c.in)
+		host, owner, repo, proxy, ok := parseGitRepo(c.in)
 		if ok != c.ok {
-			t.Fatalf("parseGitHubRepo(%q) ok=%v 期望 %v", c.in, ok, c.ok)
+			t.Fatalf("parseGitRepo(%q) ok=%v 期望 %v", c.in, ok, c.ok)
 		}
 		if ok {
-			if owner != c.owner || repo != c.repo || proxy != c.proxy {
-				t.Fatalf("parseGitHubRepo(%q) = (%q,%q,%q) 期望 (%q,%q,%q)", c.in, owner, repo, proxy, c.owner, c.repo, c.proxy)
+			if host != c.host || owner != c.owner || repo != c.repo || proxy != c.proxy {
+				t.Fatalf("parseGitRepo(%q) = (%q,%q,%q,%q) 期望 (%q,%q,%q,%q)", c.in, host, owner, repo, proxy, c.host, c.owner, c.repo, c.proxy)
 			}
 		}
 	}
@@ -410,7 +414,7 @@ func TestWalkRepoZip(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	items, err := new(API).walkRepoZip(context.Background(), buf.Bytes(), "best-fan", "iptv-sources", "https://gh-proxy.org/", "main", "种子", 1, 0, "", false, nil)
+	items, err := new(API).walkRepoZip(context.Background(), buf.Bytes(), "github.com", "best-fan", "iptv-sources", "https://gh-proxy.org/", "main", "种子", 1, 0, "", false, nil)
 	if err != nil {
 		t.Fatalf("walkRepoZip 不应报错: %v", err)
 	}
@@ -441,5 +445,39 @@ func TestWalkRepoZip(t *testing.T) {
 	wantSrc := "https://gh-proxy.org/https://raw.githubusercontent.com/best-fan/iptv-sources/main/tvbox.json"
 	if src.URL != wantSrc {
 		t.Fatalf("源候选 URL 应为 raw 直链，实际 %s", src.URL)
+	}
+
+	// GitLab：归档根目录 repo-branch/，raw 直链 gitlab.com/owner/repo/raw/branch/rel
+	var buf2 bytes.Buffer
+	zw2 := zip.NewWriter(&buf2)
+	gw, _ := zw2.Create("iptv-main/channels.m3u")
+	gw.Write([]byte("#EXTM3U\nhttp://e/c.m3u8\n"))
+	zw2.Close()
+	items2, err := new(API).walkRepoZip(context.Background(), buf2.Bytes(), "gitlab.com", "g", "iptv", "", "main", "gitlab种子", 1, 0, "", false, nil)
+	if err != nil {
+		t.Fatalf("gitlab walkRepoZip: %v", err)
+	}
+	if len(items2) != 1 {
+		t.Fatalf("gitlab 应 1 条，实际 %d", len(items2))
+	}
+	if items2[0].URL != "https://gitlab.com/g/iptv/raw/main/channels.m3u" {
+		t.Fatalf("gitlab raw URL 错误: %s", items2[0].URL)
+	}
+
+	// Gitee：归档根目录为 repo/（不带分支），raw 直链 gitee.com/owner/repo/raw/branch/rel
+	var buf3 bytes.Buffer
+	zw3 := zip.NewWriter(&buf3)
+	ew, _ := zw3.Create("iptv/channels.m3u")
+	ew.Write([]byte("#EXTM3U\nhttp://e/c.m3u8\n"))
+	zw3.Close()
+	items3, err := new(API).walkRepoZip(context.Background(), buf3.Bytes(), "gitee.com", "g", "iptv", "", "master", "gitee种子", 1, 0, "", false, nil)
+	if err != nil {
+		t.Fatalf("gitee walkRepoZip: %v", err)
+	}
+	if len(items3) != 1 {
+		t.Fatalf("gitee 应 1 条，实际 %d", len(items3))
+	}
+	if items3[0].URL != "https://gitee.com/g/iptv/raw/master/channels.m3u" {
+		t.Fatalf("gitee raw URL 错误: %s", items3[0].URL)
 	}
 }
