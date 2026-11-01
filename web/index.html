@@ -205,6 +205,7 @@
                 <td class="muted">
                   {{ summary(s) }}
                   <span v-if="subHint(s)" class="tag warn" :title="'这条源已启用，但没有可用仓源，订阅里不会出现它。点「恢复」重建，或编辑里手动指定类型'" style="margin-left:6px">{{ subHint(s) }}</span>
+                  <span v-if="s.upstreamRemoved" class="tag fail" style="margin-left:6px" title="此源由自动刮削导入，但上游种子已不再提供该地址（漂移）。可保留或删除，同步不会自动恢复">上游失效</span>
                 </td>
                 <td><span class="tag group">{{ s.group }}</span></td>
                 <td :title="absTime(s.lastCheckAt)">{{ relTime(s.lastCheckAt) }}</td>
@@ -442,6 +443,7 @@
                     自动<template v-if="(x.parentNames||[]).length">·{{ x.parentNames.length }}</template>
                   </span>
                   <span class="tag" v-else>手动</span>
+                  <span v-if="x.upstreamRemoved" class="tag fail" style="margin-left:6px" title="此直播源由自动刮削导入，但上游种子已不再提供该地址（漂移）。可保留或删除，同步不会自动恢复">上游失效</span>
                 </td>
                 <td><span class="tag group">{{ x.group }}</span></td>
                 <td class="muted" :title="'分组数 ' + (x.groupCount||0)">{{ x.channelCount || '—' }}</td>
@@ -528,6 +530,7 @@
                 <th>类型</th>
                 <th class="grow">订阅地址</th>
                 <th>分组</th>
+                <th>深度</th>
                 <th>最近同步</th>
                 <th>同步结果</th>
                 <th>启用</th>
@@ -543,6 +546,7 @@
                 </td>
                 <td class="url-cell" :title="s.url" @click="copyText(s.url)">{{ s.url }}</td>
                 <td><span class="tag group">{{ s.group }}</span></td>
+                <td class="muted">{{ s.depth > 0 ? s.depth : 1 }}</td>
                 <td :title="absTime(s.lastSyncAt)">{{ relTime(s.lastSyncAt) }}</td>
                 <td class="muted" :title="s.lastSyncMsg">{{ (s.lastSyncMsg||'').slice(0,48) }}</td>
                 <td><switch-box :on="s.enabled" @toggle="toggleScrapeSeed(s)"></switch-box></td>
@@ -552,7 +556,7 @@
                 </td>
               </tr>
               <tr v-if="!scrapeSeeds.length">
-                <td colspan="9" class="empty">
+                <td colspan="10" class="empty">
                   还没有种子 —— 点右上「＋ 添加种子」，填入公开订阅地址（TVBox 源集合或 m3u/txt/json 直播列表），
                   同步后候选会出现在下方候选区
                 </td>
@@ -614,8 +618,10 @@
                   <th>来源种子</th>
                   <th>目标</th>
                   <th>识别</th>
+                  <th>摘要</th>
                   <th class="grow">地址</th>
                   <th>状态</th>
+                  <th>漂移</th>
                 </tr>
               </thead>
               <tbody>
@@ -627,15 +633,24 @@
                   <td>{{ c.name || '—' }}</td>
                   <td class="muted">{{ c.seedName }}</td>
                   <td>{{ candidateTarget(c) }}</td>
-                  <td><span class="tag">{{ candidateKindText(c) }}</span></td>
+                  <td>
+                    <span class="tag">{{ candidateKindText(c) }}</span>
+                    <span v-if="c.discoveredDepth > 0" class="muted" style="font-size:11px;margin-left:4px">深度{{ c.discoveredDepth }}</span>
+                  </td>
+                  <td class="muted">{{ candidateSummary(c) }}</td>
                   <td class="url-cell" :title="c.url" @click="copyText(c.url)">{{ c.url }}</td>
                   <td>
                     <span v-if="c.dup" class="tag" style="background:#fee2e2;color:#991b1b">重复</span>
                     <span v-else :class="c.status==='pending' ? 'st-text' : 'muted'">{{ candidateStatusText(c) }}</span>
                   </td>
+                  <td>
+                    <span v-if="candidateDrift(c)" class="tag fail" title="此前已导入，但上游种子已不再提供该地址（漂移）。可保留或删除，再次同步不会自动恢复">上游失效</span>
+                    <span v-else-if="c.upstreamStatus === 'present'" class="muted">正常</span>
+                    <span v-else class="muted">未比对</span>
+                  </td>
                 </tr>
                 <tr v-if="!scrapeCandidates.length">
-                  <td colspan="8" class="empty">候选区为空 —— 添加种子后点「同步全部种子」</td>
+                  <td colspan="10" class="empty">候选区为空 —— 添加种子后点「同步全部种子」</td>
                 </tr>
               </tbody>
             </table>
@@ -669,6 +684,10 @@
           <div class="form-row">
             <label>备注</label>
             <input v-model="scrapeSeedForm.remark">
+          </div>
+          <div class="form-row">
+            <label>递归深度<span class="muted">多仓子仓继续展开的层数：1 = 仅展开种子自身 urls[]；2 = 子仓若是多仓再展开一层（上限 2）</span></label>
+            <input type="number" v-model.number="scrapeSeedForm.depth" min="1" max="2" class="grow">
           </div>
           <div class="form-row">
             <label>启用（参与同步）</label>

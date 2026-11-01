@@ -1344,7 +1344,7 @@
       const scrapeSyncState = ref(""); // idle / running
       const scrapeSyncResult = ref(null);
       const scrapeSeedModal = ref(false);
-      const scrapeSeedForm = reactive({ id: "", name: "", url: "", type: "tvbox", group: "默认", enabled: true, remark: "" });
+      const scrapeSeedForm = reactive({ id: "", name: "", url: "", type: "tvbox", group: "默认", enabled: true, remark: "", depth: 1 });
       const scrapeImport = reactive({ url: "", importing: false, result: null, error: "" });
       const scrapeApply = reactive({ group: "", enabled: true, applying: false, result: null });
       const scrapeChecked = ref({});
@@ -1369,6 +1369,7 @@
         scrapeSeedForm.group = s ? (s.group || "默认") : "默认";
         scrapeSeedForm.enabled = s ? !!s.enabled : true;
         scrapeSeedForm.remark = s ? (s.remark || "") : "";
+        scrapeSeedForm.depth = s ? (Number(s.depth) || 1) : 1;
         scrapeSeedModal.value = true;
       }
       async function saveScrapeSeed() {
@@ -1379,6 +1380,7 @@
           group: scrapeSeedForm.group.trim() || "默认",
           enabled: scrapeSeedForm.enabled,
           remark: scrapeSeedForm.remark.trim(),
+          depth: Number(scrapeSeedForm.depth) || 1,
         };
         if (!body.url) { toast("请输入种子地址", "warn"); return; }
         try {
@@ -1442,6 +1444,12 @@
       }
       function candidateStatusText(c) {
         return c.status === "pending" ? "待确认" : c.status === "applied" ? "已导入" : "已跳过";
+      }
+      function candidateSummary(c) {
+        return c.summary || "—";
+      }
+      function candidateDrift(c) {
+        return c.upstreamStatus === "removed";
       }
       function toggleAllScrapeCandidates(on) {
         scrapeChecked.value = {};
@@ -1512,6 +1520,7 @@
         scrapeSyncState, scrapeSyncResult, scrapeSeedModal, scrapeSeedForm,
         openScrapeSeedModal, saveScrapeSeed, toggleScrapeSeed, delScrapeSeed, syncScrape,
         scrapeImport, importScrapeUrl, candidateTarget, candidateKindText, candidateStatusText,
+        candidateSummary, candidateDrift,
         toggleAllScrapeCandidates, scrapeApply, applyScrapeCandidates, scrapeChecked,
       };
     },
