@@ -18,6 +18,7 @@
         groups: [],
         sources: [],
         group: '',
+        srcFilter: '', // 按直播源筛选：空=全部，其余=来源名
         keyword: '',
         cur: null,
         line: 0,
@@ -32,6 +33,7 @@
         stat: document.getElementById('liveStat'),
         search: document.getElementById('chSearch'),
         groupList: document.getElementById('groupList'),
+        srcFilter: document.getElementById('srcFilter'),
         chanList: document.getElementById('chanList'),
         chanCount: document.getElementById('chanCount'),
         chanPaneTitle: document.getElementById('chanPaneTitle'),
@@ -89,6 +91,7 @@
                 state.sources = Array.isArray(data.sources) ? data.sources : [];
                 if (!state.channels.length) {
                     showTip(emptyHint(), false);
+                    renderSourceFilter();
                     renderGroups();
                     renderChannels();
                     renderStat();
@@ -97,6 +100,7 @@
                 hideTip();
                 state.group = state.groups[0] || '';
                 renderStat();
+                renderSourceFilter();
                 renderGroups();
                 renderChannels();
                 restoreLast();
@@ -132,15 +136,20 @@
 
     function groupCounts() {
         var map = Object.create(null);
-        state.channels.forEach(function (ch) { map[ch.group] = (map[ch.group] || 0) + 1; });
+        state.channels.forEach(function (ch) {
+            if (state.srcFilter && chanSources(ch).indexOf(state.srcFilter) < 0) return;
+            map[ch.group] = (map[ch.group] || 0) + 1;
+        });
         return map;
     }
 
     function renderGroups() {
         var counts = groupCounts();
+        var total = 0;
+        state.groups.forEach(function (g) { total += counts[g] || 0; });
         var frag = document.createDocumentFragment();
 
-        frag.appendChild(groupItem('', '全部频道', state.channels.length));
+        frag.appendChild(groupItem('', '全部频道', total));
         state.groups.forEach(function (g) {
             frag.appendChild(groupItem(g, g, counts[g] || 0));
         });
@@ -168,21 +177,63 @@
         return d;
     }
 
+    // ---- 直播源筛选 ----
+
+    // sourceNames 从频道里聚合出实际出现过的来源名（去重后按名称排序）。
+    // 用频道聚合而不是 state.sources：筛选项一定能命中，且失败源不会占位。
+    function sourceNames() {
+        var seen = Object.create(null);
+        var out = [];
+        state.channels.forEach(function (ch) {
+            chanSources(ch).forEach(function (s) {
+                if (s && !seen[s]) { seen[s] = true; out.push(s); }
+            });
+        });
+        out.sort(function (a, b) { return a.localeCompare(b); });
+        return out;
+    }
+
+    function renderSourceFilter() {
+        if (!el.srcFilter) return;
+        var names = sourceNames();
+        if (state.srcFilter && names.indexOf(state.srcFilter) < 0) {
+            state.srcFilter = ''; // 源已不存在（删除/改名），回退全部
+        }
+        el.srcFilter.textContent = '';
+        var all = document.createElement('option');
+        all.value = '';
+        all.textContent = '全部直播源（' + names.length + '）';
+        el.srcFilter.appendChild(all);
+        names.forEach(function (n) {
+            var o = document.createElement('option');
+            o.value = n;
+            o.textContent = n;
+            el.srcFilter.appendChild(o);
+        });
+        el.srcFilter.value = state.srcFilter;
+    }
+
     // ---- 频道列表 ----
 
     function renderChannels() {
         var kw = state.keyword.trim().toLowerCase();
         var list = state.channels.filter(function (ch) {
             if (state.group && ch.group !== state.group) return false;
+            if (state.srcFilter && chanSources(ch).indexOf(state.srcFilter) < 0) return false;
             if (kw && ch.name.toLowerCase().indexOf(kw) < 0) return false;
             return true;
         });
 
-        el.chanPaneTitle.textContent = state.group || '全部频道';
+        var title = state.group || '全部频道';
+        if (state.srcFilter) title = '来源 ' + state.srcFilter + ' · ' + title;
+        el.chanPaneTitle.textContent = title;
         el.chanCount.textContent = list.length + ' 个';
 
         if (!list.length) {
-            el.chanList.innerHTML = '<div class="empty">这个分组下没有匹配的频道</div>';
+            var hint = state.srcFilter
+                ? '来源「' + state.srcFilter + '」在「' + (state.group || '全部频道') + '」下没有频道，换个分组或来源试试'
+                : '这个分组下没有匹配的频道';
+            el.chanList.innerHTML = '<div class="empty">' + esc(hint) + '</div>';
             return;
         }
 
@@ -502,6 +553,14 @@
             renderChannels();
         }, 180);
     });
+
+    if (el.srcFilter) {
+        el.srcFilter.addEventListener('change', function () {
+            state.srcFilter = el.srcFilter.value || '';
+            renderGroups();   // 分组计数跟随来源筛选
+            renderChannels();
+        });
+    }
 
     window.addEventListener('beforeunload', stopEngine);
 
