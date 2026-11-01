@@ -399,7 +399,7 @@
             <option v-for="g in liveGroups" :key="g" :value="g">{{ g }}</option>
           </select>
           <select v-model="liveFilters.origin">
-            <option value="">全部来源</option><option value="auto">自动同步</option><option value="manual">手动添加</option>
+            <option value="">全部来源</option><option value="auto">自动同步</option><option value="scraped">订阅刮削</option><option value="manual">手动添加</option>
           </select>
           <select v-model="liveFilters.enabled">
             <option value="">生效+禁用</option><option value="true">仅生效</option><option value="false">仅禁用</option>
@@ -442,8 +442,10 @@
                     :title="'来自：' + ((x.parentNames||[]).join('、') || '父源已删除（孤儿条目）')">
                     自动<template v-if="(x.parentNames||[]).length">·{{ x.parentNames.length }}</template>
                   </span>
-                  <span class="tag" v-else>手动</span>
-                  <span v-if="x.upstreamRemoved" class="tag fail" style="margin-left:6px" title="此直播源由自动刮削导入，但上游种子已不再提供该地址（漂移）。可保留或删除，同步不会自动恢复">上游失效</span>
+                  <span class="tag scraped" v-else-if="x.seedId"
+                    :title="'由订阅刮削导入（来源种子：' + (x.seedId || '未知') + '），可单独维护；上游移除仅标记不自动删'">订阅刮削</span>
+                  <span class="tag" v-else>手动添加</span>
+                  <span v-if="x.upstreamRemoved" class="tag fail" style="margin-left:6px" title="此直播源由订阅刮削导入，但上游种子已不再提供该地址（漂移）。可保留或删除，同步不会自动恢复">上游失效</span>
                 </td>
                 <td><span class="tag group">{{ x.group }}</span></td>
                 <td class="muted" :title="'分组数 ' + (x.groupCount||0)">{{ x.channelCount || '—' }}</td>

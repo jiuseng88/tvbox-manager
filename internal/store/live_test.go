@@ -189,3 +189,49 @@ func TestLiveBatchAction(t *testing.T) {
 		t.Fatalf("移组失败: %d", len(list))
 	}
 }
+
+// TestLiveListOriginFilterScraped 验证直播源「来源」三态过滤：
+// auto(聚合) / manual(纯手动添加) / scraped(订阅刮削=manual 且带 seedId)，互不串味。
+func TestLiveListOriginFilterScraped(t *testing.T) {
+	st := newTestStore(t)
+
+	// ① 聚合（auto）：来自父源 lives 同步
+	src := model.Source{Name: "父源", URL: "http://example.com/1.json", Enabled: true, Type: model.TypeSingle}
+	st.Add(&src)
+	src.Detail = &model.Detail{LiveSites: []model.LiveSiteEntry{{Name: "聚合直播", URL: "http://live.example/a.m3u"}}}
+	st.SyncLiveSourcesForSource(src)
+
+	// ② 纯手动添加（manual，无 seedId）
+	if _, err := st.AddLiveSources([]model.LiveSource{{Name: "手加", URL: "http://m.example/1.m3u"}}); err != nil {
+		t.Fatal(err)
+	}
+	// ③ 订阅刮削（manual + seedId）
+	if _, err := st.AddLiveSources([]model.LiveSource{{Name: "刮削", URL: "http://s.example/1.m3u", SeedID: "seed1"}}); err != nil {
+		t.Fatal(err)
+	}
+
+	all, total := st.ListLiveSourcesPage(LiveFilter{})
+	if total != 3 || len(all) != 3 {
+		t.Fatalf("全量应 3 条，实际 %d", total)
+	}
+
+	auto, _ := st.ListLiveSourcesPage(LiveFilter{Origin: "auto"})
+	if len(auto) != 1 || auto[0].Origin != model.LiveOriginAuto {
+		t.Fatalf("auto 过滤错误: %d", len(auto))
+	}
+
+	manual, _ := st.ListLiveSourcesPage(LiveFilter{Origin: "manual"})
+	if len(manual) != 2 {
+		t.Fatalf("manual 应含纯手动+刮削=2，实际 %d", len(manual))
+	}
+
+	scraped, _ := st.ListLiveSourcesPage(LiveFilter{Origin: "scraped"})
+	if len(scraped) != 1 || scraped[0].SeedID != "seed1" {
+		t.Fatalf("scraped 应仅命中带 seedId 的手动源=1，实际 %d (seedId=%q)", len(scraped), func() string {
+			if len(scraped) == 1 {
+				return scraped[0].SeedID
+			}
+			return ""
+		}())
+	}
+}
