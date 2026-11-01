@@ -284,6 +284,10 @@
 
         // 来源标签：让用户能看出频道来自哪个直播源（改过名的源也能核对）。
         var srcs = chanSources(ch);
+        // 正按某源筛选时，把该源排到最前，标签与筛选条件一致
+        if (state.srcFilter && srcs.indexOf(state.srcFilter) >= 0) {
+            srcs = [state.srcFilter].concat(srcs.filter(function (s) { return s !== state.srcFilter; }));
+        }
         if (srcs.length) {
             var s = document.createElement('span');
             s.className = 'chan-src';
