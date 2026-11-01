@@ -481,3 +481,37 @@ func TestWalkRepoZip(t *testing.T) {
 		t.Fatalf("gitee raw URL 错误: %s", items3[0].URL)
 	}
 }
+
+// TestGitCloneRepoRejectsPrivateHost SSH/SSRF 防护：git 经自身出网，故 clone 前必须拦掉内网主机，
+// 绝不能真的去连接。该测试离线、不依赖网络与 git 二进制。
+func TestGitCloneRepoRejectsPrivateHost(t *testing.T) {
+	cases := []struct {
+		host, proxy string
+	}{
+		{"192.168.0.1", ""},     // 内网仓库主机
+		{"10.0.0.5", ""},        // 内网仓库主机
+		{"github.com", "http://127.0.0.1:8080/"}, // 公网仓库 + 内网包裹式代理
+	}
+	for _, c := range cases {
+		_, _, err := new(API).gitCloneRepo(context.Background(), c.host, "o", "r", c.proxy)
+		if err == nil {
+			t.Fatalf("host=%s proxy=%s 应被拒绝", c.host, c.proxy)
+		}
+		if strings.Contains(err.Error(), "git clone 失败") {
+			t.Fatalf("内网地址不应走到 git clone，但报错: %v", err)
+		}
+	}
+}
+
+// TestGitCloneRepoNoGitBinary 运行环境无 git 时，应明确报错交由归档兜底（不连网）。
+func TestGitCloneRepoNoGitBinary(t *testing.T) {
+	// 用 PATH 清空 + 仅含不存在目录，使 LookPath("git") 失败
+	t.Setenv("PATH", "")
+	_, _, err := new(API).gitCloneRepo(context.Background(), "github.com", "o", "r", "")
+	if err == nil {
+		t.Fatal("无 git 时应报错")
+	}
+	if strings.Contains(err.Error(), "git clone 失败") {
+		t.Fatalf("无 git 二进制不应走到 git clone，但报错: %v", err)
+	}
+}

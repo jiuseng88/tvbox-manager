@@ -12,10 +12,14 @@ import (
 	"log"
 	"net/http"
 	"net/url"
+	"os"
+	"os/exec"
+	"path/filepath"
 	"strings"
 	"sync"
 	"time"
 
+	"tvbox-manager/internal/checker"
 	"tvbox-manager/internal/model"
 	"tvbox-manager/internal/parser"
 	"tvbox-manager/internal/store"
@@ -31,12 +35,15 @@ import (
     候选条目写入候选区；候选经用户确认后才导入为源（先候选后确认，不自动入库）。
   - 发现引擎：对内容自动嗅探类型（single/multi/list/m3u/json/mixed），不再依赖用户手标
     tvbox/live；受控递归（Depth，默认 1，上限 2）展开多仓；fetch 带同主机限频与重试退避。
-  - Git 仓库种子（.git 后缀 / 包裹式代理前缀，支持 GitHub/GitLab/Gitee）：走各主机归档包
-    （codeload / -/archive / repository/archive），用 Go 内置 archive/zip 解压后遍历
-    .m3u/.txt/.json，逐文件复用发现引擎；仓库内文件以各主机 raw 直链作为候选 URL，客户端
-    可直接拉取，不经服务端转发。零镜像依赖（运行镜像无需装 git）。
-  - 默认分支探测：先用各主机 API 取 default_branch，失败则回退 main→master→dev 尝试下载，
-    覆盖非主流默认分支名的仓库。
+  - Git 仓库种子（.git 后缀 / 包裹式代理前缀，支持 GitHub/GitLab/Gitee 及任意自建 git 服务）：
+    优先用 git 协议 clone（git clone --depth 1）拉取仓库内容，遍历 .m3u/.txt/.json 逐文件复用
+    发现引擎；clone 不可用（运行环境无 git / 受限网络）时回退各主机归档包
+    （codeload / -/archive / repository/archive）解压。仓库内文件以各主机 raw 直链作为候选 URL，
+    客户端可直接拉取，不经服务端转发。运行镜像需预装 git（apk add git）。
+  - 默认分支：git clone 天然拉到默认分支；归档兜底路径仍先用各主机 API 取 default_branch，
+    失败则回退 main→master→dev 尝试下载，覆盖非主流默认分支名的仓库。
+  - SSRF：git clone 经 git 自身出网，故在 clone 前显式校验仓库主机与包裹式代理主机均非内网
+    （复用 checker.RejectPrivateHost），避免成为内网探测跳板。
   - 富集+评估：发现后顺手解析摘要（站点数/频道数）并算质量分，仅用于排序标注，不阻断导入。
   - 对账（重建核心）：候选 ID 由 (SeedID+URL) 派生、upsert 合并——已确认状态不被整批覆盖；
     上游已移除的已导入源标记 UpstreamRemoved（漂移，不自动删除），可进复核。
@@ -552,8 +559,21 @@ func (a *API) fetchDefaultBranch(ctx context.Context, host, owner, repo, proxyPr
 	return j.DefaultBranch
 }
 
-// discoverRepo 下载仓库归档（默认分支优先，回退 main→master→dev），解压后遍历媒体文件发现条目。
+// gitCloneTimeout git clone 的硬超时（含断点回退到归档兜底）。
+const gitCloneTimeout = 120 * time.Second
+
+// discoverRepo 拉取 Git 仓库内容发现条目：git 协议优先（git clone --depth 1），
+// 失败（无 git 二进制 / 受限网络 / 私有仓库拒绝）回退各主机归档包解压。
 func (a *API) discoverRepo(ctx context.Context, host, owner, repo, proxyPrefix, seedName string, depth, curDepth int, parentURL string, preferLive bool, hl *hostLimiter) ([]discoveredItem, error) {
+	// ① git 协议优先：clone 后直接遍历工作树，天然拿到默认分支，raw 候选 URL 更准
+	if dir, branch, gerr := a.gitCloneRepo(ctx, host, owner, repo, proxyPrefix); gerr == nil {
+		defer os.RemoveAll(dir)
+		if items, werr := a.walkRepoDir(ctx, dir, host, owner, repo, proxyPrefix, branch, seedName, depth, curDepth, parentURL, preferLive, hl); werr == nil && len(items) > 0 {
+			return items, nil
+		}
+		// 克隆成功但目录内无可识别文件（极少见）→ 继续走归档兜底，给出更明确的报错
+	}
+	// ② 归档兜底：默认分支优先，回退 main→master→dev
 	var lastErr error
 	for _, branch := range a.resolveRepoBranches(ctx, host, owner, repo, proxyPrefix) {
 		zipURL := proxyPrefix + repoArchiveURL(host, owner, repo, branch)
@@ -570,6 +590,102 @@ func (a *API) discoverRepo(ctx context.Context, host, owner, repo, proxyPrefix, 
 		return items, nil
 	}
 	return nil, lastErr
+}
+
+// gitCloneRepo 用 git 协议把仓库浅克隆到临时目录。返回工作树目录与默认分支名。
+// 安全：clone 前校验仓库主机与包裹式代理主机均非内网（SSRF）；无 git 二进制直接报错交由归档兜底。
+func (a *API) gitCloneRepo(ctx context.Context, host, owner, repo, proxyPrefix string) (string, string, error) {
+	if err := checker.RejectPrivateHost(host); err != nil {
+		return "", "", fmt.Errorf("仓库主机被拒绝: %v", err)
+	}
+	if proxyPrefix != "" {
+		if pp, e := url.Parse(proxyPrefix); e == nil && pp.Hostname() != "" {
+			if re := checker.RejectPrivateHost(pp.Hostname()); re != nil {
+				return "", "", fmt.Errorf("代理主机被拒绝: %v", re)
+			}
+		}
+	}
+	if _, err := exec.LookPath("git"); err != nil {
+		return "", "", fmt.Errorf("运行环境缺少 git，回退归档: %v", err)
+	}
+	cloneURL := "https://" + host + "/" + owner + "/" + repo + ".git"
+	workdir, err := os.MkdirTemp("", "tvbox-git-")
+	if err != nil {
+		return "", "", err
+	}
+	clean := func() { os.RemoveAll(workdir) }
+	cctx, cancel := context.WithTimeout(ctx, gitCloneTimeout)
+	defer cancel()
+	args := []string{"clone", "--depth", "1", "--quiet", cloneURL, workdir}
+	cmd := exec.CommandContext(cctx, "git", args...)
+	if proxyPrefix != "" {
+		proxy := strings.TrimRight(proxyPrefix, "/")
+		cmd.Env = append(os.Environ(),
+			"http_proxy="+proxy, "https_proxy="+proxy, "GIT_HTTP_PROXY="+proxy)
+	}
+	if out, e := cmd.CombinedOutput(); e != nil {
+		clean()
+		return "", "", fmt.Errorf("git clone 失败: %v: %s", e, strings.TrimSpace(string(out)))
+	}
+	// 取默认分支名（raw 候选 URL 需要具体分支；clone 默认拉 HEAD 指向的分支）
+	branch := "main"
+	if b, e := exec.CommandContext(cctx, "git", "-C", workdir, "symbolic-ref", "--short", "HEAD").Output(); e == nil {
+		if s := strings.TrimSpace(string(b)); s != "" {
+			branch = s
+		}
+	}
+	return workdir, branch, nil
+}
+
+// walkRepoDir 遍历克隆下来的工作树，对 .m3u/.m3u8/.txt/.json 逐文件复用 discoverContent。
+// 每个文件以各主机 raw 直链作为 baseURLStr，使候选 URL 客户端可直接拉取。
+func (a *API) walkRepoDir(ctx context.Context, root, host, owner, repo, proxyPrefix, branch, seedName string, depth, curDepth int, parentURL string, preferLive bool, hl *hostLimiter) ([]discoveredItem, error) {
+	var items []discoveredItem
+	processed := 0
+	err := filepath.WalkDir(root, func(p string, d os.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if d.IsDir() {
+			if d.Name() == ".git" {
+				return filepath.SkipDir
+			}
+			return nil
+		}
+		if processed >= maxRepoFiles {
+			return filepath.SkipDir
+		}
+		name := strings.ToLower(d.Name())
+		if !strings.HasSuffix(name, ".m3u") && !strings.HasSuffix(name, ".m3u8") &&
+			!strings.HasSuffix(name, ".txt") && !strings.HasSuffix(name, ".json") {
+			return nil
+		}
+		processed++
+		b, rerr := os.ReadFile(p)
+		if rerr != nil {
+			return nil
+		}
+		if len(b) > maxRepoFileBytes {
+			b = b[:maxRepoFileBytes]
+		}
+		rel, _ := filepath.Rel(root, p)
+		rel = filepath.ToSlash(rel)
+		rawFileURL := repoRawURL(host, owner, repo, proxyPrefix, branch, rel)
+		fileLabel := seedName + " · " + d.Name()
+		sub, derr := a.discoverContent(ctx, string(b), fileLabel, rawFileURL, depth, curDepth+1, parentURL, fingerprint(b), preferLive, hl)
+		if derr != nil {
+			return nil // 单个非源文件跳过，不阻断其余文件
+		}
+		items = append(items, sub...)
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	if len(items) == 0 {
+		return nil, fmt.Errorf("仓库内未找到可识别的源文件")
+	}
+	return items, nil
 }
 
 // walkRepoZip 解压归档，遍历 .m3u/.m3u8/.txt/.json，逐文件复用 discoverContent。
