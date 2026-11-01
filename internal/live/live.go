@@ -25,7 +25,34 @@ type Channel struct {
 	Name   string   `json:"name"`
 	URLs   []string `json:"urls"`             // 原样保留（可能带 |User-Agent=... 参数）
 	Logo   string   `json:"logo,omitempty"`   //
-	Source string   `json:"source,omitempty"` // 来源直播源名，播放失败时用于定位
+	Source string   `json:"source,omitempty"` // 首个来源直播源名（兼容旧字段）
+	// Sources 合并后的全部来源直播源名（去重，来自哪些直播源）。
+	// 同一频道常见于多份播放列表，只留 Source 会让改名后的其它来源看不到；
+	// 前端据此展示「来源」标签，让用户能确认自己改过的源名。
+	Sources []string `json:"sources,omitempty"`
+}
+
+// maxChannelSources 单个频道记录来源名的上限，避免几十个源都含同一频道时把体积撑爆。
+const maxChannelSources = 16
+
+// addSource 往频道的 Sources 里追加去重的来源名（首次从旧字段 Source 初始化）。
+func addSource(ch *Channel, src string) {
+	src = strings.TrimSpace(src)
+	if src == "" {
+		return
+	}
+	if len(ch.Sources) == 0 && ch.Source != "" {
+		ch.Sources = []string{ch.Source}
+	}
+	for _, s := range ch.Sources {
+		if s == src {
+			return
+		}
+	}
+	if len(ch.Sources) >= maxChannelSources {
+		return
+	}
+	ch.Sources = append(ch.Sources, src)
 }
 
 // SplitHeader 拆分地址里的 | 请求头参数：
@@ -373,8 +400,13 @@ func Merge(in []Channel) []Channel {
 			if out[i].Logo == "" {
 				out[i].Logo = ch.Logo
 			}
+			if out[i].Source == "" {
+				out[i].Source = ch.Source
+			}
+			addSource(&out[i], ch.Source)
 			continue
 		}
+		addSource(&ch, ch.Source) // 首次出现即初始化 Sources（含旧字段 Source）
 		idx[k] = len(out)
 		out = append(out, ch)
 	}

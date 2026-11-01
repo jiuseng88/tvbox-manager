@@ -201,6 +201,12 @@
         el.chanList.appendChild(frag);
     }
 
+    // chanSources 频道的全部来源名：优先用后端合并的 sources[]，回退旧字段 source。
+    function chanSources(ch) {
+        if (Array.isArray(ch.sources) && ch.sources.length) return ch.sources;
+        return ch.source ? [ch.source] : [];
+    }
+
     function chanItem(ch) {
         var d = document.createElement('div');
         var active = state.cur && state.cur.name === ch.name && state.cur.group === ch.group;
@@ -224,6 +230,16 @@
         n.className = 'chan-name';
         n.textContent = ch.name;
         d.appendChild(n);
+
+        // 来源标签：让用户能看出频道来自哪个直播源（改过名的源也能核对）。
+        var srcs = chanSources(ch);
+        if (srcs.length) {
+            var s = document.createElement('span');
+            s.className = 'chan-src';
+            s.textContent = srcs.length > 1 ? srcs[0] + ' +' + (srcs.length - 1) : srcs[0];
+            s.title = '来源：' + srcs.join('、');
+            d.appendChild(s);
+        }
 
         if (ch.urls.length > 1) {
             var l = document.createElement('span');
@@ -414,7 +430,12 @@
         el.nowName.textContent = ch.name;
         var bits = [];
         if (ch.group) bits.push(ch.group);
-        if (ch.source) bits.push('来源 ' + ch.source);
+        var srcs = chanSources(ch);
+        if (srcs.length) {
+            var label = srcs.slice(0, 3).join('、');
+            if (srcs.length > 3) label += ' 等 ' + srcs.length + ' 个源';
+            bits.push('来源 ' + label);
+        }
         bits.push((ch.urls || []).length + ' 条线路');
         el.nowSrc.textContent = bits.join(' · ');
 

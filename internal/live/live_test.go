@@ -116,6 +116,28 @@ func TestMergeSameChannel(t *testing.T) {
 	if len(out[0].URLs) != 2 {
 		t.Fatalf("线路应去重为 2 条，实际 %v", out[0].URLs)
 	}
+	// 来源名要累积去重（s1/s2/s3），否则前端看不出频道来自哪些直播源
+	if len(out[0].Sources) != 3 {
+		t.Fatalf("来源应累积为 3 个，实际 %v", out[0].Sources)
+	}
+	if out[0].Source != "s1" {
+		t.Fatalf("Source 应保留首个来源 s1，实际 %q", out[0].Source)
+	}
+}
+
+func TestMergeSourceDedup(t *testing.T) {
+	in := []Channel{
+		{Group: "央视", Name: "CCTV-1", URLs: []string{"http://a/1.m3u8"}, Source: "s1"},
+		{Group: "央视", Name: "CCTV-1", URLs: []string{"http://c/1.m3u8"}, Source: "s1"},
+		{Group: "央视", Name: "CCTV-1", URLs: []string{"http://d/1.m3u8"}, Source: ""},
+	}
+	out := Merge(in)
+	if len(out) != 1 {
+		t.Fatalf("应合并为 1 条，实际 %d", len(out))
+	}
+	if len(out[0].Sources) != 1 || out[0].Sources[0] != "s1" {
+		t.Fatalf("重复来源应去重、空来源应忽略，实际 %v", out[0].Sources)
+	}
 }
 
 func TestParseJSONChannels(t *testing.T) {
