@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -26,12 +27,16 @@ const (
 	tvLiveTTL        = 10 * time.Minute // 频道表热缓存；命中即秒回
 	tvLiveStaleTTL   = 24 * time.Hour  // 落盘缓存作为「降级展示」的有效期：超过热缓存窗口但在此之内，
 	                                   // 直接返回旧数据（秒开），后台异步刷新。超过则视为冷启动实时拉取
-	tvLiveMaxSources = 50               // 单次聚合的直播源上限，与 parser 提取上限一致
+	tvLiveMaxSources = 200              // 单次聚合的直播源上限。原为 50，但直播间常有几十上百条
+	                                    // （刮削批量导入 + TVBox 聚合），超出的源会整条不参与聚合，
+	                                    // 表现为「管理端有条目、直播页却完全没有」
 	tvLiveWorkers    = 8                // 并发拉取数：再高容易触发上游限流
 	tvLiveDoor       = 12 * time.Second // 单个直播源拉取超时
 	tvLiveMaxBody    = 8 << 20          // 播放列表体上限；实测千频道 txt 约 100KB，8MB 极宽松
-	tvLiveMaxChans   = 5000             // 频道总数上限，防止异常大文件把响应撑爆
-	tvLiveFetchDoor  = 8 * time.Second
+	tvLiveMaxChans = 20000 // 频道总数上限。原为 5000，实测几十个源合计已过万，
+	// 截断后排在后面的央视/卫视类源会被整条砍光，故放宽到 2 万；
+	// 截断前先按分组权重排序，保证央视/卫视优先保留
+	tvLiveFetchDoor = 8 * time.Second
 )
 
 // tvLiveSourceStat 单个直播源的拉取结果，用于前端提示「哪个源没拉到」
@@ -167,6 +172,13 @@ func (a *API) buildLivePayload(ctx context.Context) *tvLivePayload {
 	// 只保留有线路的频道：没有 urls 的频道点开也播不了，出现在列表/分组/来源筛选里
 	// 只会干扰选择。
 	merged = filterPlayable(merged)
+
+	// 先按分组权重稳定排序，再做数量截断。否则截断按「源顺序」进行，排在后面的
+	// 央视/卫视类源会被前面动辄上千条的平台源（B站/斗鱼/YY 一起看）整体挤掉，
+	// 表现就是「加了几十个源，列表里全是平台直播，找不到央视」。
+	sort.SliceStable(merged, func(i, j int) bool {
+		return tvLiveGroupRank(merged[i].Group) < tvLiveGroupRank(merged[j].Group)
+	})
 	if len(merged) > tvLiveMaxChans {
 		merged = merged[:tvLiveMaxChans]
 	}
@@ -275,24 +287,38 @@ func (a *API) PreloadLiveChannels() {
 	a.backgroundRefreshLive()
 }
 
-// tvLiveSites 收集直播源：优先用探活时已入库的 Detail.LiveSites，
+// tvLiveSites 收集直播源：优先用独立维护的直播源表（管理端权威来源），
 // 一条都没有时（旧数据还没重检）现场拉几个单仓补一遍，只读不写库。
+//
+// 返回的 Name 保证**唯一**：直播源常有多条同名条目（不同 URL，比如分别对应
+// 央视/卫视两份清单，或批量刮削导入时都叫「自动同步的源」）。频道只带来源名，
+// 名字重复会让前端下拉把它们并成一项、筛选时混作一坨，所以这里重名追加 #2、#3。
 func (a *API) tvLiveSites(ctx context.Context) []model.LiveSiteEntry {
 	// 首选独立维护的直播源表：管理端可增删改、可停用，是唯一权威来源
 	if list := a.st.EnabledLiveSources(); len(list) > 0 {
+		used := make(map[string]bool, len(list))
 		out := make([]model.LiveSiteEntry, 0, len(list))
 		for _, ls := range list {
 			if len(out) >= tvLiveMaxSources {
 				break
 			}
-			out = append(out, model.LiveSiteEntry{Name: ls.Name, URL: ls.URL, Group: ls.Group})
+			name := strings.TrimSpace(ls.Name)
+			if name == "" {
+				name = "未命名源"
+			}
+			out = append(out, model.LiveSiteEntry{
+				Name:  uniqueSourceName(name, used),
+				URL:   ls.URL,
+				Group: ls.Group,
+			})
 		}
 		return out
 	}
 
 	// 表为空（刚升级、还没跑过一轮探活同步）→ 退回从各源的 Detail.LiveSites 现取，
 	// 保证升级后第一屏就有内容，不用等下次探活。
-	seen := make(map[string]bool, 32)
+	seenURL := make(map[string]bool, 32)
+	used := make(map[string]bool, 32)
 	out := make([]model.LiveSiteEntry, 0, 32)
 
 	add := func(list []model.LiveSiteEntry) {
@@ -300,11 +326,19 @@ func (a *API) tvLiveSites(ctx context.Context) []model.LiveSiteEntry {
 			if len(out) >= tvLiveMaxSources {
 				return
 			}
-			if it.URL == "" || seen[it.URL] {
+			if it.URL == "" || seenURL[it.URL] {
 				continue
 			}
-			seen[it.URL] = true
-			out = append(out, it)
+			seenURL[it.URL] = true
+			name := strings.TrimSpace(it.Name)
+			if name == "" {
+				name = "未命名源"
+			}
+			out = append(out, model.LiveSiteEntry{
+				Name:  uniqueSourceName(name, used),
+				URL:   it.URL,
+				Group: it.Group,
+			})
 		}
 	}
 
@@ -341,6 +375,22 @@ func (a *API) tvLiveSites(ctx context.Context) []model.LiveSiteEntry {
 		add(detail.LiveSites)
 	}
 	return out
+}
+
+// uniqueSourceName 生成集合内唯一的显示名：首次出现保持原名，重名依次追加
+// #2、#3…；若用户本来就叫「xx #2」，继续往后找到真正不冲突的为止。
+func uniqueSourceName(base string, used map[string]bool) string {
+	if !used[base] {
+		used[base] = true
+		return base
+	}
+	for i := 2; ; i++ {
+		c := base + " #" + strconv.Itoa(i)
+		if !used[c] {
+			used[c] = true
+			return c
+		}
+	}
 }
 
 // invalidateLiveCache 直播源增删改 / 启停 / 检测完成后立即让频道表缓存失效，

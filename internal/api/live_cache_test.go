@@ -1,11 +1,13 @@
 package api
 
 import (
+	"context"
 	"path/filepath"
 	"testing"
 	"time"
 
 	"tvbox-manager/internal/live"
+	"tvbox-manager/internal/store"
 )
 
 // 落盘缓存往返：频道表、来源名、时间戳都要原样保留，重启后才能真正秒开。
@@ -49,7 +51,58 @@ func TestLiveCacheFileInvalid(t *testing.T) {
 	}
 }
 
-// 没有线路的频道不该出现在下发的频道表里（列表/分组/来源筛选都会因此失真）。
+// 重名直播源必须被唯一化：频道只带来源名，名字重复会让直播页下拉把它们并成
+// 一项，筛选时不同源混作一坨（表现为「下拉的源数少于管理端的条目数」）。
+func TestTVLiveSitesUniqueNames(t *testing.T) {
+	st, err := store.New(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	add := func(name, u string) {
+		if _, err := st.AddLiveSource(name, u, "默认", "", true, 10); err != nil {
+			t.Fatalf("添加直播源 %q 失败: %v", name, err)
+		}
+	}
+	add("B站直播", "http://a.example/1.m3u")
+	add("B站直播", "http://b.example/2.m3u")
+	add("B站直播", "http://c.example/3.m3u")
+	add("央视", "http://d.example/4.m3u")
+
+	a := &API{st: st}
+	sites := a.tvLiveSites(context.Background())
+	if len(sites) != 4 {
+		t.Fatalf("应收集 4 个直播源，实际 %d: %+v", len(sites), sites)
+	}
+	want := []string{"B站直播", "B站直播 #2", "B站直播 #3", "央视"}
+	seen := make(map[string]bool, len(sites))
+	for i, s := range sites {
+		if s.Name != want[i] {
+			t.Fatalf("第 %d 个源名 = %q，期望 %q", i, s.Name, want[i])
+		}
+		if seen[s.Name] {
+			t.Fatalf("源名重复: %q", s.Name)
+		}
+		seen[s.Name] = true
+	}
+}
+
+// uniqueSourceName 与用户自己写的「xx #2」冲突时要继续避让，保证结果一定唯一。
+func TestUniqueSourceName(t *testing.T) {
+	used := map[string]bool{}
+	cases := []struct{ in, want string }{
+		{"B站直播", "B站直播"},
+		{"B站直播", "B站直播 #2"},
+		{"B站直播", "B站直播 #3"},
+		{"B站直播 #2", "B站直播 #2 #2"},
+		{"Guovin", "Guovin"},
+	}
+	for _, c := range cases {
+		if got := uniqueSourceName(c.in, used); got != c.want {
+			t.Fatalf("uniqueSourceName(%q) = %q，期望 %q", c.in, got, c.want)
+		}
+	}
+}
+
 func TestFilterPlayable(t *testing.T) {
 	in := []live.Channel{
 		{Group: "央视", Name: "CCTV-1", URLs: []string{"http://a/1.m3u8"}},

@@ -249,25 +249,25 @@
 
     // ---- 直播源筛选 ----
 
-    // sourceNames 从频道里聚合出实际出现过的来源名（去重后按名称排序）。
-    // 用频道聚合而不是 state.sources：筛选项一定能命中，且失败源不会占位。
-    function sourceNames() {
-        var seen = Object.create(null);
-        var out = [];
+    // sourceCounts 从频道里聚合出每个来源的频道数。
+    // 用频道聚合而不是 state.sources：筛选项一定能命中，且失败/空表源不会占位。
+    // 后端下发前已把重名源唯一化（同名追加 #2、#3），所以这里的 key 与直播源条目一一对应。
+    function sourceCounts() {
+        var map = Object.create(null);
         state.channels.forEach(function (ch) {
             chanSources(ch).forEach(function (s) {
-                if (s && !seen[s]) { seen[s] = true; out.push(s); }
+                if (s) map[s] = (map[s] || 0) + 1;
             });
         });
-        out.sort(function (a, b) { return a.localeCompare(b); });
-        return out;
+        return map;
     }
 
     function renderSourceFilter() {
         if (!el.srcFilter) return;
-        var names = sourceNames();
+        var counts = sourceCounts();
+        var names = Object.keys(counts).sort(function (a, b) { return a.localeCompare(b); });
         if (state.srcFilter && names.indexOf(state.srcFilter) < 0) {
-            state.srcFilter = ''; // 源已不存在（删除/改名），回退全部
+            state.srcFilter = ''; // 源已不存在（删除/改名/本次没拉到频道），回退全部
         }
         el.srcFilter.textContent = '';
         var all = document.createElement('option');
@@ -277,10 +277,16 @@
         names.forEach(function (n) {
             var o = document.createElement('option');
             o.value = n;
-            o.textContent = n;
+            o.textContent = n + '（' + counts[n] + '）';
+            o.title = n + ' · ' + counts[n] + ' 个频道';
             el.srcFilter.appendChild(o);
         });
         el.srcFilter.value = state.srcFilter;
+        // 下拉只列「本次真正拉到频道」的源，与管理端的直播源条目数天然不同
+        // （失败 / 空表 / 已停用的源不会有频道），悬停说明口径避免误判。
+        el.srcFilter.title = state.sources.length
+            ? '共 ' + state.sources.length + ' 条直播源参与聚合，其中 ' + names.length + ' 条本次拉到频道'
+            : '按直播源筛选频道';
     }
 
     // ---- 频道列表 ----
