@@ -162,6 +162,70 @@ func (c *Checker) FetchT(ctx context.Context, rawURL string, guardPrivate bool, 
 	return r, body
 }
 
+// FetchRaw 仅做 HTTP GET + SSRF 校验 + 体积上限，不解析内容（用于下载 git 归档等二进制）。
+// maxBytes<=0 时用默认 20MB；返回 body 与结果（StatusOK 表示成功）。
+func (c *Checker) FetchRaw(ctx context.Context, rawURL string, guardPrivate bool, maxBytes int64) (*Result, []byte) {
+	u, err := parser.Normalize(rawURL)
+	if err != nil {
+		return failResult(0, 0, "地址格式非法: "+err.Error()), nil
+	}
+	if guardPrivate {
+		if err := RejectPrivateHost(hostOf(u)); err != nil {
+			return failResult(0, 0, "地址被拒绝: "+err.Error()), nil
+		}
+	}
+	if maxBytes <= 0 {
+		maxBytes = maxBody
+	}
+	timeout := c.timeout
+	ctx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, u, nil)
+	if err != nil {
+		return failResult(0, 0, "构造请求失败: "+err.Error()), nil
+	}
+	req.Header.Set("User-Agent", defaultUA)
+	req.Header.Set("Accept", "*/*")
+	req.Header.Set("Connection", "close")
+
+	start := time.Now()
+	resp, err := c.client.Do(req)
+	latency := time.Since(start).Milliseconds()
+	if err != nil {
+		r := failResult(0, latency, classifyErr(err, int(timeout.Seconds())))
+		r.CheckedAt = time.Now()
+		return r, nil
+	}
+	defer resp.Body.Close()
+
+	body, err := io.ReadAll(io.LimitReader(resp.Body, maxBytes+1))
+	latency = time.Since(start).Milliseconds()
+	if err != nil {
+		r := failResult(resp.StatusCode, latency, "读取响应失败: "+err.Error())
+		r.CheckedAt = time.Now()
+		return r, nil
+	}
+	if len(body) > int(maxBytes) {
+		r := failResult(resp.StatusCode, latency, fmt.Sprintf("响应体超过 %dMB 限制", maxBytes>>20))
+		r.CheckedAt = time.Now()
+		return r, nil
+	}
+
+	r := &Result{HTTPCode: resp.StatusCode, LatencyMs: latency, Size: len(body), CheckedAt: time.Now()}
+	if resp.Request != nil && resp.Request.URL != nil {
+		r.FinalURL = resp.Request.URL.String()
+	}
+	if resp.StatusCode < 200 || resp.StatusCode > 299 {
+		r.Status = model.StatusFail
+		r.Msg = "HTTP " + strconv.Itoa(resp.StatusCode)
+		return r, body
+	}
+	r.Status = model.StatusOK
+	r.Msg = "OK"
+	return r, body
+}
+
 func failResult(code int, latency int64, msg string) *Result {
 	return &Result{Status: model.StatusFail, HTTPCode: code, LatencyMs: latency, Msg: msg}
 }

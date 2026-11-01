@@ -1,13 +1,17 @@
 package api
 
 import (
+	"archive/zip"
+	"bytes"
 	"context"
 	"crypto/sha1"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"io"
 	"log"
 	"net/http"
+	"net/url"
 	"strings"
 	"sync"
 	"time"
@@ -27,6 +31,9 @@ import (
     候选条目写入候选区；候选经用户确认后才导入为源（先候选后确认，不自动入库）。
   - 发现引擎：对内容自动嗅探类型（single/multi/list/m3u/json/mixed），不再依赖用户手标
     tvbox/live；受控递归（Depth，默认 1，上限 2）展开多仓；fetch 带同主机限频与重试退避。
+  - GitHub 仓库种子（.git 后缀 / gh-proxy 包裹式代理）：走 codeload 归档（经代理可稳定拉取），
+    用 Go 内置 archive/zip 解压后遍历 .m3u/.txt/.json，逐文件复用发现引擎；仓库内文件以
+    raw.githubusercontent 直链作为候选 URL，客户端可直接拉取。零镜像依赖。
   - 富集+评估：发现后顺手解析摘要（站点数/频道数）并算质量分，仅用于排序标注，不阻断导入。
   - 对账（重建核心）：候选 ID 由 (SeedID+URL) 派生、upsert 合并——已确认状态不被整批覆盖；
     上游已移除的已导入源标记 UpstreamRemoved（漂移，不自动删除），可进复核。
@@ -61,6 +68,25 @@ func (a *API) handleScrapeImport(w http.ResponseWriter, r *http.Request) {
 		badRequest(w, "url 不能为空")
 		return
 	}
+	// GitHub 仓库地址（含 .git 后缀 / 包裹式代理前缀）：下载归档解压后遍历，而非当原始文本解析
+	if owner, repo, pp, isRepo := parseGitHubRepo(raw); isRepo {
+		seedName := req.Name
+		if seedName == "" {
+			seedName = parser.HostOf(raw)
+		}
+		items, rerr := a.discoverRepo(r.Context(), owner, repo, pp, seedName, 1, 0, "", false, nil)
+		if rerr != nil {
+			ok(w, map[string]interface{}{"ok": false, "errMsg": rerr.Error()})
+			return
+		}
+		entries := make([]jsonEntry, 0, len(items))
+		for _, it := range items {
+			entries = append(entries, jsonEntry{Name: it.Name, URL: it.URL})
+		}
+		a.importEntries(w, req, entries)
+		return
+	}
+
 	res, body := a.sch.Checker().Fetch(r.Context(), raw, true) // guardPrivate=true：SSRF 强制
 	if res.Status != model.StatusOK {
 		ok(w, map[string]interface{}{
@@ -85,8 +111,13 @@ func (a *API) handleScrapeImport(w http.ResponseWriter, r *http.Request) {
 		seen[strings.ToLower(u)] = true
 		entries = append(entries, jsonEntry{Name: n, URL: u})
 	}
+	a.importEntries(w, req, entries)
+}
+
+// importEntries 把一批地址条目走预览（dryRun）或直接批量导入。被 txt 行列表与仓库解压两条路径复用。
+func (a *API) importEntries(w http.ResponseWriter, req scrapeImportReq, entries []jsonEntry) {
 	if len(entries) == 0 {
-		badRequest(w, "拉取到的内容既不是 JSON，也识别不到任何地址行")
+		badRequest(w, "未识别到任何地址行")
 		return
 	}
 	if req.DryRun {
@@ -381,6 +412,135 @@ type discoveredItem struct {
 	FP       string // 上游内容指纹
 }
 
+// ---- 仓库种子（GitHub .git 归档）支持 ----
+// 用户订阅的常见形态：https://gh-proxy.org/https://github.com/<owner>/<repo>.git
+// 这类地址不是可解析文本，需要下载仓库归档、解压后遍历里面的 .m3u/.txt/.json。
+// 方案：走 codeload zip（经 gh-proxy 可稳定拉取），Go 内置 archive/zip 解压，零镜像依赖。
+
+const (
+	maxRepoFileBytes = 20 << 20 // 单文件上限 20MB
+	maxRepoFiles     = 300      // 单仓库最多处理的媒体文件数
+)
+
+// splitProxyPrefix 分离包裹式代理前缀。形如 https://gh-proxy.org/https://github.com/...
+// 返回 ("https://gh-proxy.org/", "https://github.com/...")。无前缀则返回 ("", 原串)。
+func splitProxyPrefix(rawURL string) (string, string) {
+	if i := strings.Index(rawURL, "/https://"); i >= 0 {
+		return rawURL[:i+1], rawURL[i+1:]
+	}
+	return "", rawURL
+}
+
+// parseGitHubRepo 识别 GitHub 仓库根地址（含 .git 后缀 / 包裹式代理前缀）。
+// 仅匹配 owner/repo 根，不匹配 blob/tree/raw 等文件路径。返回 (owner, repo, proxyPrefix, ok)。
+func parseGitHubRepo(rawURL string) (owner, repo, proxyPrefix string, ok bool) {
+	proxyPrefix, inner := splitProxyPrefix(rawURL)
+	p, err := url.Parse(inner)
+	if err != nil {
+		return "", "", "", false
+	}
+	host := strings.ToLower(p.Hostname())
+	if host != "github.com" && host != "www.github.com" {
+		return "", "", "", false
+	}
+	segs := strings.Split(strings.Trim(p.Path, "/"), "/")
+	// 仓库根恰好是 owner/repo 两段；blob/tree/raw 等文件路径段数 > 2，不是仓库根
+	if len(segs) != 2 {
+		return "", "", "", false
+	}
+	owner = segs[0]
+	repo = strings.TrimSuffix(segs[1], ".git")
+	if owner == "" || repo == "" {
+		return "", "", "", false
+	}
+	return owner, repo, proxyPrefix, true
+}
+
+// discoverURL 按 URL 形态分发：GitHub 仓库根 → 走 codeload 解压遍历；否则原样 raw 拉取解析。
+// 让 discoverSeed 与 expandMulti 都能透明处理“种子/子仓本身是仓库”的情况（Depth 递归）。
+func (a *API) discoverURL(ctx context.Context, rawURL, seedName, baseURLStr string, depth, curDepth int, parentURL, baseFP string, preferLive bool, hl *hostLimiter) ([]discoveredItem, error) {
+	if owner, repo, pp, isRepo := parseGitHubRepo(rawURL); isRepo {
+		return a.discoverRepo(ctx, owner, repo, pp, seedName, depth, curDepth, parentURL, preferLive, hl)
+	}
+	res, body := a.sch.Checker().Fetch(ctx, rawURL, true) // SSRF 强制
+	if res.Status != model.StatusOK {
+		return nil, fmt.Errorf("拉取失败: %s", res.Msg)
+	}
+	return a.discoverContent(ctx, string(body), seedName, baseURLStr, depth, curDepth, parentURL, fingerprint(body), preferLive, hl)
+}
+
+// discoverRepo 下载 codeload 归档（main→master 兜底），解压后遍历媒体文件发现条目。
+func (a *API) discoverRepo(ctx context.Context, owner, repo, proxyPrefix, seedName string, depth, curDepth int, parentURL string, preferLive bool, hl *hostLimiter) ([]discoveredItem, error) {
+	var lastErr error
+	for _, branch := range []string{"main", "master"} {
+		zipURL := proxyPrefix + "https://codeload.github.com/" + owner + "/" + repo + "/zip/refs/heads/" + branch
+		res, body := a.sch.Checker().FetchRaw(ctx, zipURL, true, 200<<20) // 归档可达上百 MB，单独放宽上限
+		if res.Status != model.StatusOK {
+			lastErr = fmt.Errorf("下载仓库归档失败(%s): %s", branch, res.Msg)
+			continue
+		}
+		items, err := a.walkRepoZip(ctx, body, owner, repo, proxyPrefix, branch, seedName, depth, curDepth, parentURL, preferLive, hl)
+		if err != nil {
+			lastErr = err
+			continue
+		}
+		return items, nil
+	}
+	return nil, lastErr
+}
+
+// walkRepoZip 解压归档，遍历 .m3u/.m3u8/.txt/.json，逐文件复用 discoverContent。
+// 每个文件以 raw.githubusercontent 直链作为 baseURLStr，使播放列表/单仓 JSON 的候选 URL
+// 直接可用（TVBox 客户端能拉到，无需经本服务端二次转发）。
+func (a *API) walkRepoZip(ctx context.Context, data []byte, owner, repo, proxyPrefix, branch, seedName string, depth, curDepth int, parentURL string, preferLive bool, hl *hostLimiter) ([]discoveredItem, error) {
+	zr, err := zip.NewReader(bytes.NewReader(data), int64(len(data)))
+	if err != nil {
+		return nil, fmt.Errorf("归档解压失败: %v", err)
+	}
+	topPrefix := repo + "-" + branch + "/"
+	var items []discoveredItem
+	processed := 0
+	for _, f := range zr.File {
+		if f.FileInfo().IsDir() {
+			continue
+		}
+		name := strings.ToLower(f.Name)
+		if !strings.HasSuffix(name, ".m3u") && !strings.HasSuffix(name, ".m3u8") &&
+			!strings.HasSuffix(name, ".txt") && !strings.HasSuffix(name, ".json") {
+			continue
+		}
+		if processed >= maxRepoFiles {
+			break
+		}
+		processed++
+		rc, oerr := f.Open()
+		if oerr != nil {
+			continue
+		}
+		b, rerr := io.ReadAll(io.LimitReader(rc, maxRepoFileBytes))
+		rc.Close()
+		if rerr != nil {
+			continue
+		}
+		rel := strings.TrimPrefix(f.Name, topPrefix)
+		base := rel
+		if i := strings.LastIndex(base, "/"); i >= 0 {
+			base = base[i+1:]
+		}
+		rawFileURL := proxyPrefix + "https://raw.githubusercontent.com/" + owner + "/" + repo + "/" + branch + "/" + rel
+		fileLabel := seedName + " · " + base
+		sub, derr := a.discoverContent(ctx, string(b), fileLabel, rawFileURL, depth, curDepth+1, parentURL, fingerprint(b), preferLive, hl)
+		if derr != nil {
+			continue
+		}
+		items = append(items, sub...)
+	}
+	if len(items) == 0 {
+		return nil, fmt.Errorf("仓库内未找到可识别的源文件")
+	}
+	return items, nil
+}
+
 // discoverSeed 抓取种子并发现条目（顶层，depth 来自种子配置）。
 func (a *API) discoverSeed(ctx context.Context, seed model.ScrapeSeed, hl *hostLimiter) ([]discoveredItem, string) {
 	depth := seed.Depth
@@ -390,11 +550,7 @@ func (a *API) discoverSeed(ctx context.Context, seed model.ScrapeSeed, hl *hostL
 	if depth > 2 {
 		depth = 2
 	}
-	res, body := a.sch.Checker().Fetch(ctx, seed.URL, true) // SSRF 强制
-	if res.Status != model.StatusOK {
-		return nil, "同步失败: " + res.Msg
-	}
-	items, err := a.discoverContent(ctx, string(body), seed.Name, seed.URL, depth, 0, "", fingerprint(body), seed.Type == "live", hl)
+	items, err := a.discoverURL(ctx, seed.URL, seed.Name, seed.URL, depth, 0, "", "", seed.Type == "live", hl)
 	if err != nil {
 		return nil, err.Error()
 	}
@@ -553,17 +709,16 @@ func (a *API) expandMulti(ctx context.Context, subURLs []model.SubURL, depth, cu
 		seen[strings.ToLower(u)] = true
 
 		if curDepth+1 < depth {
-			// 受控递归：抓取子仓看是否还是多仓
+			// 受控递归：抓取子仓看是否还是多仓（子仓本身可能是仓库地址，discoverURL 透明处理）
 			if hl != nil {
 				hl.wait(parser.HostOf(u))
 			}
-			res, body := a.sch.Checker().Fetch(ctx, u, true)
-			if res.Status == model.StatusOK {
-				child, _ := a.discoverContent(ctx, string(body), s.Name, u, depth, curDepth+1, u, fingerprint(body), false, hl)
+			child, cerr := a.discoverURL(ctx, u, s.Name, u, depth, curDepth+1, u, "", false, hl)
+			if cerr == nil && len(child) > 0 {
 				out = append(out, child...)
 				continue
 			}
-			// 抓取失败：仍作为源候选（地址本身），待确认后由探活判定
+			// 抓取/识别失败：仍作为源候选（地址本身），待确认后由探活判定
 		}
 		out = append(out, discoveredItem{
 			Name: s.Name, URL: u, Target: "source", Kind: "repo-multi", Depth: curDepth + 1,

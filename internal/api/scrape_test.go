@@ -1,6 +1,8 @@
 package api
 
 import (
+	"archive/zip"
+	"bytes"
 	"context"
 	"fmt"
 	"strings"
@@ -354,5 +356,90 @@ func TestScrapeApplyBatchFlush(t *testing.T) {
 	d := dataOf(t, body)
 	if n, _ := d["applied"].(float64); n != 5 {
 		t.Fatalf("应导入 5 条，实际 %v", body)
+	}
+}
+
+// TestParseGitHubRepo 覆盖包裹式代理前缀、.git 后缀、blob/tree 路径、非 GitHub 域名等识别边界。
+func TestParseGitHubRepo(t *testing.T) {
+	cases := []struct {
+		in       string
+		owner    string
+		repo     string
+		proxy    string
+		ok       bool
+	}{
+		{"https://gh-proxy.org/https://github.com/best-fan/iptv-sources.git", "best-fan", "iptv-sources", "https://gh-proxy.org/", true},
+		{"https://github.com/best-fan/iptv-sources", "best-fan", "iptv-sources", "", true},
+		{"https://github.com/best-fan/iptv-sources.git", "best-fan", "iptv-sources", "", true},
+		{"https://github.com/best-fan/iptv-sources/blob/main/x.m3u", "", "", "", false},
+		{"https://github.com/best-fan/iptv-sources/tree/main/dir", "", "", "", false},
+		{"https://raw.githubusercontent.com/best-fan/iptv-sources/main/x.m3u", "", "", "", false},
+		{"https://example.com/foo.json", "", "", "", false},
+	}
+	for _, c := range cases {
+		owner, repo, proxy, ok := parseGitHubRepo(c.in)
+		if ok != c.ok {
+			t.Fatalf("parseGitHubRepo(%q) ok=%v 期望 %v", c.in, ok, c.ok)
+		}
+		if ok {
+			if owner != c.owner || repo != c.repo || proxy != c.proxy {
+				t.Fatalf("parseGitHubRepo(%q) = (%q,%q,%q) 期望 (%q,%q,%q)", c.in, owner, repo, proxy, c.owner, c.repo, c.proxy)
+			}
+		}
+	}
+}
+
+// TestWalkRepoZip 用内存归档验证：解压后逐文件识别，且候选 URL 直接指向 raw.githubusercontent 直链。
+func TestWalkRepoZip(t *testing.T) {
+	var buf bytes.Buffer
+	zw := zip.NewWriter(&buf)
+	write := func(name, content string) {
+		w, err := zw.Create(name)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := w.Write([]byte(content)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	write("iptv-sources-main/iptv.m3u", "#EXTM3U\n#EXTINF:-1 tvg-name=\"CCTV1\",CCTV1\nhttp://example.com/cctv1.m3u8\n")
+	write("iptv-sources-main/tvbox.json", `{"sites":[{"key":"a","name":"测试站","url":"https://api.example/api.php/provide/vod"}],"lives":[]}`)
+	// 应被忽略的非媒体文件
+	write("iptv-sources-main/README.md", "# readme")
+	if err := zw.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	items, err := new(API).walkRepoZip(context.Background(), buf.Bytes(), "best-fan", "iptv-sources", "https://gh-proxy.org/", "main", "种子", 1, 0, "", false, nil)
+	if err != nil {
+		t.Fatalf("walkRepoZip 不应报错: %v", err)
+	}
+	if len(items) != 2 {
+		t.Fatalf("应识别出 2 条（m3u + json），实际 %d: %v", len(items), items)
+	}
+	var live, src *discoveredItem
+	for i := range items {
+		if items[i].Target == "live" {
+			live = &items[i]
+		} else if items[i].Target == "source" {
+			src = &items[i]
+		}
+	}
+	if live == nil || live.Kind != "playlist" {
+		t.Fatalf("缺少直播播放列表候选: %v", items)
+	}
+	wantLive := "https://gh-proxy.org/https://raw.githubusercontent.com/best-fan/iptv-sources/main/iptv.m3u"
+	if live.URL != wantLive {
+		t.Fatalf("直播候选 URL 应为 raw 直链，实际 %s", live.URL)
+	}
+	if live.Depth != 1 {
+		t.Fatalf("仓库内文件深度应为 1，实际 %d", live.Depth)
+	}
+	if src == nil || src.Kind != "repo-single" {
+		t.Fatalf("缺少单仓源候选: %v", items)
+	}
+	wantSrc := "https://gh-proxy.org/https://raw.githubusercontent.com/best-fan/iptv-sources/main/tvbox.json"
+	if src.URL != wantSrc {
+		t.Fatalf("源候选 URL 应为 raw 直链，实际 %s", src.URL)
 	}
 }
