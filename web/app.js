@@ -1348,7 +1348,7 @@
       const scrapeSyncState = ref(""); // idle / running
       const scrapeSyncResult = ref(null);
       const scrapeSeedModal = ref(false);
-      const scrapeSeedForm = reactive({ id: "", name: "", url: "", type: "tvbox", group: "默认", enabled: true, remark: "", depth: 1 });
+      const scrapeSeedForm = reactive({ id: "", name: "", url: "", group: "默认", enabled: true, remark: "", depth: 1 });
       const scrapeImport = reactive({ url: "", importing: false, result: null, error: "" });
       const scrapeApply = reactive({ group: "", enabled: true, applying: false, result: null });
       const scrapeChecked = ref({});
@@ -1369,7 +1369,6 @@
         scrapeSeedForm.id = s ? s.id : "";
         scrapeSeedForm.name = s ? s.name : "";
         scrapeSeedForm.url = s ? s.url : "";
-        scrapeSeedForm.type = s ? (s.type || "tvbox") : "tvbox";
         scrapeSeedForm.group = s ? (s.group || "默认") : "默认";
         scrapeSeedForm.enabled = s ? !!s.enabled : true;
         scrapeSeedForm.remark = s ? (s.remark || "") : "";
@@ -1380,7 +1379,6 @@
         const body = {
           name: scrapeSeedForm.name.trim(),
           url: scrapeSeedForm.url.trim(),
-          type: scrapeSeedForm.type,
           group: scrapeSeedForm.group.trim() || "默认",
           enabled: scrapeSeedForm.enabled,
           remark: scrapeSeedForm.remark.trim(),
@@ -1442,8 +1440,8 @@
       }
       function candidateTarget(c) { return c.target === "live" ? "📺 直播源" : "📋 源"; }
       function candidateKindText(c) {
-        const m = { "repo-single": "单仓", "repo-multi": "子仓", urls: "分享", array: "数组", txt: "文本",
-          playlist: "播放列表", "live-json": "JSON 直链", "live-txt": "文本清单" };
+        const m = { "repo-single": "单仓", "repo-multi": "子仓", "live-multi": "多仓直链", urls: "分享",
+          array: "数组", txt: "文本", playlist: "播放列表", "live-json": "JSON 直链", "live-txt": "文本清单" };
         return m[c.kind] || c.kind || "-";
       }
       function candidateStatusText(c) {

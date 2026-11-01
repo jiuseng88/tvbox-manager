@@ -510,14 +510,29 @@
           </div>
         </div>
         <div class="muted" style="margin-bottom:8px">
-          自动刮削分两类种子：<b>TVBox 源</b>（type=tvbox，同步后候选为源地址，导入进「源列表」）与
-          <b>直播源</b>（type=live，同步后候选为播放列表，导入进「直播源」）。来源仅限你主动添加的
-          公开订阅地址（源集合站点 / 公开仓库直链），TG / 网盘渠道不做。候选先确认后导入，不自动删除；
+          填一个订阅地址即可，<b>类型由服务端自动识别，不需要手选</b>：识别成「源」的进源列表，
+          识别成「直播源」的进直播源列表。同步只产出候选，确认后才入库，也不会自动删除已有源；
           导入的源会自动探活。从 TVBox 源 <code>lives</code> 提取直播源（直播页「⚡ 一键解析」）不受影响。
         </div>
 
+        <div class="card" style="margin-bottom:10px;padding:10px 14px;text-align:left">
+          <div class="card-title">可以填入的地址类型</div>
+          <ul class="scrape-types">
+            <li><b>TVBox 单仓 JSON</b> —— 含 <code>sites</code> / <code>lives</code> / <code>parses</code> 的配置 → 一条「源」候选</li>
+            <li><b>TVBox 多仓 JSON</b> —— 带 <code>urls[]</code> 的聚合配置 → 逐条展开：<code>.m3u/.m3u8</code> 直链归「直播源」，其余当子仓（按深度 1–2 递归）</li>
+            <li><b>直播播放列表</b> —— <code>.m3u</code> / <code>.m3u8</code> / txt 频道表 → 一条「直播源」候选，整份收录</li>
+            <li><b>lives-only JSON</b> —— 只有 <code>lives</code> 没有 <code>sites</code> → 提取里面的播放列表直链</li>
+            <li><b>地址列表</b> —— txt 或 JSON 一行一个订阅地址：<code>名称,URL</code> / <code>名称|URL</code> / 纯 URL 都认</li>
+            <li><b>Git 仓库</b> —— GitHub / GitLab / Gitee 仓库地址（可带 <code>.git</code>），支持 <code>https://gh-proxy.org/https://github.com/…</code> 这类代理前缀；会遍历仓库内的 <code>.m3u/.txt/.json</code></li>
+            <li><b>本机地址</b> —— <code>http://127.0.0.1:9978/…</code> 这类 TVBox 客户端自带接口，需先在「设置」打开「允许访问本机回环地址」</li>
+            <li class="muted"><b>不会被收录</b>：脚本与二进制（<code>.js/.jar/.py/.apk/.exe</code>）、需要登录的私有仓库、TG / 网盘分享页</li>
+          </ul>
+        </div>
+
         <div v-if="scrapeSyncResult" class="card" style="margin-bottom:10px;padding:8px 12px;text-align:left">
-          <span class="st-text ok">同步完成：{{ scrapeSyncResult.seeds }} 个种子 / 识别候选 {{ scrapeSyncResult.candidates }} 条（重复 {{ scrapeSyncResult.duplicates }}）</span>
+          <span class="st-text ok">同步完成：{{ scrapeSyncResult.seeds }} 个种子 / 识别候选 {{ scrapeSyncResult.candidates }} 条
+            <span class="muted">（源 {{ scrapeSyncResult.sources || 0 }} · 直播源 {{ scrapeSyncResult.lives || 0 }}，重复 {{ scrapeSyncResult.duplicates }}）</span>
+          </span>
           <span v-if="scrapeSyncResult.errors && scrapeSyncResult.errors.length" class="err">
             ；{{ scrapeSyncResult.errors.length }} 个种子失败：<span v-for="(er, i) in scrapeSyncResult.errors" :key="i" class="muted">{{ er }}</span>
           </span>
@@ -529,7 +544,6 @@
               <tr>
                 <th class="w-num">#</th>
                 <th>名称</th>
-                <th>类型</th>
                 <th class="grow">订阅地址</th>
                 <th>分组</th>
                 <th>深度</th>
@@ -543,9 +557,6 @@
               <tr v-for="(s, i) in scrapeSeeds" :key="s.id" :class="{disabled: !s.enabled}">
                 <td class="muted w-num">{{ i+1 }}</td>
                 <td><a class="link" @click="openScrapeSeedModal(s)">{{ s.name }}</a></td>
-                <td>
-                  <span class="tag" :class="s.type==='live' ? 'from' : ''">{{ s.type==='live' ? '📺 直播源' : '📋 TVBox 源' }}</span>
-                </td>
                 <td class="url-cell" :title="s.url" @click="copyText(s.url)">{{ s.url }}</td>
                 <td><span class="tag group">{{ s.group }}</span></td>
                 <td class="muted">{{ s.depth > 0 ? s.depth : 1 }}</td>
@@ -558,9 +569,9 @@
                 </td>
               </tr>
               <tr v-if="!scrapeSeeds.length">
-                <td colspan="10" class="empty">
-                  还没有种子 —— 点右上「＋ 添加种子」，填入公开订阅地址（TVBox 源集合或 m3u/txt/json 直播列表），
-                  同步后候选会出现在下方候选区
+                <td colspan="9" class="empty">
+                  还没有种子 —— 点右上「＋ 添加种子」，填入订阅地址（TVBox 单仓/多仓、m3u 直播列表、
+                  频道表 txt、地址列表、Git 仓库都行），同步后候选会出现在下方候选区
                 </td>
               </tr>
             </tbody>
@@ -665,19 +676,13 @@
         <div class="modal">
           <div class="modal-title">{{ scrapeSeedForm.id ? '编辑种子' : '添加种子' }}<button class="close" @click="scrapeSeedModal=false">✕</button></div>
           <div class="form-row">
-            <label>类型</label>
-            <select v-model="scrapeSeedForm.type" class="grow">
-              <option value="tvbox">TVBox 源 —— 刮源地址（单仓 / 子仓 / 分享）</option>
-              <option value="live">直播源 —— 刮播放列表（m3u / txt / json）</option>
-            </select>
-          </div>
-          <div class="form-row">
             <label>名称</label>
             <input v-model="scrapeSeedForm.name" placeholder="便于识别的名称（可留空）">
           </div>
           <div class="form-row">
             <label>订阅地址 *</label>
-            <input v-model="scrapeSeedForm.url" placeholder="https://… 公开订阅地址（源集合站点 / 仓库直链）">
+            <input v-model="scrapeSeedForm.url" placeholder="TVBox 单仓/多仓 JSON、m3u 播放列表、频道表 txt、地址列表或 Git 仓库地址">
+            <span class="muted" style="flex-basis:100%;padding-left:122px;font-size:12px">类型自动识别，无需选择：m3u / 频道表 → 直播源；含 sites 的仓库 → 源</span>
           </div>
           <div class="form-row">
             <label>分组</label>
@@ -688,8 +693,9 @@
             <input v-model="scrapeSeedForm.remark">
           </div>
           <div class="form-row">
-            <label>递归深度<span class="muted">多仓子仓继续展开的层数：1 = 仅展开种子自身 urls[]；2 = 子仓若是多仓再展开一层（上限 2）</span></label>
+            <label>递归深度</label>
             <input type="number" v-model.number="scrapeSeedForm.depth" min="1" max="2" class="grow">
+            <span class="muted" style="flex-basis:100%;padding-left:122px;font-size:12px">多仓子仓继续展开的层数：1 = 仅展开种子自身 urls[]；2 = 子仓若是多仓再展开一层（上限 2）</span>
           </div>
           <div class="form-row">
             <label>启用（参与同步）</label>

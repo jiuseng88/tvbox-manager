@@ -331,9 +331,9 @@ type ScrapeSeed struct {
 	ID   string `json:"id"`
 	Name string `json:"name"`
 	URL  string `json:"url"` // 归一化后唯一
-	// Type 种子类型：tvbox（默认）/ live，作为嗅探"倾向"提示；
-	// 实际 target 由发现引擎对内容自动嗅探决定，本字段不再硬性分支。
-	// 空值 = tvbox，兼容已有旧数据。
+	// Type 已废弃（Deprecated）：类型不再由用户选择，发现引擎按内容自动识别
+	// （m3u 播放列表 → 直播源；含 sites 的仓库 → 源；多仓 urls[] 逐条归类）。
+	// 字段仅保留以兼容旧数据与旧版 API，读写都不再影响任何分支。
 	Type    string `json:"type,omitempty"`
 	Group   string `json:"group"`
 	Enabled bool   `json:"enabled"` // 是否参与同步

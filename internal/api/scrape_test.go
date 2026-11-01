@@ -19,7 +19,7 @@ import (
 
 func TestDiscoverScrapeSingle(t *testing.T) {
 	text := `{"sites":[{"key":"a","name":"测试站","url":"https://api.example/api.php/provide/vod"}],"lives":[]}`
-	items, err := discoverFn()(context.Background(), text, "我的仓", "https://example.com/tvbox.json", 1, 0, "", "", false, nil)
+	items, err := discoverFn()(context.Background(), text, "我的仓", "https://example.com/tvbox.json", 1, 0, "", "", nil)
 	if err != nil {
 		t.Fatalf("不应报错: %v", err)
 	}
@@ -42,7 +42,7 @@ func TestDiscoverScrapeSingle(t *testing.T) {
 
 func TestDiscoverScrapeMulti(t *testing.T) {
 	text := `{"urls":[{"name":"子仓A","url":"https://a.example/sub1.json"},{"name":"子仓B","url":"https://b.example/sub2.json"}]}`
-	items, err := discoverFn()(context.Background(), text, "聚合", "https://agg.example/all.json", 1, 0, "", "", false, nil)
+	items, err := discoverFn()(context.Background(), text, "聚合", "https://agg.example/all.json", 1, 0, "", "", nil)
 	if err != nil {
 		t.Fatalf("不应报错: %v", err)
 	}
@@ -60,7 +60,7 @@ func TestDiscoverScrapeMulti(t *testing.T) {
 func TestDiscoverScrapeURLShareFormat(t *testing.T) {
 	text := `// 分享列表
 {"urls":[{"url":"https://x.example/a.json","name":"甲"},{"url":"https://y.example/b.json","name":"乙"}]}`
-	items, err := discoverFn()(context.Background(), text, "seed", "https://s.example/seed.json", 1, 0, "", "", false, nil)
+	items, err := discoverFn()(context.Background(), text, "seed", "https://s.example/seed.json", 1, 0, "", "", nil)
 	if err != nil {
 		t.Fatalf("不应报错: %v", err)
 	}
@@ -76,7 +76,7 @@ func TestDiscoverScrapeURLShareFormat(t *testing.T) {
 
 func TestDiscoverScrapeURLArray(t *testing.T) {
 	text := `["https://x.example/a.json", "https://y.example/b.json"]`
-	items, err := discoverFn()(context.Background(), text, "seed", "s", 1, 0, "", "", false, nil)
+	items, err := discoverFn()(context.Background(), text, "seed", "s", 1, 0, "", "", nil)
 	if err != nil {
 		t.Fatalf("不应报错: %v", err)
 	}
@@ -90,7 +90,7 @@ func TestDiscoverScrapeURLArray(t *testing.T) {
 
 func TestDiscoverScrapeTxt(t *testing.T) {
 	text := "测试源1,https://a.example/1.json\nhttps://b.example/2.json|源2\n# 注释行\n\nhttps://a.example/1.json\n"
-	items, err := discoverFn()(context.Background(), text, "seed", "x", 1, 0, "", "", false, nil)
+	items, err := discoverFn()(context.Background(), text, "seed", "x", 1, 0, "", "", nil)
 	if err != nil {
 		t.Fatalf("不应报错: %v", err)
 	}
@@ -106,10 +106,10 @@ func TestDiscoverScrapeTxt(t *testing.T) {
 
 func TestDiscoverScrapeEmpty(t *testing.T) {
 	fn := discoverFn()
-	if items, _ := fn(context.Background(), "   ", "s", "u", 1, 0, "", "", false, nil); len(items) != 0 {
+	if items, _ := fn(context.Background(), "   ", "s", "u", 1, 0, "", "", nil); len(items) != 0 {
 		t.Fatalf("空白内容应 0 条，实际 %d", len(items))
 	}
-	if items, _ := fn(context.Background(), "hello world 没有任何地址", "s", "u", 1, 0, "", "", false, nil); len(items) != 0 {
+	if items, _ := fn(context.Background(), "hello world 没有任何地址", "s", "u", 1, 0, "", "", nil); len(items) != 0 {
 		t.Fatalf("无地址内容应 0 条，实际 %d", len(items))
 	}
 }
@@ -121,7 +121,7 @@ func TestDiscoverLiveEntries(t *testing.T) {
 	seedName, seedURL := "直播聚合", "https://live.agg.example/all.m3u"
 
 	// 1. 整份 m3u → 一条直播候选（playlist）
-	items, err := fn(context.Background(), "#EXTM3U\n#EXTINF:-1,央视综合\nhttp://x.example/cctv1.m3u8\n", seedName, seedURL, 1, 0, "", "", true, nil)
+	items, err := fn(context.Background(), "#EXTM3U\n#EXTINF:-1,央视综合\nhttp://x.example/cctv1.m3u8\n", seedName, seedURL, 1, 0, "", "", nil)
 	if err != nil || len(items) != 1 || items[0].Kind != "playlist" || items[0].Target != "live" || items[0].URL != seedURL {
 		t.Fatalf("m3u 应整份为 1 条直播候选，实际 %d/%v/%v", len(items), items, err)
 	}
@@ -131,13 +131,13 @@ func TestDiscoverLiveEntries(t *testing.T) {
 	for i := 0; i < 10; i++ {
 		sb.WriteString(fmt.Sprintf("频道%d,http://x.example/ch%d.m3u8\n", i, i))
 	}
-	items, err = fn(context.Background(), sb.String(), seedName, seedURL, 1, 0, "", "", true, nil)
+	items, err = fn(context.Background(), sb.String(), seedName, seedURL, 1, 0, "", "", nil)
 	if err != nil || len(items) != 1 || items[0].Kind != "playlist" || items[0].Target != "live" {
 		t.Fatalf("txt 频道表应整份为 1 条直播候选，实际 %d/%v/%v", len(items), items, err)
 	}
 
 	// 3. JSON lives 结构 → 提取播放列表直链（live-json）
-	items, err = fn(context.Background(), `{"lives":[{"name":"A站","url":"http://a.example/x.m3u"},{"name":"B站","url":"http://b.example/y.txt"}]}`, seedName, seedURL, 1, 0, "", "", true, nil)
+	items, err = fn(context.Background(), `{"lives":[{"name":"A站","url":"http://a.example/x.m3u"},{"name":"B站","url":"http://b.example/y.txt"}]}`, seedName, seedURL, 1, 0, "", "", nil)
 	if err != nil || len(items) != 2 || items[0].Target != "live" || items[0].Kind != "live-json" {
 		t.Fatalf("JSON lives 应提取 2 条直播，实际 %d/%v/%v", len(items), items, err)
 	}
@@ -145,29 +145,42 @@ func TestDiscoverLiveEntries(t *testing.T) {
 		t.Fatalf("条目名称应为 A站，实际 %q", items[0].Name)
 	}
 
-	// 4. JSON urls 混合，脚本/接口直链应被过滤，仅留播放列表直链
-	items, err = fn(context.Background(), `{"urls":[{"name":"脚本","url":"http://a.example/spider.js"},{"name":"播放","url":"http://c.example/live.m3u"},{"name":"CMS","url":"http://d.example/api.php/xx?y=1"}]}`, seedName, seedURL, 1, 0, "", "", true, nil)
-	if err != nil || len(items) != 1 || items[0].Target != "live" || items[0].URL != "http://c.example/live.m3u" {
-		t.Fatalf("应只收播放列表直链（1 条直播），实际 %d/%v/%v", len(items), items, err)
+	// 4. JSON urls 混合：脚本丢弃；m3u 直链自动归直播；CMS 接口自动归源。
+	// 类型不再由用户标注，靠地址形态判定。
+	items, err = fn(context.Background(), `{"urls":[{"name":"脚本","url":"http://a.example/spider.js"},{"name":"播放","url":"http://c.example/live.m3u"},{"name":"CMS","url":"http://d.example/api.php/xx?y=1"}]}`, seedName, seedURL, 1, 0, "", "", nil)
+	if err != nil || len(items) != 2 {
+		t.Fatalf("脚本应被丢弃，剩直播+源各 1 条，实际 %d/%v/%v", len(items), items, err)
+	}
+	var gotLive, gotSource bool
+	for _, it := range items {
+		switch it.URL {
+		case "http://c.example/live.m3u":
+			gotLive = it.Target == "live" && it.Kind == "live-multi"
+		case "http://d.example/api.php/xx?y=1":
+			gotSource = it.Target == "source"
+		}
+	}
+	if !gotLive || !gotSource {
+		t.Fatalf("m3u 应归直播、CMS 接口应归源，实际 %v", items)
 	}
 
 	// 5. txt 少量 URL 行 → 逐条直播候选（沿用批量导入口径：名称|地址 / 名称,地址 / 纯地址）
-	items, err = fn(context.Background(), "A,http://a.example/x.m3u\nB|http://b.example/y.m3u\n", seedName, seedURL, 1, 0, "", "", true, nil)
+	items, err = fn(context.Background(), "A,http://a.example/x.m3u\nB|http://b.example/y.m3u\n", seedName, seedURL, 1, 0, "", "", nil)
 	if err != nil || len(items) != 2 || items[0].Kind != "live-txt" || items[0].Target != "live" {
 		t.Fatalf("少量 URL 行应逐条 2 条直播，实际 %d/%v/%v", len(items), items, err)
 	}
 
 	// 6. 空 / 纯文字 → 0 条
-	if items, _ := fn(context.Background(), "", seedName, seedURL, 1, 0, "", "", true, nil); len(items) != 0 {
+	if items, _ := fn(context.Background(), "", seedName, seedURL, 1, 0, "", "", nil); len(items) != 0 {
 		t.Fatalf("空内容应 0 条，实际 %d", len(items))
 	}
-	if items, _ := fn(context.Background(), "这个订阅页暂时没有内容", seedName, seedURL, 1, 0, "", "", true, nil); len(items) != 0 {
+	if items, _ := fn(context.Background(), "这个订阅页暂时没有内容", seedName, seedURL, 1, 0, "", "", nil); len(items) != 0 {
 		t.Fatalf("纯文字应 0 条，实际 %d", len(items))
 	}
 }
 
 // discoverFn 取出真实的 discoverContent 方法（类型安全包装）。
-func discoverFn() func(context.Context, string, string, string, int, int, string, string, bool, *hostLimiter) ([]discoveredItem, error) {
+func discoverFn() func(context.Context, string, string, string, int, int, string, string, *hostLimiter) ([]discoveredItem, error) {
 	return new(API).discoverContent
 }
 
@@ -416,7 +429,7 @@ func TestWalkRepoZip(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	items, err := new(API).walkRepoZip(context.Background(), buf.Bytes(), "github.com", "best-fan", "iptv-sources", "https://gh-proxy.org/", "main", "种子", 1, 0, "", false, nil)
+	items, err := new(API).walkRepoZip(context.Background(), buf.Bytes(), "github.com", "best-fan", "iptv-sources", "https://gh-proxy.org/", "main", "种子", 1, 0, "", nil)
 	if err != nil {
 		t.Fatalf("walkRepoZip 不应报错: %v", err)
 	}
@@ -455,7 +468,7 @@ func TestWalkRepoZip(t *testing.T) {
 	gw, _ := zw2.Create("iptv-main/channels.m3u")
 	gw.Write([]byte("#EXTM3U\nhttp://e/c.m3u8\n"))
 	zw2.Close()
-	items2, err := new(API).walkRepoZip(context.Background(), buf2.Bytes(), "gitlab.com", "g", "iptv", "", "main", "gitlab种子", 1, 0, "", false, nil)
+	items2, err := new(API).walkRepoZip(context.Background(), buf2.Bytes(), "gitlab.com", "g", "iptv", "", "main", "gitlab种子", 1, 0, "", nil)
 	if err != nil {
 		t.Fatalf("gitlab walkRepoZip: %v", err)
 	}
@@ -472,7 +485,7 @@ func TestWalkRepoZip(t *testing.T) {
 	ew, _ := zw3.Create("iptv/channels.m3u")
 	ew.Write([]byte("#EXTM3U\nhttp://e/c.m3u8\n"))
 	zw3.Close()
-	items3, err := new(API).walkRepoZip(context.Background(), buf3.Bytes(), "gitee.com", "g", "iptv", "", "master", "gitee种子", 1, 0, "", false, nil)
+	items3, err := new(API).walkRepoZip(context.Background(), buf3.Bytes(), "gitee.com", "g", "iptv", "", "master", "gitee种子", 1, 0, "", nil)
 	if err != nil {
 		t.Fatalf("gitee walkRepoZip: %v", err)
 	}

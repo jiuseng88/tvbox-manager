@@ -296,3 +296,9 @@ textarea { width: 100%; resize: vertical; font-family: Consolas, monospace; }
   .form-row > label { width: 90px; }
   .toolbar select { max-width: 110px; }
 }
+
+/* 自动刮削：可填入的地址类型说明 */
+.scrape-types { margin: 8px 0 0; padding-left: 20px; font-size: 13px; line-height: 1.75; color: var(--text); }
+.scrape-types li { margin: 3px 0; }
+.scrape-types li.muted { color: var(--muted); }
+.scrape-types code { background: #f1f5f9; border-radius: 5px; padding: 1px 6px; font-size: 12px; }

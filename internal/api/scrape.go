@@ -84,7 +84,7 @@ func (a *API) handleScrapeImport(w http.ResponseWriter, r *http.Request) {
 		if seedName == "" {
 			seedName = parser.HostOf(raw)
 		}
-		items, rerr := a.discoverRepo(r.Context(), host, owner, repo, pp, seedName, 1, 0, "", false, nil)
+		items, rerr := a.discoverRepo(r.Context(), host, owner, repo, pp, seedName, 1, 0, "", nil)
 		if rerr != nil {
 			ok(w, map[string]interface{}{"ok": false, "errMsg": rerr.Error()})
 			return
@@ -214,7 +214,7 @@ func (a *API) importEntries(w http.ResponseWriter, req scrapeImportReq, entries 
 type scrapeSeedReq struct {
 	Name    string `json:"name"`
 	URL     string `json:"url"`
-	Type    string `json:"type"` // tvbox（倾向，默认）/ live（倾向）；实际 target 由嗅探决定
+	Type    string `json:"type"` // 已废弃：类型由内容自动识别，传了也只会原样记录，不影响判定
 	Group   string `json:"group"`
 	Enabled *bool  `json:"enabled"`
 	Remark  string `json:"remark"`
@@ -355,6 +355,8 @@ type scrapeSyncStat struct {
 	Seeds      int      `json:"seeds"`      // 启用的种子数
 	Synced     int      `json:"synced"`     // 同步成功的种子数
 	Candidates int      `json:"candidates"` // 新增候选条数
+	Sources    int      `json:"sources"`    // 其中识别为「源」的条数
+	Lives      int      `json:"lives"`      // 其中识别为「直播源」的条数
 	Duplicates int      `json:"duplicates"` // 其中已存在（dup）的条数
 	Errors     []string `json:"errors,omitempty"`
 }
@@ -418,9 +420,11 @@ func (a *API) runScrapeSync(ctx context.Context) *scrapeSyncStat {
 			if it.Target == "live" {
 				exists = a.st.LiveSourceExists(storeURL)
 				liveURLs = append(liveURLs, storeURL)
+				stat.Lives++
 			} else {
 				_, exists = a.st.GetByURL(storeURL)
 				srcURLs = append(srcURLs, storeURL)
+				stat.Sources++
 			}
 			cands = append(cands, model.ScrapeCandidate{
 				SeedID:         sd.ID,
@@ -548,9 +552,9 @@ func parseGitRepo(rawURL string) (host, owner, repo, proxyPrefix string, ok bool
 
 // discoverURL 按 URL 形态分发：受支持 Git 主机仓库根 → 走归档解压遍历；否则原样 raw 拉取解析。
 // 让 discoverSeed 与 expandMulti 都能透明处理“种子/子仓本身是仓库”的情况（Depth 递归）。
-func (a *API) discoverURL(ctx context.Context, rawURL, seedName, baseURLStr string, depth, curDepth int, parentURL, baseFP string, preferLive bool, hl *hostLimiter) ([]discoveredItem, error) {
+func (a *API) discoverURL(ctx context.Context, rawURL, seedName, baseURLStr string, depth, curDepth int, parentURL, baseFP string, hl *hostLimiter) ([]discoveredItem, error) {
 	if host, owner, repo, pp, isRepo := parseGitRepo(rawURL); isRepo {
-		return a.discoverRepo(ctx, host, owner, repo, pp, seedName, depth, curDepth, parentURL, preferLive, hl)
+		return a.discoverRepo(ctx, host, owner, repo, pp, seedName, depth, curDepth, parentURL, hl)
 	}
 	// 只校验 SSRF + HTTP 状态，不预判内容类型：discoverContent 自己会嗅探
 	// m3u/频道表/单仓/多仓/地址列表。用 Fetch 的话 m3u 会先被 JSON 解析判失败。
@@ -558,7 +562,7 @@ func (a *API) discoverURL(ctx context.Context, rawURL, seedName, baseURLStr stri
 	if res.Status != model.StatusOK {
 		return nil, fmt.Errorf("拉取失败: %s", res.Msg)
 	}
-	return a.discoverContent(ctx, string(body), seedName, baseURLStr, depth, curDepth, parentURL, fingerprint(body), preferLive, hl)
+	return a.discoverContent(ctx, string(body), seedName, baseURLStr, depth, curDepth, parentURL, fingerprint(body), hl)
 }
 
 // repoArchiveURL 返回各主机仓库归档包下载地址。
@@ -633,11 +637,11 @@ const gitCloneTimeout = 120 * time.Second
 
 // discoverRepo 拉取 Git 仓库内容发现条目：git 协议优先（git clone --depth 1），
 // 失败（无 git 二进制 / 受限网络 / 私有仓库拒绝）回退各主机归档包解压。
-func (a *API) discoverRepo(ctx context.Context, host, owner, repo, proxyPrefix, seedName string, depth, curDepth int, parentURL string, preferLive bool, hl *hostLimiter) ([]discoveredItem, error) {
+func (a *API) discoverRepo(ctx context.Context, host, owner, repo, proxyPrefix, seedName string, depth, curDepth int, parentURL string, hl *hostLimiter) ([]discoveredItem, error) {
 	// ① git 协议优先：clone 后直接遍历工作树，天然拿到默认分支，raw 候选 URL 更准
 	if dir, branch, gerr := a.gitCloneRepo(ctx, host, owner, repo, proxyPrefix); gerr == nil {
 		defer os.RemoveAll(dir)
-		if items, werr := a.walkRepoDir(ctx, dir, host, owner, repo, proxyPrefix, branch, seedName, depth, curDepth, parentURL, preferLive, hl); werr == nil && len(items) > 0 {
+		if items, werr := a.walkRepoDir(ctx, dir, host, owner, repo, proxyPrefix, branch, seedName, depth, curDepth, parentURL, hl); werr == nil && len(items) > 0 {
 			return items, nil
 		}
 		// 克隆成功但目录内无可识别文件（极少见）→ 继续走归档兜底，给出更明确的报错
@@ -651,7 +655,7 @@ func (a *API) discoverRepo(ctx context.Context, host, owner, repo, proxyPrefix, 
 			lastErr = fmt.Errorf("下载仓库归档失败(%s): %s", branch, res.Msg)
 			continue
 		}
-		items, err := a.walkRepoZip(ctx, body, host, owner, repo, proxyPrefix, branch, seedName, depth, curDepth, parentURL, preferLive, hl)
+		items, err := a.walkRepoZip(ctx, body, host, owner, repo, proxyPrefix, branch, seedName, depth, curDepth, parentURL, hl)
 		if err != nil {
 			lastErr = err
 			continue
@@ -708,7 +712,7 @@ func (a *API) gitCloneRepo(ctx context.Context, host, owner, repo, proxyPrefix s
 
 // walkRepoDir 遍历克隆下来的工作树，对 .m3u/.m3u8/.txt/.json 逐文件复用 discoverContent。
 // 每个文件以各主机 raw 直链作为 baseURLStr，使候选 URL 客户端可直接拉取。
-func (a *API) walkRepoDir(ctx context.Context, root, host, owner, repo, proxyPrefix, branch, seedName string, depth, curDepth int, parentURL string, preferLive bool, hl *hostLimiter) ([]discoveredItem, error) {
+func (a *API) walkRepoDir(ctx context.Context, root, host, owner, repo, proxyPrefix, branch, seedName string, depth, curDepth int, parentURL string, hl *hostLimiter) ([]discoveredItem, error) {
 	var items []discoveredItem
 	processed := 0
 	err := filepath.WalkDir(root, func(p string, d os.DirEntry, err error) error {
@@ -741,7 +745,7 @@ func (a *API) walkRepoDir(ctx context.Context, root, host, owner, repo, proxyPre
 		rel = filepath.ToSlash(rel)
 		rawFileURL := repoRawURL(host, owner, repo, proxyPrefix, branch, rel)
 		fileLabel := seedName + " · " + d.Name()
-		sub, derr := a.discoverContent(ctx, string(b), fileLabel, rawFileURL, depth, curDepth+1, parentURL, fingerprint(b), preferLive, hl)
+		sub, derr := a.discoverContent(ctx, string(b), fileLabel, rawFileURL, depth, curDepth+1, parentURL, fingerprint(b), hl)
 		if derr != nil {
 			return nil // 单个非源文件跳过，不阻断其余文件
 		}
@@ -761,7 +765,7 @@ func (a *API) walkRepoDir(ctx context.Context, root, host, owner, repo, proxyPre
 // 每个文件以各主机 raw 直链作为 baseURLStr，使播放列表/单仓 JSON 的候选 URL
 // 直接可用（TVBox 客户端能拉到，无需经本服务端二次转发）。
 // 顶层目录名各主机不同（github/gitlab 为 repo-branch/，gitee 为 repo/），故动态剥离首层目录。
-func (a *API) walkRepoZip(ctx context.Context, data []byte, host, owner, repo, proxyPrefix, branch, seedName string, depth, curDepth int, parentURL string, preferLive bool, hl *hostLimiter) ([]discoveredItem, error) {
+func (a *API) walkRepoZip(ctx context.Context, data []byte, host, owner, repo, proxyPrefix, branch, seedName string, depth, curDepth int, parentURL string, hl *hostLimiter) ([]discoveredItem, error) {
 	zr, err := zip.NewReader(bytes.NewReader(data), int64(len(data)))
 	if err != nil {
 		return nil, fmt.Errorf("归档解压失败: %v", err)
@@ -807,7 +811,7 @@ func (a *API) walkRepoZip(ctx context.Context, data []byte, host, owner, repo, p
 		}
 		rawFileURL := repoRawURL(host, owner, repo, proxyPrefix, branch, rel)
 		fileLabel := seedName + " · " + base
-		sub, derr := a.discoverContent(ctx, string(b), fileLabel, rawFileURL, depth, curDepth+1, parentURL, fingerprint(b), preferLive, hl)
+		sub, derr := a.discoverContent(ctx, string(b), fileLabel, rawFileURL, depth, curDepth+1, parentURL, fingerprint(b), hl)
 		if derr != nil {
 			continue
 		}
@@ -820,6 +824,7 @@ func (a *API) walkRepoZip(ctx context.Context, data []byte, host, owner, repo, p
 }
 
 // discoverSeed 抓取种子并发现条目（顶层，depth 来自种子配置）。
+// 类型不参与判定：种子只提供深度与名称，源/直播源由内容自动识别。
 func (a *API) discoverSeed(ctx context.Context, seed model.ScrapeSeed, hl *hostLimiter) ([]discoveredItem, string) {
 	depth := seed.Depth
 	if depth <= 0 {
@@ -828,7 +833,7 @@ func (a *API) discoverSeed(ctx context.Context, seed model.ScrapeSeed, hl *hostL
 	if depth > 2 {
 		depth = 2
 	}
-	items, err := a.discoverURL(ctx, seed.URL, seed.Name, seed.URL, depth, 0, "", "", seed.Type == "live", hl)
+	items, err := a.discoverURL(ctx, seed.URL, seed.Name, seed.URL, depth, 0, "", "", hl)
 	if err != nil {
 		return nil, err.Error()
 	}
@@ -836,9 +841,14 @@ func (a *API) discoverSeed(ctx context.Context, seed model.ScrapeSeed, hl *hostL
 }
 
 // discoverContent 内容识别核心（纯文本 → 条目列表）。递归展开多仓时按 depth 预算收敛。
-// 类型自动嗅探：m3u/频道表 → 直播；TVBox 仓库 → 源；地址列表/txt 逐条按 entryTarget 归类；
-// 模糊项按种子意图（preferLive）兜底。不再强依赖用户手标 tvbox/live。
-func (a *API) discoverContent(ctx context.Context, text, seedName, baseURLStr string, depth, curDepth int, parentURL, baseFP string, preferLive bool, hl *hostLimiter) ([]discoveredItem, error) {
+//
+// 类型完全由内容自动识别，不需要用户标注 tvbox/live：
+//   - m3u / 频道表整份 → 一条直播候选
+//   - TVBox 单仓（有 sites）→ 一条源候选
+//   - TVBox 多仓（urls[]）→ 逐条展开：m3u 直链归直播，其余当子仓递归（受 depth 约束）
+//   - lives-only JSON（只有 lives 没有 sites）→ 提取其中的播放列表直链为直播候选
+//   - 地址列表 / txt 行 → 逐条按地址自身形态归类
+func (a *API) discoverContent(ctx context.Context, text, seedName, baseURLStr string, depth, curDepth int, parentURL, baseFP string, hl *hostLimiter) ([]discoveredItem, error) {
 	text = strings.TrimSpace(strings.TrimPrefix(text, "\ufeff"))
 	if text == "" {
 		return nil, fmt.Errorf("内容为空")
@@ -854,47 +864,23 @@ func (a *API) discoverContent(ctx context.Context, text, seedName, baseURLStr st
 
 	cleaned := string(parser.CleanJSON([]byte(text)))
 
-	// 2. TVBox 仓库（含 sites/lives/parses）→ 作为单仓/多仓源候选
+	// 2. TVBox 仓库（含 sites/lives/parses）
 	if typ, detail, err := parser.Parse([]byte(cleaned)); err == nil {
 		switch typ {
 		case model.TypeMulti:
-			if preferLive {
-				// 直播意图下：多仓子地址按 live 意图逐条归类（脚本/接口直链丢弃，仅留播放列表直链），不再当子仓递归展开。
-				items := make([]discoveredItem, 0, len(detail.SubURLs))
-				for _, s := range detail.SubURLs {
-					u := strings.TrimSpace(s.URL)
-					if u == "" {
-						continue
-					}
-					if entryTarget(u, "live") != "live" {
-						continue
-					}
-					items = append(items, discoveredItem{
-						Name: s.Name, URL: u, Target: "live", Kind: "live-json", Depth: curDepth,
-						ParentURL: parentURL, Quality: 60,
-					})
-				}
-				if len(items) > 0 {
-					return items, nil
-				}
-				return nil, fmt.Errorf("多仓直播意图下未识别到播放列表直链")
-			}
+			// 多仓：逐条展开。m3u 直链本身就是播放列表，直接归直播；
+			// 其余当子仓递归（expandMulti 内部判 m3u）
 			return a.expandMulti(ctx, detail.SubURLs, depth, curDepth, baseURLStr, baseFP, hl)
 		case model.TypeSingle:
-			// lives-only 的 JSON 在 live 意图下当作「播放列表集合」提取，而非单仓源
-			if !(preferLive && detail.Sites == 0) {
+			// 有站点 → 单仓源候选。只有 lives 没有 sites 的「lives-only 配置」不是站点源，
+			// 不在这里返回，继续往下按播放列表集合提取（第 3 步）。
+			if detail.Sites > 0 {
 				return []discoveredItem{{
 					Name: seedName, URL: baseURLStr, Target: "source", Kind: "repo-single", Depth: curDepth,
 					ParentURL: parentURL, Quality: qualityFromDetail(detail), Summary: summarizeDetail(detail), FP: baseFP,
 				}}, nil
 			}
 		}
-	}
-
-	// 未识别为仓库时，由种子倾向决定意图（tvbox→source / live→live）
-	intent := "source"
-	if preferLive {
-		intent = "live"
 	}
 
 	// 3. 直播集合 JSON（仅含 lives / 播放列表直链）：提取为直播候选
@@ -913,11 +899,11 @@ func (a *API) discoverContent(ctx context.Context, text, seedName, baseURLStr st
 		}
 	}
 
-	// 4. JSON 地址列表（分享格式 / 数组 / 备份 / 深扫）→ 逐条按意图归类
+	// 4. JSON 地址列表（分享格式 / 数组 / 备份 / 深扫）→ 逐条按地址自身形态归类
 	if parsed, perr := ParseSourceJSON(cleaned); perr == nil && len(parsed.Entries) > 0 {
 		items := make([]discoveredItem, 0, len(parsed.Entries))
 		for _, e := range parsed.Entries {
-			t := entryTarget(e.URL, intent)
+			t := entryTarget(e.URL)
 			if t == "" {
 				continue
 			}
@@ -938,7 +924,7 @@ func (a *API) discoverContent(ctx context.Context, text, seedName, baseURLStr st
 			continue
 		}
 		seen[strings.ToLower(u)] = true
-		t := entryTarget(u, intent)
+		t := entryTarget(u)
 		if t == "" {
 			continue
 		}
@@ -954,22 +940,22 @@ func (a *API) discoverContent(ctx context.Context, text, seedName, baseURLStr st
 	return nil, fmt.Errorf("未识别到任何源地址")
 }
 
-// entryTarget 单条地址归类：脚本/二进制直接丢弃；m3u 类→直播；json/CMS→源；
-// 模糊（.txt/无扩展名/裸域名）按种子意图兜底。返回 "" 表示丢弃。
-func entryTarget(u, intent string) string {
+// entryTarget 单条地址归类，只依据地址自身形态（不再需要用户标注意图）：
+// 脚本/二进制直接丢弃；.m3u/.m3u8 播放列表 → 直播；.json 与 CMS 接口 → 源；
+// 其余（.txt / 裸域名 / 无扩展名）默认当源——它更可能是另一份订阅配置而不是播放列表。
+// 路径判定用 Parse 后的 Path，能容忍 ?token=... 之类的查询串。返回 "" 表示丢弃。
+func entryTarget(u string) string {
 	low := strings.ToLower(strings.TrimSpace(u))
 	for _, bad := range []string{".jar", ".js", ".py", ".apk", ".exe"} {
 		if strings.HasSuffix(low, bad) {
 			return ""
 		}
 	}
-	if strings.HasSuffix(low, ".m3u") || strings.HasSuffix(low, ".m3u8") {
-		return "live"
+	path := low
+	if pu, err := url.Parse(low); err == nil && pu.Path != "" {
+		path = pu.Path
 	}
-	if strings.HasSuffix(low, ".json") || strings.Contains(low, "/api.php") {
-		return "source"
-	}
-	if intent == "live" {
+	if strings.HasSuffix(path, ".m3u") || strings.HasSuffix(path, ".m3u8") {
 		return "live"
 	}
 	return "source"
@@ -986,12 +972,24 @@ func (a *API) expandMulti(ctx context.Context, subURLs []model.SubURL, depth, cu
 		}
 		seen[strings.ToLower(u)] = true
 
+		// 播放列表直链：它本身就是一份 m3u 频道表，不是子仓配置，直接归直播候选
+		switch entryTarget(u) {
+		case "":
+			continue // 脚本/二进制（.js/.jar/.py/.apk/.exe）：不是能订阅的东西
+		case "live":
+			out = append(out, discoveredItem{
+				Name: s.Name, URL: u, Target: "live", Kind: "live-multi", Depth: curDepth + 1,
+				ParentURL: parentURL, Quality: 60,
+			})
+			continue
+		}
+
 		if curDepth+1 < depth {
 			// 受控递归：抓取子仓看是否还是多仓（子仓本身可能是仓库地址，discoverURL 透明处理）
 			if hl != nil {
 				hl.wait(parser.HostOf(u))
 			}
-			child, cerr := a.discoverURL(ctx, u, s.Name, u, depth, curDepth+1, u, "", false, hl)
+			child, cerr := a.discoverURL(ctx, u, s.Name, u, depth, curDepth+1, u, "", hl)
 			if cerr == nil && len(child) > 0 {
 				out = append(out, child...)
 				continue
