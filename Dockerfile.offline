@@ -13,10 +13,12 @@
 FROM alpine:3.20
 
 # 换成国内源，避免 dl-cdn 慢导致构建卡住
+# git 是运行期依赖：刮削 Git 仓库种子时用 `git clone --depth 1` 直接拉内容，
+# 缺了它只能回退到归档下载（codeload zip），私有代理/大仓库会失败。
 RUN sed -i 's|dl-cdn.alpinelinux.org|mirrors.aliyun.com|g' /etc/apk/repositories \
-    && apk add --no-cache ca-certificates tzdata wget \
-    && addgroup -S app && adduser -S app -G app \
-    && mkdir -p /data && chown -R app:app /data
+    && apk add --no-cache ca-certificates tzdata wget git \
+    && addgroup -S app && adduser -S -G app -h /home/app app \
+    && mkdir -p /data /home/app && chown -R app:app /data /home/app
 
 WORKDIR /app
 COPY dist/tvbox-manager ./tvbox-manager
@@ -27,7 +29,8 @@ RUN chmod +x ./tvbox-manager
 ENV TZ=Asia/Shanghai \
     DATA_DIR=/data \
     PORT=8080 \
-    SUB_PATH=/sub
+    SUB_PATH=/sub \
+    HOME=/home/app
 
 USER app
 EXPOSE 8080
