@@ -1,6 +1,7 @@
 package api
 
 import (
+	"context"
 	"crypto/subtle"
 	"encoding/json"
 	"io/fs"
@@ -26,6 +27,10 @@ type API struct {
 	// PastedDir 粘贴单仓配置的本地托管目录（main 注入 data/pasted；空 = 托管未启用）
 	PastedDir string
 
+	// LiveCacheFile 聚合直播频道表的落盘缓存路径（main 注入 data/live_cache.json；
+	// 空 = 不落盘，仅用内存缓存，重启后首次点直播仍要冷拉）。
+	LiveCacheFile string
+
 	// 一键解析直播源的后台任务状态（同一时刻只允许一个，避免重复去打上游）
 	resyncMu sync.Mutex
 	resync   *liveResyncState
@@ -36,7 +41,10 @@ const maxPageSize = 500
 
 // New webFS 必须是「以 web 目录为根」的文件系统（prod: embed 子目录，dev: os.DirFS）。
 func New(st *store.Store, sch *scheduler.Scheduler, version string, webFS fs.FS) *API {
-	return &API{st: st, sch: sch, ver: version, web: webFS}
+	a := &API{st: st, sch: sch, ver: version, web: webFS}
+	// 定时刮削（L3 档）：scheduler 到点回调本实例的同步链路，与手动「同步全部种子」完全一致
+	sch.SetScrapeSync(func(ctx context.Context) { a.runScrapeSync(ctx) })
+	return a
 }
 
 // DevMode 开发模式：前端资源不走缓存，便于改完刷新浏览器立即看到效果。
@@ -66,6 +74,18 @@ func (a *API) Router() http.Handler {
 	apiMux.HandleFunc("GET /api/sources/{id}/config", a.handleSourceConfig)
 	apiMux.HandleFunc("POST /api/sources/{id}/check", a.handleCheckOne)
 	apiMux.HandleFunc("GET /api/groups", a.handleGroups)
+
+	// 自动刮削（A-06）：手动收录 + 种子同步 + 候选确认，全部围绕源地址本身
+	apiMux.HandleFunc("POST /api/scrape/import", a.handleScrapeImport)
+	apiMux.HandleFunc("GET /api/scrape/seeds", a.handleScrapeSeedList)
+	apiMux.HandleFunc("POST /api/scrape/seeds", a.handleScrapeSeedAdd)
+	apiMux.HandleFunc("PUT /api/scrape/seeds/{id}", a.handleScrapeSeedUpdate)
+	apiMux.HandleFunc("DELETE /api/scrape/seeds/{id}", a.handleScrapeSeedDelete)
+	apiMux.HandleFunc("POST /api/scrape/sync", a.handleScrapeSync)
+	apiMux.HandleFunc("POST /api/scrape/seeds/{id}/sync", a.handleScrapeSeedSync)
+	apiMux.HandleFunc("GET /api/scrape/candidates", a.handleScrapeCandidates)
+	apiMux.HandleFunc("GET /api/scrape/applied", a.handleScrapeApplied)
+	apiMux.HandleFunc("POST /api/scrape/apply", a.handleScrapeApply)
 
 	// 站点源（平铺层，订阅接口的数据来源）
 	apiMux.HandleFunc("GET /api/flats", a.handleFlatList)
@@ -137,6 +157,8 @@ func (a *API) Router() http.Handler {
 	root.Handle("GET /tvapi/media", a.tvGuard(http.HandlerFunc(a.handleTVMedia)))
 	// 直播频道表：从平铺源 lives[] 聚合 m3u/txt 播放列表，解析合并后下发
 	root.Handle("GET /tvapi/live", a.tvGuard(http.HandlerFunc(a.handleTVLive)))
+	// 强制刷新频道表（忽略缓存，实时重拉上游）：直播页「刷新频道」按钮
+	root.Handle("POST /tvapi/live/refresh", a.tvGuard(http.HandlerFunc(a.handleTVLiveRefresh)))
 
 	// 静态资源（前端 SPA，go:embed 注入）；不限定方法，避免与 /api/ 子树模式冲突
 	root.Handle("/", a.spaHandler())

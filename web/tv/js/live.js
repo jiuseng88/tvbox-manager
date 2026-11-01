@@ -18,7 +18,9 @@
         groups: [],
         sources: [],
         group: '',
+        srcFilter: '', // 按直播源筛选：空=全部，其余=来源名
         keyword: '',
+        statFlash: '', // 临时状态文案（刷新成功后短暂提示）
         cur: null,
         line: 0,
         hls: null,
@@ -31,7 +33,9 @@
     var el = {
         stat: document.getElementById('liveStat'),
         search: document.getElementById('chSearch'),
+        refreshBtn: document.getElementById('refreshBtn'),
         groupList: document.getElementById('groupList'),
+        srcFilter: document.getElementById('srcFilter'),
         chanList: document.getElementById('chanList'),
         chanCount: document.getElementById('chanCount'),
         chanPaneTitle: document.getElementById('chanPaneTitle'),
@@ -75,6 +79,73 @@
 
     // ---- 加载频道表 ----
 
+    // hasLines 频道是否有可播线路。后端已过滤一遍，这里再兜一层：
+    // 旧版本落盘缓存、或源里写了空地址时，不该把「点开必失败」的频道摆出来。
+    function hasLines(ch) {
+        var urls = ch && ch.urls;
+        if (!Array.isArray(urls)) return false;
+        for (var i = 0; i < urls.length; i++) {
+            if (urls[i] && String(urls[i]).trim()) return true;
+        }
+        return false;
+    }
+
+    // applyData 应用一次频道表响应。只保留有线路的频道，下游（分组计数、来源筛选、
+    // 统计、列表）全部基于过滤后的集合，口径自然一致。
+    // keepView=true 用于「刷新频道」：尽量沿用用户当前的分组/来源/搜索。
+    function applyData(data, keepView) {
+        var list = Array.isArray(data && data.channels) ? data.channels : [];
+        state.channels = list.filter(hasLines);
+        state.groups = Array.isArray(data && data.groups) ? data.groups : [];
+        state.sources = Array.isArray(data && data.sources) ? data.sources : [];
+
+        if (!state.channels.length) {
+            state.group = '';
+            showTip(emptyHint(), false);
+            renderStat();
+            renderSourceFilter();
+            renderGroups();
+            renderChannels();
+            return 0;
+        }
+        hideTip();
+
+        if (!keepView) {
+            state.srcFilter = '';
+            state.keyword = '';
+            if (el.search) el.search.value = '';
+            state.group = firstGroupWithChannels();
+        } else {
+            // 刷新后原来的分组可能已经没有频道（源下线/改名），回退到第一个有内容的分组
+            if (state.group && !groupHasChannels(state.group)) {
+                state.group = firstGroupWithChannels();
+            }
+        }
+
+        renderStat();
+        renderSourceFilter();
+        renderGroups();
+        renderChannels();
+        return state.channels.length;
+    }
+
+    // firstGroupWithChannels 第一个还有频道的分组。后端 groups 已按展示权重排好序，
+    // 直接沿用它的顺序，跳过刷新后变空的分组，避免进页面就是空白列表。
+    function firstGroupWithChannels() {
+        var counts = groupCounts();
+        for (var i = 0; i < state.groups.length; i++) {
+            if (counts[state.groups[i]]) return state.groups[i];
+        }
+        return state.groups[0] || '';
+    }
+
+    function groupHasChannels(g) {
+        for (var i = 0; i < state.channels.length; i++) {
+            if (state.channels[i].group === g) return true;
+        }
+        return false;
+    }
+
     function load() {
         showTip('正在加载频道…', true);
         fetch(LIVE_URL, { cache: 'no-store' })
@@ -83,22 +154,7 @@
                 return r.json();
             })
             .then(function (body) {
-                var data = (body && body.data) || {};
-                state.channels = Array.isArray(data.channels) ? data.channels : [];
-                state.groups = Array.isArray(data.groups) ? data.groups : [];
-                state.sources = Array.isArray(data.sources) ? data.sources : [];
-                if (!state.channels.length) {
-                    showTip(emptyHint(), false);
-                    renderGroups();
-                    renderChannels();
-                    renderStat();
-                    return;
-                }
-                hideTip();
-                state.group = state.groups[0] || '';
-                renderStat();
-                renderGroups();
-                renderChannels();
+                applyData((body && body.data) || {}, false);
                 restoreLast();
             })
             .catch(function (err) {
@@ -122,27 +178,50 @@
     }
 
     function renderStat() {
+        if (state.statFlash) {
+            el.stat.textContent = state.statFlash;
+            return;
+        }
         var ok = state.sources.filter(function (s) { return s.ok; }).length;
         var txt = '共 ' + state.channels.length + ' 个频道';
         if (state.sources.length) txt += ' · ' + ok + '/' + state.sources.length + ' 个直播源';
         el.stat.textContent = txt;
     }
 
+    // statFlash 短暂替换顶栏统计文案（如刷新成功提示），几秒后自动复原。
+    var statFlashTimer = null;
+    function flashStat(txt) {
+        state.statFlash = txt;
+        renderStat();
+        clearTimeout(statFlashTimer);
+        statFlashTimer = setTimeout(function () {
+            state.statFlash = '';
+            renderStat();
+        }, 2600);
+    }
+
     // ---- 分组 ----
 
     function groupCounts() {
         var map = Object.create(null);
-        state.channels.forEach(function (ch) { map[ch.group] = (map[ch.group] || 0) + 1; });
+        state.channels.forEach(function (ch) {
+            if (state.srcFilter && chanSources(ch).indexOf(state.srcFilter) < 0) return;
+            map[ch.group] = (map[ch.group] || 0) + 1;
+        });
         return map;
     }
 
     function renderGroups() {
         var counts = groupCounts();
+        var total = 0;
+        state.groups.forEach(function (g) { total += counts[g] || 0; });
         var frag = document.createDocumentFragment();
 
-        frag.appendChild(groupItem('', '全部频道', state.channels.length));
+        frag.appendChild(groupItem('', '全部频道', total));
         state.groups.forEach(function (g) {
-            frag.appendChild(groupItem(g, g, counts[g] || 0));
+            var n = counts[g] || 0;
+            if (!n) return; // 没有频道的分组不占位（筛选某个来源后尤其明显）
+            frag.appendChild(groupItem(g, g, n));
         });
 
         el.groupList.textContent = '';
@@ -168,21 +247,69 @@
         return d;
     }
 
+    // ---- 直播源筛选 ----
+
+    // sourceCounts 从频道里聚合出每个来源的频道数。
+    // 用频道聚合而不是 state.sources：筛选项一定能命中，且失败/空表源不会占位。
+    // 后端下发前已把重名源唯一化（同名追加 #2、#3），所以这里的 key 与直播源条目一一对应。
+    function sourceCounts() {
+        var map = Object.create(null);
+        state.channels.forEach(function (ch) {
+            chanSources(ch).forEach(function (s) {
+                if (s) map[s] = (map[s] || 0) + 1;
+            });
+        });
+        return map;
+    }
+
+    function renderSourceFilter() {
+        if (!el.srcFilter) return;
+        var counts = sourceCounts();
+        var names = Object.keys(counts).sort(function (a, b) { return a.localeCompare(b); });
+        if (state.srcFilter && names.indexOf(state.srcFilter) < 0) {
+            state.srcFilter = ''; // 源已不存在（删除/改名/本次没拉到频道），回退全部
+        }
+        el.srcFilter.textContent = '';
+        var all = document.createElement('option');
+        all.value = '';
+        all.textContent = '全部直播源（' + names.length + '）';
+        el.srcFilter.appendChild(all);
+        names.forEach(function (n) {
+            var o = document.createElement('option');
+            o.value = n;
+            o.textContent = n + '（' + counts[n] + '）';
+            o.title = n + ' · ' + counts[n] + ' 个频道';
+            el.srcFilter.appendChild(o);
+        });
+        el.srcFilter.value = state.srcFilter;
+        // 下拉只列「本次真正拉到频道」的源，与管理端的直播源条目数天然不同
+        // （失败 / 空表 / 已停用的源不会有频道），悬停说明口径避免误判。
+        el.srcFilter.title = state.sources.length
+            ? '共 ' + state.sources.length + ' 条直播源参与聚合，其中 ' + names.length + ' 条本次拉到频道'
+            : '按直播源筛选频道';
+    }
+
     // ---- 频道列表 ----
 
     function renderChannels() {
         var kw = state.keyword.trim().toLowerCase();
         var list = state.channels.filter(function (ch) {
             if (state.group && ch.group !== state.group) return false;
+            if (state.srcFilter && chanSources(ch).indexOf(state.srcFilter) < 0) return false;
             if (kw && ch.name.toLowerCase().indexOf(kw) < 0) return false;
             return true;
         });
 
-        el.chanPaneTitle.textContent = state.group || '全部频道';
+        var title = state.group || '全部频道';
+        if (state.srcFilter) title = '来源 ' + state.srcFilter + ' · ' + title;
+        el.chanPaneTitle.textContent = title;
         el.chanCount.textContent = list.length + ' 个';
 
         if (!list.length) {
-            el.chanList.innerHTML = '<div class="empty">这个分组下没有匹配的频道</div>';
+            var hint = state.srcFilter
+                ? '来源「' + state.srcFilter + '」在「' + (state.group || '全部频道') + '」下没有频道，换个分组或来源试试'
+                : '这个分组下没有匹配的频道';
+            el.chanList.innerHTML = '<div class="empty">' + esc(hint) + '</div>';
             return;
         }
 
@@ -199,6 +326,12 @@
 
         el.chanList.textContent = '';
         el.chanList.appendChild(frag);
+    }
+
+    // chanSources 频道的全部来源名：优先用后端合并的 sources[]，回退旧字段 source。
+    function chanSources(ch) {
+        if (Array.isArray(ch.sources) && ch.sources.length) return ch.sources;
+        return ch.source ? [ch.source] : [];
     }
 
     function chanItem(ch) {
@@ -224,6 +357,20 @@
         n.className = 'chan-name';
         n.textContent = ch.name;
         d.appendChild(n);
+
+        // 来源标签：让用户能看出频道来自哪个直播源（改过名的源也能核对）。
+        var srcs = chanSources(ch);
+        // 正按某源筛选时，把该源排到最前，标签与筛选条件一致
+        if (state.srcFilter && srcs.indexOf(state.srcFilter) >= 0) {
+            srcs = [state.srcFilter].concat(srcs.filter(function (s) { return s !== state.srcFilter; }));
+        }
+        if (srcs.length) {
+            var s = document.createElement('span');
+            s.className = 'chan-src';
+            s.textContent = srcs.length > 1 ? srcs[0] + ' +' + (srcs.length - 1) : srcs[0];
+            s.title = '来源：' + srcs.join('、');
+            d.appendChild(s);
+        }
 
         if (ch.urls.length > 1) {
             var l = document.createElement('span');
@@ -414,7 +561,12 @@
         el.nowName.textContent = ch.name;
         var bits = [];
         if (ch.group) bits.push(ch.group);
-        if (ch.source) bits.push('来源 ' + ch.source);
+        var srcs = chanSources(ch);
+        if (srcs.length) {
+            var label = srcs.slice(0, 3).join('、');
+            if (srcs.length > 3) label += ' 等 ' + srcs.length + ' 个源';
+            bits.push('来源 ' + label);
+        }
         bits.push((ch.urls || []).length + ' 条线路');
         el.nowSrc.textContent = bits.join(' · ');
 
@@ -481,6 +633,57 @@
             renderChannels();
         }, 180);
     });
+
+    if (el.srcFilter) {
+        el.srcFilter.addEventListener('change', function () {
+            state.srcFilter = el.srcFilter.value || '';
+            // 切源后当前分组可能一个频道都没有，顺带跳到第一个有内容的分组
+            if (state.group && !groupHasChannels(state.group)) {
+                var counts = groupCounts();
+                if (!counts[state.group]) state.group = firstGroupWithChannels();
+            }
+            renderGroups();   // 分组计数跟随来源筛选
+            renderChannels();
+        });
+    }
+
+    // ---- 刷新频道 ----
+
+    // refreshing 挡住连点：一次刷新要重拉几十个上游，重复触发只会互相排队。
+    var refreshing = false;
+
+    function refreshChannels() {
+        if (refreshing) return;
+        refreshing = true;
+        if (el.refreshBtn) {
+            el.refreshBtn.disabled = true;
+            el.refreshBtn.classList.add('busy');
+        }
+        showTip('正在刷新频道…<br>重新拉取所有直播源，通常需要几秒', true);
+        fetch(LIVE_URL + '/refresh', { method: 'POST', cache: 'no-store' })
+            .then(function (r) {
+                if (!r.ok) throw new Error('HTTP ' + r.status);
+                return r.json();
+            })
+            .then(function (body) {
+                var n = applyData((body && body.data) || {}, true);
+                if (n) flashStat('已刷新 · ' + n + ' 个频道');
+            })
+            .catch(function (err) {
+                showTip('刷新失败：' + esc(err.message) + '<br>稍后重试，或检查管理端的直播源状态。', false);
+            })
+            .then(function () {
+                refreshing = false;
+                if (el.refreshBtn) {
+                    el.refreshBtn.disabled = false;
+                    el.refreshBtn.classList.remove('busy');
+                }
+            });
+    }
+
+    if (el.refreshBtn) {
+        el.refreshBtn.addEventListener('click', refreshChannels);
+    }
 
     window.addEventListener('beforeunload', stopEngine);
 

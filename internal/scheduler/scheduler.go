@@ -14,6 +14,7 @@ import (
 )
 
 // Scheduler 定时探活调度：定时全量、手动触发、进度上报、自动禁用、子仓递归探活。
+// 同时承载「自动刮削定时同步」：到点回调 api 注册的同步函数（scheduler 不感知刮削细节）。
 type Scheduler struct {
 	st *store.Store
 
@@ -28,6 +29,11 @@ type Scheduler struct {
 	timer *time.Timer
 	stop  chan struct{}
 	done  chan struct{}
+
+	// 定时刮削同步（L3 档）：可注册一个回调，按 cfg.ScrapeIntervalHours 周期触发
+	scrapeMu    sync.Mutex
+	scrapeFn    func(ctx context.Context)
+	scrapeTimer *time.Timer
 
 	progMu sync.RWMutex
 	prog   model.CheckProgress
@@ -45,6 +51,7 @@ func Start(st *store.Store, cfg *model.Config) *Scheduler {
 	s.client = func() *checker.Checker { return s.ck }
 	interval := s.interval()
 	s.timer = time.NewTimer(interval)
+	s.scrapeTimer = time.NewTimer(s.scrapeInterval())
 	s.setNextRun(time.Now().Add(interval))
 	go s.loop()
 	if cfg.StartupCheck {
@@ -73,9 +80,51 @@ func (s *Scheduler) interval() time.Duration {
 	return time.Duration(mins) * time.Minute
 }
 
+// scrapeInterval 定时刮削间隔：0 = 关闭（退化为超长间隔，永不触发）。
+// 注意 Reload 不会关停既有 timer，禁用时旧 timer 剩余时间到期后按新间隔（超长）重置，等效关闭。
+func (s *Scheduler) scrapeInterval() time.Duration {
+	s.cfgMu.RLock()
+	defer s.cfgMu.RUnlock()
+	hrs := s.cfg.ScrapeIntervalHours
+	if hrs <= 0 {
+		return 365 * 24 * time.Hour
+	}
+	if hrs > 8760 {
+		hrs = 8760
+	}
+	return time.Duration(hrs) * time.Hour
+}
+
+// SetScrapeSync 注册自动刮削定时同步回调（api 在 New 时调用；可随时替换）
+func (s *Scheduler) SetScrapeSync(fn func(ctx context.Context)) {
+	s.scrapeMu.Lock()
+	s.scrapeFn = fn
+	s.scrapeMu.Unlock()
+}
+
+// runScrapeSync 到点执行一次刮削同步（超时 10 分钟 + panic 隔离）
+func (s *Scheduler) runScrapeSync() {
+	s.scrapeMu.Lock()
+	fn := s.scrapeFn
+	s.scrapeMu.Unlock()
+	if fn == nil {
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
+	defer cancel()
+	defer func() {
+		if r := recover(); r != nil {
+			log.Printf("[scheduler] 定时刮削同步 panic（已隔离）: %v", r)
+		}
+	}()
+	log.Printf("[scheduler] 定时刮削同步开始")
+	fn(ctx)
+}
+
 func (s *Scheduler) loop() {
 	defer close(s.done)
-	timer := s.timer // 本地引用，避免与 Shutdown/Reload 竞态
+	timer := s.timer          // 本地引用，避免与 Shutdown/Reload 竞态
+	scrapeTimer := s.scrapeTimer
 	for {
 		select {
 		case <-timer.C:
@@ -84,8 +133,12 @@ func (s *Scheduler) loop() {
 			timer.Reset(s.interval())
 			s.mu.Unlock()
 			s.setNextRun(time.Now().Add(s.interval()))
+		case <-scrapeTimer.C:
+			s.runScrapeSync()
+			scrapeTimer.Reset(s.scrapeInterval())
 		case <-s.stop:
 			timer.Stop()
+			scrapeTimer.Stop()
 			return
 		}
 	}
@@ -105,6 +158,13 @@ func (s *Scheduler) Reload(cfg *model.Config) {
 		}
 	}
 	s.timer.Reset(s.interval())
+	if s.scrapeTimer != nil && !s.scrapeTimer.Stop() {
+		select {
+		case <-s.scrapeTimer.C:
+		default:
+		}
+	}
+	s.scrapeTimer.Reset(s.scrapeInterval())
 	s.mu.Unlock()
 	s.setNextRun(time.Now().Add(s.interval()))
 }

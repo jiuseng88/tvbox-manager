@@ -228,8 +228,15 @@ func filterLive(in []model.LiveSource, f LiveFilter) []model.LiveSource {
 				continue
 			}
 		}
-		if f.Origin != "" && f.Origin != "all" && x.Origin != f.Origin {
-			continue
+		if f.Origin != "" && f.Origin != "all" {
+			if f.Origin == "scraped" {
+				// 订阅刮削来源：手动桶里带 seedId 的条目（与纯手动添加区分）
+				if x.Origin != model.LiveOriginManual || x.SeedID == "" {
+					continue
+				}
+			} else if x.Origin != f.Origin {
+				continue
+			}
 		}
 		out = append(out, x)
 	}

@@ -18,7 +18,7 @@ FROM alpine:3.20
 
 # 换成国内源，避免 dl-cdn 慢导致构建卡住（该配置会固化进镜像）
 RUN sed -i 's|dl-cdn.alpinelinux.org|mirrors.aliyun.com|g' /etc/apk/repositories \
-    && apk add --no-cache ca-certificates tzdata wget \
+    && apk add --no-cache ca-certificates tzdata wget git \
     && addgroup -S app && adduser -S app -G app \
     && mkdir -p /data && chown -R app:app /data
 

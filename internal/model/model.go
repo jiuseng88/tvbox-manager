@@ -41,6 +41,12 @@ type Source struct {
 	CreatedAt time.Time `json:"createdAt"`
 	UpdatedAt time.Time `json:"updatedAt"`
 
+	// —— 溯源（仅刮削导入的源有值，手工/托管源为空）——
+	SeedID         string     `json:"seedId,omitempty"`        // 来自哪个刮削种子
+	DiscoveredAt   *time.Time `json:"discoveredAt,omitempty"`  // 发现时间
+	UpstreamFP     string     `json:"upstreamFp,omitempty"`    // 上游内容指纹（sha1）
+	UpstreamRemoved bool      `json:"upstreamRemoved,omitempty"` // 上游已移除（漂移），仅标记不自动删除
+
 	// —— 探活结果 ——
 	LastCheckAt *time.Time `json:"lastCheckAt,omitempty"`
 	Status      string     `json:"status"` // ok / fail / unknown / checking
@@ -151,6 +157,11 @@ type Data struct {
 	Sources     []Source     `json:"sources"`
 	Flats       []FlatSource `json:"flats,omitempty"`       // 平铺站点源（由 Sources 自动同步生成）
 	LiveSources []LiveSource `json:"liveSources,omitempty"` // 直播源（auto 由 lives[] 同步 / manual 手动添加）
+
+	// 自动刮削（A-06）：种子清单与候选区。刮削结果先入候选（pending），
+	// 用户确认后才导入为源；不自动入库、不自动删除。
+	ScrapeSeeds      []ScrapeSeed      `json:"scrapeSeeds,omitempty"`
+	ScrapeCandidates []ScrapeCandidate `json:"scrapeCandidates,omitempty"`
 }
 
 // Config 系统配置（config.json），全部可通过环境变量覆盖初值
@@ -169,6 +180,14 @@ type Config struct {
 	// 关闭后菜单项隐藏，且直接访问路径返回 404——不是"隐藏入口"，是真的关掉。
 	// 注意零值为 false，默认值必须由 DefaultConfig 显式给 true，缺字段的老配置才能保持开启。
 	ShowTV bool `json:"showTv"`
+	// ScrapeIntervalHours 自动刮削定时同步间隔（小时）：0 = 关闭；>0 = 每隔 N 小时同步一次种子。
+	// 定时同步与手动「同步全部种子」同一条链路：拉取 → 识别 → 候选区（不自动入库）。
+	ScrapeIntervalHours int `json:"scrapeIntervalHours,omitempty"`
+	// AllowLoopbackFetch 允许访问本机回环地址（127.0.0.1 / localhost / ::1）。
+	// 默认关闭：SSRF 防护需要挡住「把本服务当跳板探内网」。但用户常把 TVBox 客户端自带的
+	// 本地接口（如 http://127.0.0.1:9978/...）直接填成源，这类地址只在本机有意义，
+	// 故提供一个显式开关。开启后也只放行回环，内网网段仍然拦截。
+	AllowLoopbackFetch bool `json:"allowLoopbackFetch,omitempty"`
 }
 
 // CheckProgress 探活任务进度
@@ -239,6 +258,8 @@ func DefaultConfig() Config {
 		CheckSubURLs: false,
 		// /tv 看片页默认开放（保持升级前行为）；后台「设置」可关闭，关闭后菜单与路径一并失效
 		ShowTV: true,
+		// 本机回环默认不放行（SSRF 防护优先）；需要在「设置」显式打开才能用 127.0.0.1 的本地源
+		AllowLoopbackFetch: false,
 	}
 }
 
@@ -276,6 +297,12 @@ type LiveSource struct {
 	CreatedAt time.Time `json:"createdAt"`
 	UpdatedAt time.Time `json:"updatedAt"`
 
+	// —— 溯源（仅刮削导入的直播源有值）——
+	SeedID         string     `json:"seedId,omitempty"`
+	DiscoveredAt   *time.Time `json:"discoveredAt,omitempty"`
+	UpstreamFP     string     `json:"upstreamFp,omitempty"`
+	UpstreamRemoved bool      `json:"upstreamRemoved,omitempty"`
+
 	// —— 检测结果 ——
 	LastCheckAt *time.Time `json:"lastCheckAt,omitempty"`
 	Status      string     `json:"status"` // ok / fail / unknown / checking
@@ -296,4 +323,60 @@ type LiveSource struct {
 
 	// —— 运行时字段（列表查询回填，不落盘）——
 	ParentNames []string `json:"parentNames,omitempty"` // auto 源来自哪些父源（名称）
+}
+
+// ScrapeSeed 自动刮削种子：一条可定期同步的公开订阅源地址。
+// 来源仅限用户主动添加（源集合站点 / 公开仓库直链），不做全网自动发现。
+type ScrapeSeed struct {
+	ID   string `json:"id"`
+	Name string `json:"name"`
+	URL  string `json:"url"` // 归一化后唯一
+	// Type 已废弃（Deprecated）：类型不再由用户选择，发现引擎按内容自动识别
+	// （m3u 播放列表 → 直播源；含 sites 的仓库 → 源；多仓 urls[] 逐条归类）。
+	// 字段仅保留以兼容旧数据与旧版 API，读写都不再影响任何分支。
+	Type    string `json:"type,omitempty"`
+	Group   string `json:"group"`
+	Enabled bool   `json:"enabled"` // 是否参与同步
+	Remark  string `json:"remark,omitempty"`
+	// Depth 受控递归深度：1 = 仅展开种子自身的 urls[]（默认，兼容旧行为）；
+	// 2 = 子仓若是多仓继续展开一层。0 视为 1。上限 2。
+	Depth int `json:"depth,omitempty"`
+
+	CreatedAt time.Time `json:"createdAt"`
+
+	// —— 最近一次同步结果 ——
+	LastSyncAt  *time.Time `json:"lastSyncAt,omitempty"`
+	LastSyncMsg string     `json:"lastSyncMsg,omitempty"`
+}
+
+// ScrapeCandidate 刮削候选：同步后等待用户确认的条目。
+// 语义：先候选后确认——候选不自动入库；apply 后按结果标记 applied/skipped。
+//
+// 稳定键：ID 由 (SeedID + 归一化URL) 派生，而非随机。这样同一来源+同一地址的候选
+// 在多次同步间保持同一条记录，已确认状态（applied/skipped）不被整批覆盖，且能识别
+// 「上游已移除」（drift）：本次同步发现集里不再出现、但此前已 applied 的候选会被标记
+// upstreamStatus=removed，不自动删除，进入复核。
+type ScrapeCandidate struct {
+	ID       string `json:"id"` // 由 (SeedID + 归一化URL) 派生，稳定可重入
+	SeedID   string `json:"seedId,omitempty"`
+	SeedName string `json:"seedName,omitempty"`
+	Name     string `json:"name"`
+	URL      string `json:"url"` // 归一化后
+	// Target 候选去向：source（导入源列表）/ live（导入直播源列表）。由发现引擎嗅探决定。
+	Target  string `json:"target,omitempty"`
+	Kind    string `json:"kind,omitempty"` // repo-single / repo-multi / urls / array / txt / playlist / live-json / live-txt
+	Dup     bool   `json:"dup"`            // 已存在于现有源（同步时标记，不重复入库）
+	Status  string `json:"status"`         // pending / applied / skipped
+	FetchedAt time.Time `json:"fetchedAt"`
+
+	// —— 重建后新增（均 omitempty，向后兼容旧数据）——
+	DiscoveredDepth int        `json:"discoveredDepth,omitempty"` // 发现深度：0=种子自身内容，1+=递归层级
+	ParentURL      string     `json:"parentUrl,omitempty"`       // 递归展开时的父地址（多仓子仓的上级）
+	Origin         string     `json:"origin,omitempty"`          // 仓库内相对路径（如 live/iptv/cn.m3u），定位多层级目录来源
+	Quality        int        `json:"quality,omitempty"`        // 质量分 0~100：可达/结构/丰富/新鲜，仅排序，不阻断导入
+	Summary        string     `json:"summary,omitempty"`        // 富集摘要：如 "12 站点" / "800 频道"
+	FP             string     `json:"fp,omitempty"`             // 上游内容指纹（sha1），用于内容级漂移
+	UpstreamStatus string     `json:"upstreamStatus,omitempty"` // present / removed / ""（未比对）
+	LastSeenAt     time.Time  `json:"lastSeenAt,omitempty"`     // 最近一次同步仍在发现集
+	AppliedAt      *time.Time `json:"appliedAt,omitempty"`      // 被 apply 的时间
 }

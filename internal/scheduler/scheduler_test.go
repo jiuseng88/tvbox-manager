@@ -1,13 +1,62 @@
 package scheduler
 
 import (
+	"context"
 	"net/http"
 	"net/http/httptest"
 	"testing"
+	"time"
 
 	"tvbox-manager/internal/model"
 	"tvbox-manager/internal/store"
 )
+
+// 定时刮削回调：注册后可直接调用（不触发真实定时器与网络）
+func TestScrapeSyncCallback(t *testing.T) {
+	st, err := store.New(t.TempDir())
+	if err != nil {
+		t.Fatalf("store.New 失败: %v", err)
+	}
+	cfg := model.DefaultConfig()
+	cfg.CheckIntervalMinutes = 600
+	sch := Start(st, &cfg)
+	defer sch.Shutdown()
+
+	called := false
+	sch.SetScrapeSync(func(ctx context.Context) { called = true })
+
+	sch.scrapeMu.Lock()
+	fn := sch.scrapeFn
+	sch.scrapeMu.Unlock()
+	if fn == nil {
+		t.Fatal("回调未注册")
+	}
+	fn(context.Background())
+	if !called {
+		t.Fatal("回调未被调用")
+	}
+}
+
+// scrapeInterval：0 = 关闭（超长间隔），>0 = 按小时
+func TestScrapeInterval(t *testing.T) {
+	st, err := store.New(t.TempDir())
+	if err != nil {
+		t.Fatalf("store.New 失败: %v", err)
+	}
+	cfg := model.DefaultConfig()
+	cfg.ScrapeIntervalHours = 0
+	sch := Start(st, &cfg)
+	defer sch.Shutdown()
+	if d := sch.scrapeInterval(); d != 365*24*time.Hour {
+		t.Fatalf("0 小时应为关闭（超长间隔），实际 %v", d)
+	}
+
+	cfg.ScrapeIntervalHours = 6
+	sch.Reload(&cfg)
+	if d := sch.scrapeInterval(); d != 6*time.Hour {
+		t.Fatalf("6 小时应返回 6h，实际 %v", d)
+	}
+}
 
 // 连续失败 N 次自动禁用：父源与站点源同口径（站点源同地址复用父源本轮结果）
 func TestAutoDisableAfterConsecutiveFails(t *testing.T) {

@@ -37,12 +37,27 @@ func (a *API) handleConfigPut(w http.ResponseWriter, r *http.Request) {
 		badRequest(w, "请求体解析失败: "+err.Error())
 		return
 	}
-	// showTv 缺键视为「不改动」：不必让每个调用方都跟进新字段。
-	// 否则按旧字段集 PUT 的脚本会因 bool 零值把看片页静默关掉。
+	// 缺键视为「不改动」：不必让每个调用方都跟进新字段。
+	// 否则按旧字段集 PUT 的脚本（如「只改令牌」）会因 bool/int 零值把看片页关掉、
+	// 把定时刮削间隔清成 0，功能静默失效。
 	var probe map[string]json.RawMessage
+	hasKey := func(k string) bool {
+		if probe == nil {
+			return true // 解析不出键集就按老行为（全量覆盖），不静默改语义
+		}
+		_, found := probe[k]
+		return found
+	}
 	if json.Unmarshal(raw, &probe) == nil {
-		if _, has := probe["showTv"]; !has {
-			req.ShowTV = a.st.Config().ShowTV
+		old := a.st.Config()
+		if !hasKey("showTv") {
+			req.ShowTV = old.ShowTV
+		}
+		if !hasKey("allowLoopbackFetch") {
+			req.AllowLoopbackFetch = old.AllowLoopbackFetch
+		}
+		if !hasKey("scrapeIntervalHours") {
+			req.ScrapeIntervalHours = old.ScrapeIntervalHours
 		}
 	}
 	if req.CheckIntervalMinutes <= 0 {
@@ -55,6 +70,10 @@ func (a *API) handleConfigPut(w http.ResponseWriter, r *http.Request) {
 	}
 	if req.CheckConcurrency <= 0 || req.CheckConcurrency > 100 {
 		badRequest(w, "并发数需在 1-100 之间")
+		return
+	}
+	if req.ScrapeIntervalHours < 0 || req.ScrapeIntervalHours > 8760 {
+		badRequest(w, "刮削同步间隔需在 0-8760 小时之间（0 = 关闭）")
 		return
 	}
 	if req.Port <= 0 || req.Port > 65535 {

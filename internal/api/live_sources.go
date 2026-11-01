@@ -25,6 +25,33 @@ import (
 // 全量频道探测能准，但一个大源上千频道、几十个源就是几万个请求，必然触发上游限流，
 // 所以只保留「抽样」这一档，不做定时全量。
 
+// allowLoopback 当前配置是否放行本机回环地址。
+// 场景：用户把 TVBox 客户端自带的本地接口（http://127.0.0.1:9978/...）当源。
+// 内网网段不受此开关影响，始终拦截。
+func (a *API) allowLoopback() bool {
+	if ck := a.checker(); ck != nil {
+		return ck.AllowLoopback()
+	}
+	return false
+}
+
+// guardHost SSRF 校验：按配置放行本机回环。scheduler 未初始化时（零值 API，仅测试用）
+// 退化为严格模式，避免 nil 解引用。
+func (a *API) guardHost(host string) error {
+	if ck := a.checker(); ck != nil {
+		return ck.GuardHost(host)
+	}
+	return checker.RejectPrivateHost(host)
+}
+
+// checker 取当前探活器，未初始化返回 nil
+func (a *API) checker() *checker.Checker {
+	if a.sch == nil {
+		return nil
+	}
+	return a.sch.Checker()
+}
+
 const (
 	liveSampleLimit  = 20              // 每源抽样频道数
 	liveProbeWorkers = 8               // 频道探测并发
@@ -481,7 +508,7 @@ func (a *API) checkLiveSource(ctx context.Context, id string, persist bool) {
 		timeout = liveDefaultDoor
 	}
 	start := time.Now()
-	chans, code, err := fetchLivePlaylistCtx(ctx, ls.URL, ls.Name, time.Duration(timeout)*time.Second)
+	chans, code, err := fetchLivePlaylistCtx(ctx, ls.URL, ls.Name, time.Duration(timeout)*time.Second, a.allowLoopback())
 	latency := time.Since(start).Milliseconds()
 
 	res := store.LiveCheckResult{HTTPCode: code, LatencyMs: latency}
@@ -509,7 +536,7 @@ func (a *API) checkLiveSource(ctx context.Context, id string, persist bool) {
 	}
 
 	samples := pickLiveSamples(chans, liveSampleLimit)
-	alive := probeLiveChannels(ctx, samples)
+	alive := probeLiveChannels(ctx, samples, a.allowLoopback())
 	res.AliveCount = alive
 	res.SampleCount = len(samples)
 
@@ -529,13 +556,14 @@ func (a *API) checkLiveSource(ctx context.Context, id string, persist bool) {
 }
 
 // fetchLivePlaylistCtx 拉取并解析播放列表，返回 HTTP 状态码（0 = 没拿到响应）。
-func fetchLivePlaylistCtx(ctx context.Context, rawURL, sourceName string, timeout time.Duration) ([]live.Channel, int, error) {
+// allowLoopback=true 时放行本机回环地址（用户自建 TVBox 内置接口），内网网段仍拦截。
+func fetchLivePlaylistCtx(ctx context.Context, rawURL, sourceName string, timeout time.Duration, allowLoopback bool) ([]live.Channel, int, error) {
 	stem, hdr := live.SplitHeader(rawURL)
 	u, err := url.Parse(stem)
 	if err != nil || u.Host == "" || (u.Scheme != "http" && u.Scheme != "https") {
 		return nil, 0, errBadLiveURL
 	}
-	if err := checker.RejectPrivateHost(u.Hostname()); err != nil {
+	if err := checker.RejectPrivateHostOpt(u.Hostname(), allowLoopback); err != nil {
 		return nil, 0, err
 	}
 
@@ -599,7 +627,7 @@ func pickLiveSamples(chans []live.Channel, limit int) []live.Channel {
 }
 
 // probeLiveChannels 并发探测抽样频道，返回可播放的数量。
-func probeLiveChannels(ctx context.Context, chans []live.Channel) int {
+func probeLiveChannels(ctx context.Context, chans []live.Channel, allowLoopback bool) int {
 	if len(chans) == 0 {
 		return 0
 	}
@@ -615,7 +643,7 @@ func probeLiveChannels(ctx context.Context, chans []live.Channel) int {
 		sem <- struct{}{}
 		go func(raw string) {
 			defer func() { <-sem }()
-			done <- probeLiveChannel(ctx, raw)
+			done <- probeLiveChannel(ctx, raw, allowLoopback)
 		}(urls[0])
 	}
 	for range chans {
@@ -628,13 +656,13 @@ func probeLiveChannels(ctx context.Context, chans []live.Channel) int {
 
 // probeLiveChannel 判断一个频道地址能不能播：拉到 4KB 就够——
 // HLS 看有没有 #EXTM3U，FLV/MP4 直链看 Content-Type。读满就断，不会把直播流拖住。
-func probeLiveChannel(ctx context.Context, raw string) bool {
+func probeLiveChannel(ctx context.Context, raw string, allowLoopback bool) bool {
 	stem, hdr := live.SplitHeader(raw)
 	u, err := url.Parse(stem)
 	if err != nil || u.Host == "" || (u.Scheme != "http" && u.Scheme != "https") {
 		return false
 	}
-	if checker.RejectPrivateHost(u.Hostname()) != nil {
+	if checker.RejectPrivateHostOpt(u.Hostname(), allowLoopback) != nil {
 		return false
 	}
 	pctx, cancel := context.WithTimeout(ctx, liveProbeDoor)

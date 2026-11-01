@@ -30,6 +30,10 @@ const defaultUA = "okhttp/4.9.1"
 type Checker struct {
 	client  *http.Client
 	timeout time.Duration
+	// allowLoopback 允许访问本机回环地址（127.0.0.0/8、::1、localhost）。
+	// 场景：用户把 TVBox 自带的本地接口（http://127.0.0.1:9978/...）当源。
+	// 只放行回环，内网网段（10/172.16/192.168/169.254…）一律仍然拦截。
+	allowLoopback bool
 }
 
 func New(cfg *model.Config) *Checker {
@@ -60,8 +64,19 @@ func New(cfg *model.Config) *Checker {
 				return nil
 			},
 		},
-		timeout: timeout,
+		timeout:       timeout,
+		allowLoopback: cfg.AllowLoopbackFetch,
 	}
+}
+
+// GuardHost SSRF 校验入口：按配置决定是否放行本机回环地址。
+func (c *Checker) GuardHost(host string) error {
+	return RejectPrivateHostOpt(host, c.allowLoopback)
+}
+
+// AllowLoopback 当前是否放行本机回环地址（错误文案/提示用）
+func (c *Checker) AllowLoopback() bool {
+	return c.allowLoopback
 }
 
 // TimeoutSeconds 超时秒数（错误文案用）
@@ -96,7 +111,7 @@ func (c *Checker) FetchT(ctx context.Context, rawURL string, guardPrivate bool, 
 		return failResult(0, 0, "地址格式非法: "+err.Error()), nil
 	}
 	if guardPrivate {
-		if err := RejectPrivateHost(hostOf(u)); err != nil {
+		if err := c.GuardHost(hostOf(u)); err != nil {
 			return failResult(0, 0, "地址被拒绝: "+err.Error()), nil
 		}
 	}
@@ -162,6 +177,70 @@ func (c *Checker) FetchT(ctx context.Context, rawURL string, guardPrivate bool, 
 	return r, body
 }
 
+// FetchRaw 仅做 HTTP GET + SSRF 校验 + 体积上限，不解析内容（用于下载 git 归档等二进制）。
+// maxBytes<=0 时用默认 20MB；返回 body 与结果（StatusOK 表示成功）。
+func (c *Checker) FetchRaw(ctx context.Context, rawURL string, guardPrivate bool, maxBytes int64) (*Result, []byte) {
+	u, err := parser.Normalize(rawURL)
+	if err != nil {
+		return failResult(0, 0, "地址格式非法: "+err.Error()), nil
+	}
+	if guardPrivate {
+		if err := c.GuardHost(hostOf(u)); err != nil {
+			return failResult(0, 0, "地址被拒绝: "+err.Error()), nil
+		}
+	}
+	if maxBytes <= 0 {
+		maxBytes = maxBody
+	}
+	timeout := c.timeout
+	ctx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, u, nil)
+	if err != nil {
+		return failResult(0, 0, "构造请求失败: "+err.Error()), nil
+	}
+	req.Header.Set("User-Agent", defaultUA)
+	req.Header.Set("Accept", "*/*")
+	req.Header.Set("Connection", "close")
+
+	start := time.Now()
+	resp, err := c.client.Do(req)
+	latency := time.Since(start).Milliseconds()
+	if err != nil {
+		r := failResult(0, latency, classifyErr(err, int(timeout.Seconds())))
+		r.CheckedAt = time.Now()
+		return r, nil
+	}
+	defer resp.Body.Close()
+
+	body, err := io.ReadAll(io.LimitReader(resp.Body, maxBytes+1))
+	latency = time.Since(start).Milliseconds()
+	if err != nil {
+		r := failResult(resp.StatusCode, latency, "读取响应失败: "+err.Error())
+		r.CheckedAt = time.Now()
+		return r, nil
+	}
+	if len(body) > int(maxBytes) {
+		r := failResult(resp.StatusCode, latency, fmt.Sprintf("响应体超过 %dMB 限制", maxBytes>>20))
+		r.CheckedAt = time.Now()
+		return r, nil
+	}
+
+	r := &Result{HTTPCode: resp.StatusCode, LatencyMs: latency, Size: len(body), CheckedAt: time.Now()}
+	if resp.Request != nil && resp.Request.URL != nil {
+		r.FinalURL = resp.Request.URL.String()
+	}
+	if resp.StatusCode < 200 || resp.StatusCode > 299 {
+		r.Status = model.StatusFail
+		r.Msg = "HTTP " + strconv.Itoa(resp.StatusCode)
+		return r, body
+	}
+	r.Status = model.StatusOK
+	r.Msg = "OK"
+	return r, body
+}
+
 func failResult(code int, latency int64, msg string) *Result {
 	return &Result{Status: model.StatusFail, HTTPCode: code, LatencyMs: latency, Msg: msg}
 }
@@ -216,21 +295,52 @@ func classifyErr(err error, timeoutSec int) string {
 // RejectPrivateHost SSRF 防护：拒绝环回/内网/链路本地地址。
 // IP 字面量直接判定；域名解析后判定全部结果地址。
 func RejectPrivateHost(host string) error {
-	if strings.EqualFold(host, "localhost") || strings.HasSuffix(strings.ToLower(host), ".localhost") {
-		return fmt.Errorf("内网地址（localhost）")
+	return RejectPrivateHostOpt(host, false)
+}
+
+// RejectPrivateHostOpt 同 RejectPrivateHost，但 allowLoopback=true 时放行本机回环地址
+// （127.0.0.0/8、::1、localhost 及其子域）。
+//
+// 为什么单独放行回环：TVBox 客户端普遍自带本地 HTTP 服务（如 :9978），用户会直接把它
+// 的内置接口填成源。这类地址只在本机有意义，不属于「拿服务端当跳板探内网」的场景。
+// 但 10/172.16/192.168/169.254 等内网网段即使开了这个开关也始终拦截——开关只打开回环，
+// 不能顺手把整个内网一起打开。
+func RejectPrivateHostOpt(host string, allowLoopback bool) error {
+	h := strings.ToLower(strings.TrimSpace(host))
+	if h == "" {
+		return nil
 	}
-	if ip := net.ParseIP(host); ip != nil {
+	if h == "localhost" || strings.HasSuffix(h, ".localhost") {
+		if allowLoopback {
+			return nil
+		}
+		return errLoopback(host)
+	}
+	if ip := net.ParseIP(h); ip != nil {
+		if isLoopbackIP(ip) {
+			if allowLoopback {
+				return nil
+			}
+			return errLoopback(host)
+		}
 		if isPrivateIP(ip) {
 			return fmt.Errorf("内网地址（%s）", host)
 		}
 		return nil
 	}
-	ips, err := net.LookupIP(host)
+	ips, err := net.LookupIP(h)
 	if err != nil {
 		// 解析失败交给后续请求报真实错误
 		return nil
 	}
 	for _, ip := range ips {
+		if isLoopbackIP(ip) {
+			if !allowLoopback {
+				return fmt.Errorf("域名解析到本机回环地址（%s）；确需访问本机服务（如 TVBox 内置接口），"+
+					"请在「设置」打开「允许访问本机回环地址」", ip.String())
+			}
+			continue
+		}
 		if isPrivateIP(ip) {
 			return fmt.Errorf("域名解析到内网地址（%s）", ip.String())
 		}
@@ -238,10 +348,22 @@ func RejectPrivateHost(host string) error {
 	return nil
 }
 
+// errLoopback 回环被拦截时的文案：必须说清怎么开，否则用户只会看到「源用不了」
+func errLoopback(host string) error {
+	return fmt.Errorf("本机回环地址（%s）；确需访问本机服务（如 TVBox 内置接口），"+
+		"请在「设置」打开「允许访问本机回环地址」", host)
+}
+
+// isLoopbackIP 回环地址：127.0.0.0/8 与 ::1
+func isLoopbackIP(ip net.IP) bool {
+	return ip != nil && ip.IsLoopback()
+}
+
 func isPrivateIP(ip net.IP) bool {
+	// 回环段不在此列（由 isLoopbackIP 单独判定），这里只放内网/链路本地/保留段
 	privateRanges := []string{
-		"127.0.0.0/8", "10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16",
-		"169.254.0.0/16", "0.0.0.0/8", "100.64.0.0/10", "::1/128", "fc00::/7", "fe80::/10",
+		"10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16",
+		"169.254.0.0/16", "0.0.0.0/8", "100.64.0.0/10", "fc00::/7", "fe80::/10",
 	}
 	for _, cidr := range privateRanges {
 		if _, network, err := net.ParseCIDR(cidr); err == nil && network.Contains(ip) {

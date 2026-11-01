@@ -135,6 +135,7 @@ td.failnum { color: var(--fail); font-weight: 600; }
 .tag.fail { background: #fee2e2; color: #b91c1c; }
 /* 未进订阅 / 待处理：橙色比红色温和，这不是「坏了」而是「没生效」，别吓人 */
 .tag.warn { background: #fef3c7; color: #b45309; }
+.tag.scraped { background: #dcfce7; color: #15803d; }
 
 /* 关联源：直接列出父源名字（有多个就并排），不再显示「N 个源」 */
 td.parent-cell { max-width: 240px; overflow: hidden; }
@@ -195,6 +196,11 @@ textarea { width: 100%; resize: vertical; font-family: Consolas, monospace; }
   padding: 9px 12px; margin-bottom: 12px; font-size: 13px; flex-wrap: wrap;
 }
 .result-box { background: #f0fdf4; border: 1px solid #bbf7d0; border-radius: 8px; padding: 10px 14px; margin-top: 12px; font-size: 13px; }
+
+/* 自动刮削：卡片标题与弹窗底部操作区 */
+.card-title { font-size: 14px; font-weight: 700; margin-bottom: 10px; text-align: left; }
+.modal-ops { display: flex; justify-content: flex-end; gap: 8px; margin-top: 16px; }
+
 
 .dropzone {
   display: block; border: 2px dashed var(--line); border-radius: 10px; padding: 34px;
@@ -290,3 +296,9 @@ textarea { width: 100%; resize: vertical; font-family: Consolas, monospace; }
   .form-row > label { width: 90px; }
   .toolbar select { max-width: 110px; }
 }
+
+/* 自动刮削：可填入的地址类型说明 */
+.scrape-types { margin: 8px 0 0; padding-left: 20px; font-size: 13px; line-height: 1.75; color: var(--text); }
+.scrape-types li { margin: 3px 0; }
+.scrape-types li.muted { color: var(--muted); }
+.scrape-types code { background: #f1f5f9; border-radius: 5px; padding: 1px 6px; font-size: 12px; }

@@ -169,3 +169,43 @@ func TestConfigPutKeepsShowTVWhenOmitted(t *testing.T) {
 		t.Fatal("显式 showTv=false 应生效")
 	}
 }
+
+// TestConfigPutKeepsOptionalFields 同上的通用化：只改令牌的 PUT 不带
+// scrapeIntervalHours / allowLoopbackFetch，不能把定时刮削清成 0、
+// 也不能把「允许本机回环」静默关掉。
+func TestConfigPutKeepsOptionalFields(t *testing.T) {
+	e := newEnv(t)
+	cfg := e.st.Config()
+	cfg.ScrapeIntervalHours = 24
+	cfg.AllowLoopbackFetch = true
+	if err := e.st.UpdateConfig(cfg); err != nil {
+		t.Fatal(err)
+	}
+
+	// 模拟「只改令牌」的最小请求体（旧前端/脚本的真实形态）；改完令牌后后续请求要用新令牌
+	const newTok = "newtoken123"
+	body := `{"port":8080,"subPath":"/sub","checkIntervalMinutes":360,` +
+		`"checkTimeoutSeconds":10,"checkConcurrency":10,"token":"` + newTok + `"}`
+	if code, msg := e.do("PUT", "/api/config", e.token, body, "application/json"); code != http.StatusOK {
+		t.Fatalf("PUT 配置失败 %d %s", code, msg)
+	}
+	got := e.st.Config()
+	if got.ScrapeIntervalHours != 24 {
+		t.Fatalf("缺省 scrapeIntervalHours 不应清空，实际 %d", got.ScrapeIntervalHours)
+	}
+	if !got.AllowLoopbackFetch {
+		t.Fatal("缺省 allowLoopbackFetch 不应关闭")
+	}
+
+	// 显式传 false / 0 才生效
+	body = `{"port":8080,"subPath":"/sub","checkIntervalMinutes":360,` +
+		`"checkTimeoutSeconds":10,"checkConcurrency":10,` +
+		`"scrapeIntervalHours":0,"allowLoopbackFetch":false,"token":"` + newTok + `"}`
+	if code, msg := e.do("PUT", "/api/config", newTok, body, "application/json"); code != http.StatusOK {
+		t.Fatalf("PUT 配置失败 %d %s", code, msg)
+	}
+	got = e.st.Config()
+	if got.ScrapeIntervalHours != 0 || got.AllowLoopbackFetch {
+		t.Fatalf("显式关闭应生效，实际 %+v", got)
+	}
+}

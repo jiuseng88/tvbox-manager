@@ -2,8 +2,12 @@ package api
 
 import (
 	"context"
+	"encoding/json"
 	"net/http"
+	"os"
+	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -20,13 +24,19 @@ import (
 // → 合并去重后一次性下发。结果缓存 tvLiveTTL，避免每次进页面都去打上游。
 
 const (
-	tvLiveTTL        = 10 * time.Minute // 频道表缓存；直播源变动不频繁，10 分钟足够
-	tvLiveMaxSources = 50               // 单次聚合的直播源上限，与 parser 提取上限一致
+	tvLiveTTL        = 10 * time.Minute // 频道表热缓存；命中即秒回
+	tvLiveStaleTTL   = 24 * time.Hour  // 落盘缓存作为「降级展示」的有效期：超过热缓存窗口但在此之内，
+	                                   // 直接返回旧数据（秒开），后台异步刷新。超过则视为冷启动实时拉取
+	tvLiveMaxSources = 200              // 单次聚合的直播源上限。原为 50，但直播间常有几十上百条
+	                                    // （刮削批量导入 + TVBox 聚合），超出的源会整条不参与聚合，
+	                                    // 表现为「管理端有条目、直播页却完全没有」
 	tvLiveWorkers    = 8                // 并发拉取数：再高容易触发上游限流
 	tvLiveDoor       = 12 * time.Second // 单个直播源拉取超时
 	tvLiveMaxBody    = 8 << 20          // 播放列表体上限；实测千频道 txt 约 100KB，8MB 极宽松
-	tvLiveMaxChans   = 5000             // 频道总数上限，防止异常大文件把响应撑爆
-	tvLiveFetchDoor  = 8 * time.Second
+	tvLiveMaxChans = 20000 // 频道总数上限。原为 5000，实测几十个源合计已过万，
+	// 截断后排在后面的央视/卫视类源会被整条砍光，故放宽到 2 万；
+	// 截断前先按分组权重排序，保证央视/卫视优先保留
+	tvLiveFetchDoor = 8 * time.Second
 )
 
 // tvLiveSourceStat 单个直播源的拉取结果，用于前端提示「哪个源没拉到」
@@ -48,9 +58,12 @@ type tvLivePayload struct {
 }
 
 var (
-	tvLiveMu    sync.Mutex
-	tvLiveAt    time.Time
-	tvLiveCache *tvLivePayload
+	tvLiveMu      sync.Mutex // 守护下面的缓存指针与时间
+	tvLiveAt      time.Time
+	tvLiveCache   *tvLivePayload
+	tvLiveBuildMu sync.Mutex // 串行化「真去上游拉取」的构建：并发请求只一个真拉
+	// tvLiveRefreshing 已有后台刷新在排队/进行，防止 invalidate / 预热重复触发。
+	tvLiveRefreshing bool
 )
 
 var tvLiveClient = &http.Client{
@@ -62,15 +75,58 @@ func (a *API) handleTVLive(w http.ResponseWriter, r *http.Request) {
 	ok(w, a.tvLive(r.Context()))
 }
 
-// tvLive 聚合频道表。串行化整段拉取：冷启动时多个并发请求只会有一个真去拉上游，
-// 其余在锁上等结果，不会把 50 个源并发翻好几倍。
+// tvLive 聚合频道表。三级缓存：内存热缓存(10min) → 落盘降级(24h 秒回+后台刷新) → 冷拉上游。
+// 冷启动的并发请求由 tvLiveBuildMu 串行化，只会有一个真去拉上游，其余等结果复用。
 func (a *API) tvLive(ctx context.Context) *tvLivePayload {
+	// 1) 内存热缓存：命中即秒回
 	tvLiveMu.Lock()
-	defer tvLiveMu.Unlock()
 	if tvLiveCache != nil && time.Since(tvLiveAt) < tvLiveTTL {
-		return tvLiveCache
+		p := tvLiveCache
+		tvLiveMu.Unlock()
+		return p
+	}
+	tvLiveMu.Unlock()
+
+	// 2) 落盘降级：24h 内直接返回旧数据（秒开）；超过热窗口则后台异步刷新
+	if a.LiveCacheFile != "" {
+		if p, ok := loadLiveCacheFile(a.LiveCacheFile); ok && time.Since(p.At) < tvLiveStaleTTL {
+			stale := time.Since(p.At) > tvLiveTTL
+			tvLiveMu.Lock()
+			tvLiveCache = p
+			tvLiveAt = time.Now() // 视为刚填充：10min 内热路径直接命中内存，不再读文件
+			tvLiveMu.Unlock()
+			if stale {
+				a.backgroundRefreshLive()
+			}
+			return p
+		}
 	}
 
+	// 3) 冷启动：串行化构建，拉完落盘，下次秒回
+	tvLiveBuildMu.Lock()
+	defer tvLiveBuildMu.Unlock()
+	// 排队期间别人可能已经建好，double-check 直接复用
+	tvLiveMu.Lock()
+	if tvLiveCache != nil && time.Since(tvLiveAt) < tvLiveTTL {
+		p := tvLiveCache
+		tvLiveMu.Unlock()
+		return p
+	}
+	tvLiveMu.Unlock()
+
+	p := a.buildLivePayload(ctx)
+	tvLiveMu.Lock()
+	tvLiveCache = p
+	tvLiveAt = time.Now()
+	tvLiveMu.Unlock()
+	if a.LiveCacheFile != "" {
+		saveLiveCacheFile(a.LiveCacheFile, p)
+	}
+	return p
+}
+
+// buildLivePayload 真正去上游拉取并合并排序，返回频道表。耗时操作，调用方负责缓存。
+func (a *API) buildLivePayload(ctx context.Context) *tvLivePayload {
 	sites := a.tvLiveSites(ctx)
 	payload := &tvLivePayload{At: time.Now(), Sources: make([]tvLiveSourceStat, 0, len(sites))}
 
@@ -85,6 +141,7 @@ func (a *API) tvLive(ctx context.Context) *tvLivePayload {
 		results[i].idx = i
 	}
 	sem := make(chan struct{}, tvLiveWorkers)
+	allowLB := a.allowLoopback()
 	var wg sync.WaitGroup
 	for i, it := range sites {
 		wg.Add(1)
@@ -92,7 +149,7 @@ func (a *API) tvLive(ctx context.Context) *tvLivePayload {
 			defer wg.Done()
 			sem <- struct{}{}
 			defer func() { <-sem }()
-			chans, _, err := fetchLivePlaylistCtx(ctx, it.URL, it.Name, tvLiveDoor)
+			chans, _, err := fetchLivePlaylistCtx(ctx, it.URL, it.Name, tvLiveDoor, allowLB)
 			results[i].channels = chans
 			results[i].err = err
 		}(i, it)
@@ -113,6 +170,16 @@ func (a *API) tvLive(ctx context.Context) *tvLivePayload {
 	}
 
 	merged := live.Merge(all)
+	// 只保留有线路的频道：没有 urls 的频道点开也播不了，出现在列表/分组/来源筛选里
+	// 只会干扰选择。
+	merged = filterPlayable(merged)
+
+	// 先按分组权重稳定排序，再做数量截断。否则截断按「源顺序」进行，排在后面的
+	// 央视/卫视类源会被前面动辄上千条的平台源（B站/斗鱼/YY 一起看）整体挤掉，
+	// 表现就是「加了几十个源，列表里全是平台直播，找不到央视」。
+	sort.SliceStable(merged, func(i, j int) bool {
+		return tvLiveGroupRank(merged[i].Group) < tvLiveGroupRank(merged[j].Group)
+	})
 	if len(merged) > tvLiveMaxChans {
 		merged = merged[:tvLiveMaxChans]
 	}
@@ -142,29 +209,117 @@ func (a *API) tvLive(ctx context.Context) *tvLivePayload {
 	payload.Channels = merged
 	payload.Groups = groups
 	payload.Count = len(merged)
-	tvLiveCache = payload
-	tvLiveAt = time.Now()
 	return payload
 }
 
-// tvLiveSites 收集直播源：优先用探活时已入库的 Detail.LiveSites，
+// hasPlayableLine 频道是否有至少一条非空线路。Merge 只保证 URL 非空才追加，
+// 但来源数据本身可能只有空串，这里再兜一层，避免把「点开必失败」的频道下发出去。
+func hasPlayableLine(ch live.Channel) bool {
+	for _, u := range ch.URLs {
+		if strings.TrimSpace(u) != "" {
+			return true
+		}
+	}
+	return false
+}
+
+// filterPlayable 剔除没有可播线路的频道。原地过滤（复用底层数组），不额外分配。
+func filterPlayable(chs []live.Channel) []live.Channel {
+	if len(chs) == 0 {
+		return chs
+	}
+	kept := chs[:0]
+	for _, ch := range chs {
+		if hasPlayableLine(ch) {
+			kept = append(kept, ch)
+		}
+	}
+	return kept
+}
+
+// handleTVLiveRefresh 强制重建频道表（忽略缓存），供直播页「刷新频道」按钮使用。
+// 与 GET /tvapi/live 同构返回，前端拿到就能直接重渲染。冷启动/多源并发时耗时
+// 可能十几秒，前端按钮侧有 loading 态兜住。
+func (a *API) handleTVLiveRefresh(w http.ResponseWriter, r *http.Request) {
+	a.refreshLiveCache()
+	// 刷新后内存缓存刚写入，tvLive 必然命中热缓存，不会二次打上游
+	ok(w, a.tvLive(r.Context()))
+}
+
+// refreshLiveCache 强制重建频道表（忽略内存热缓存），实时拉取后更新内存并落盘。
+// 由 tvLiveBuildMu 串行化：与冷启动构建冲突时排队复用，不会重复打上游。
+func (a *API) refreshLiveCache() {
+	tvLiveBuildMu.Lock()
+	defer tvLiveBuildMu.Unlock()
+
+	p := a.buildLivePayload(context.Background())
+	tvLiveMu.Lock()
+	tvLiveCache = p
+	tvLiveAt = time.Now()
+	tvLiveMu.Unlock()
+	if a.LiveCacheFile != "" {
+		saveLiveCacheFile(a.LiveCacheFile, p)
+	}
+}
+
+// backgroundRefreshLive 后台异步刷新频道表（不阻塞当前请求）。
+// 同一时刻最多排队一个刷新，避免 invalidate / 预热反复触发把上游打爆。
+func (a *API) backgroundRefreshLive() {
+	tvLiveMu.Lock()
+	if tvLiveRefreshing {
+		tvLiveMu.Unlock()
+		return
+	}
+	tvLiveRefreshing = true
+	tvLiveMu.Unlock()
+	go func() {
+		defer func() {
+			tvLiveMu.Lock()
+			tvLiveRefreshing = false
+			tvLiveMu.Unlock()
+		}()
+		a.refreshLiveCache()
+	}()
+}
+
+// PreloadLiveChannels 服务启动后调用：后台预热频道表（填充内存+落盘），
+// 让用户还没点「直播」时缓存就已经就绪，首次进入秒开。
+func (a *API) PreloadLiveChannels() {
+	a.backgroundRefreshLive()
+}
+
+// tvLiveSites 收集直播源：优先用独立维护的直播源表（管理端权威来源），
 // 一条都没有时（旧数据还没重检）现场拉几个单仓补一遍，只读不写库。
+//
+// 返回的 Name 保证**唯一**：直播源常有多条同名条目（不同 URL，比如分别对应
+// 央视/卫视两份清单，或批量刮削导入时都叫「自动同步的源」）。频道只带来源名，
+// 名字重复会让前端下拉把它们并成一项、筛选时混作一坨，所以这里重名追加 #2、#3。
 func (a *API) tvLiveSites(ctx context.Context) []model.LiveSiteEntry {
 	// 首选独立维护的直播源表：管理端可增删改、可停用，是唯一权威来源
 	if list := a.st.EnabledLiveSources(); len(list) > 0 {
+		used := make(map[string]bool, len(list))
 		out := make([]model.LiveSiteEntry, 0, len(list))
 		for _, ls := range list {
 			if len(out) >= tvLiveMaxSources {
 				break
 			}
-			out = append(out, model.LiveSiteEntry{Name: ls.Name, URL: ls.URL, Group: ls.Group})
+			name := strings.TrimSpace(ls.Name)
+			if name == "" {
+				name = "未命名源"
+			}
+			out = append(out, model.LiveSiteEntry{
+				Name:  uniqueSourceName(name, used),
+				URL:   ls.URL,
+				Group: ls.Group,
+			})
 		}
 		return out
 	}
 
 	// 表为空（刚升级、还没跑过一轮探活同步）→ 退回从各源的 Detail.LiveSites 现取，
 	// 保证升级后第一屏就有内容，不用等下次探活。
-	seen := make(map[string]bool, 32)
+	seenURL := make(map[string]bool, 32)
+	used := make(map[string]bool, 32)
 	out := make([]model.LiveSiteEntry, 0, 32)
 
 	add := func(list []model.LiveSiteEntry) {
@@ -172,11 +327,19 @@ func (a *API) tvLiveSites(ctx context.Context) []model.LiveSiteEntry {
 			if len(out) >= tvLiveMaxSources {
 				return
 			}
-			if it.URL == "" || seen[it.URL] {
+			if it.URL == "" || seenURL[it.URL] {
 				continue
 			}
-			seen[it.URL] = true
-			out = append(out, it)
+			seenURL[it.URL] = true
+			name := strings.TrimSpace(it.Name)
+			if name == "" {
+				name = "未命名源"
+			}
+			out = append(out, model.LiveSiteEntry{
+				Name:  uniqueSourceName(name, used),
+				URL:   it.URL,
+				Group: it.Group,
+			})
 		}
 	}
 
@@ -215,13 +378,63 @@ func (a *API) tvLiveSites(ctx context.Context) []model.LiveSiteEntry {
 	return out
 }
 
+// uniqueSourceName 生成集合内唯一的显示名：首次出现保持原名，重名依次追加
+// #2、#3…；若用户本来就叫「xx #2」，继续往后找到真正不冲突的为止。
+func uniqueSourceName(base string, used map[string]bool) string {
+	if !used[base] {
+		used[base] = true
+		return base
+	}
+	for i := 2; ; i++ {
+		c := base + " #" + strconv.Itoa(i)
+		if !used[c] {
+			used[c] = true
+			return c
+		}
+	}
+}
+
 // invalidateLiveCache 直播源增删改 / 启停 / 检测完成后立即让频道表缓存失效，
-// 否则用户改完还得等 10 分钟才看到变化。
+// 否则用户改完还得等 10 分钟才看到变化。失效后立刻后台重建（落盘 24h 内的旧数据仍可用，
+// 下次进页面秒回旧列表，刷新完成后换成新数据），避免缓存真空期让用户冷拉上游。
 func (a *API) invalidateLiveCache() {
 	tvLiveMu.Lock()
 	tvLiveCache = nil
 	tvLiveAt = time.Time{}
 	tvLiveMu.Unlock()
+	a.backgroundRefreshLive()
+}
+
+// loadLiveCacheFile 读取落盘的聚合频道表。失败或为空返回 (nil, false)。
+func loadLiveCacheFile(path string) (*tvLivePayload, bool) {
+	b, err := os.ReadFile(path)
+	if err != nil {
+		return nil, false
+	}
+	var p tvLivePayload
+	if err := json.Unmarshal(b, &p); err != nil {
+		return nil, false
+	}
+	if p.At.IsZero() || len(p.Channels) == 0 {
+		return nil, false
+	}
+	return &p, true
+}
+
+// saveLiveCacheFile 原子写落盘聚合频道表（临时文件 + rename）。
+func saveLiveCacheFile(path string, p *tvLivePayload) {
+	b, err := json.Marshal(p)
+	if err != nil {
+		return
+	}
+	if dir := filepath.Dir(path); dir != "" {
+		_ = os.MkdirAll(dir, 0o755)
+	}
+	tmp := path + ".tmp"
+	if err := os.WriteFile(tmp, b, 0o644); err != nil {
+		return
+	}
+	_ = os.Rename(tmp, path)
 }
 
 type httpStatusError struct{ code int }

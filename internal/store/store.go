@@ -254,6 +254,8 @@ func applyEnv(cfg *model.Config, present map[string]bool) {
 	addb("INSECURE_TLS", "insecureSkipVerify", func(c *model.Config, b bool) { c.InsecureSkipVerify = b })
 	addb("CHECK_SUB_URLS", "checkSubUrls", func(c *model.Config, b bool) { c.CheckSubURLs = b })
 	addb("SHOW_TV", "showTv", func(c *model.Config, b bool) { c.ShowTV = b })
+	// 允许访问本机回环地址（本地 TVBox 内置接口这类源）；内网网段不受影响，始终拦截
+	addb("ALLOW_LOOPBACK_FETCH", "allowLoopbackFetch", func(c *model.Config, b bool) { c.AllowLoopbackFetch = b })
 
 	if len(bindings) == 0 {
 		return
